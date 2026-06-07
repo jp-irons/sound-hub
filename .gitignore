@@ -1,0 +1,31 @@
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Python / backend
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Local data / runtime artifacts
+*.db
+*.sqlite
+*.sqlite3
+
+# Env / secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
