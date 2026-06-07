@@ -11,13 +11,7 @@ log = logging.getLogger("acoustic_base.routes")
 router = APIRouter()
 
 
-def _to_view(node: dict) -> NodeView:
-    live = registry.get_live_status(node["id"])
-    derived = status_mapper.map_status(
-        role=node["role"],
-        reachable=live["reachable"],
-        raw_status=live["raw_status"],
-    )
+def _build_view(node: dict, live: dict, derived: dict) -> NodeView:
     return NodeView(
         id=node["id"],
         hostname=node["hostname"],
@@ -40,6 +34,30 @@ def _to_view(node: dict) -> NodeView:
     )
 
 
+async def _mapped_nodes() -> list[tuple[dict, dict, dict]]:
+    """Map every registered node's raw status, then run the cross-node
+    derivation pass (projecting leaf nodes' relative offsets onto the
+    primary's absolute position — see status_mapper.derive_relative_positions).
+
+    This has to happen across the whole set at once: deriving a leaf node's
+    lat/lon requires knowing the primary's surveyed/estimated position, which
+    isn't available when mapping a single node in isolation.
+    """
+    nodes = await registry.list_nodes()
+    triples = []
+    for node in nodes:
+        live = registry.get_live_status(node["id"])
+        derived = status_mapper.map_status(
+            role=node["role"],
+            reachable=live["reachable"],
+            raw_status=live["raw_status"],
+        )
+        triples.append((node, live, derived))
+
+    status_mapper.derive_relative_positions([derived for _, _, derived in triples])
+    return triples
+
+
 @router.get("/health")
 async def health():
     return {"status": "ok"}
@@ -47,16 +65,15 @@ async def health():
 
 @router.get("/nodes", response_model=list[NodeView])
 async def list_nodes():
-    nodes = await registry.list_nodes()
-    return [_to_view(n) for n in nodes]
+    return [_build_view(node, live, derived) for node, live, derived in await _mapped_nodes()]
 
 
 @router.get("/nodes/{node_id}", response_model=NodeView)
 async def get_node(node_id: str):
-    node = await registry.get_node(node_id)
-    if node is None:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return _to_view(node)
+    for node, live, derived in await _mapped_nodes():
+        if node["id"] == node_id:
+            return _build_view(node, live, derived)
+    raise HTTPException(status_code=404, detail="Node not found")
 
 
 @router.post("/nodes/manual", response_model=NodeView)
@@ -91,8 +108,10 @@ async def add_manual_node(req: ManualNodeRequest):
                                discovery_method="manual")
     registry.update_live_status(node_id, reachable=True, raw_status=status_json)
 
-    node = await registry.get_node(node_id)
-    return _to_view(node)
+    for n, live, derived in await _mapped_nodes():
+        if n["id"] == node_id:
+            return _build_view(n, live, derived)
+    raise HTTPException(status_code=500, detail="Node registered but not found in mapped set")
 
 
 @router.delete("/nodes/{node_id}", status_code=204)

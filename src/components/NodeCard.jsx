@@ -154,6 +154,15 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'rgba(219,68,55,0.15)', padding: '1px 5px', borderRadius: 3,
           }}>UNREACHABLE</span>
         )}
+        {node.flags?.includes('POSITION_DERIVED') && (
+          <span
+            title="Map position calculated from relative E/N/Alt offset, not surveyed/GPS-determined"
+            style={{
+              fontSize: 10, color: 'var(--blue)',
+              background: 'var(--blue-dim)', padding: '1px 5px', borderRadius: 3,
+            }}
+          >POS DERIVED</span>
+        )}
         {!node.flags?.length && node.audio?.lastTriggerAt && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             Triggered {relativeTime(node.audio.lastTriggerAt)}

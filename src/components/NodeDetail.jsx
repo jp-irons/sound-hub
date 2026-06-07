@@ -101,15 +101,18 @@ export default function NodeDetail({ node, onClose }) {
         >×</button>
       </div>
 
-      {/* Flags */}
-      {node.flags?.length > 0 && (
+      {/* Flags banner — POSITION_DERIVED is deliberately excluded here:
+          it's already explained inline in the Position section below
+          (right next to the lat/lon it qualifies), so repeating it up
+          here is redundant noise rather than useful warning. */}
+      {node.flags?.filter(f => f !== 'POSITION_DERIVED').length > 0 && (
         <div style={{
           padding: '8px 14px',
           background: 'var(--yellow-dim)',
           borderBottom: '1px solid rgba(210,153,34,0.3)',
           display: 'flex', flexDirection: 'column', gap: 4,
         }}>
-          {node.flags.map(flag => (
+          {node.flags.filter(flag => flag !== 'POSITION_DERIVED').map(flag => (
             <div key={flag} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ color: 'var(--yellow)', fontSize: 12 }}>⚠</span>
               <span style={{ color: 'var(--yellow)', fontSize: 12 }}>
@@ -135,38 +138,60 @@ export default function NodeDetail({ node, onClose }) {
                   {relPos.eM.toFixed(2)}m · {relPos.nM.toFixed(2)}m · {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(2)}m
                 </span>
               </div>
-              <div className="kv">
-                <span className="kv-key">Lat / Lon / Alt</span>
-                <span className="kv-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                  {fmtFix(node.gps?.origin ?? node.gps?.centroid ?? node.latLon)}
-                </span>
-              </div>
+              {/* Lat/Lon/Alt only applies to nodes with a GPS-derived
+                  absolute position (currently just the primary). Leaf
+                  nodes are positioned purely via their relative E/N/Alt
+                  offset from the primary — they have no lat/lon of their
+                  own to show, so we skip the row rather than render "—". */}
+              {(node.gps?.origin || node.gps?.centroid || node.latLon) && (
+                <>
+                  <div className="kv">
+                    <span className="kv-key">Lat / Lon / Alt</span>
+                    <span className="kv-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                      {fmtFix(node.gps?.origin ?? node.gps?.centroid ?? node.latLon)}
+                    </span>
+                  </div>
+                  {/* Three distinct provenances for this lat/lon — picking
+                      the wrong explanation here is actively misleading
+                      (e.g. telling a GPS-less leaf node its position came
+                      from "the GPS centroid average"), so check explicitly
+                      rather than assuming "not origin" means "GPS centroid". */}
+                  {node.gps?.origin ? (
+                    <div style={{
+                      marginTop: 4, padding: '5px 8px',
+                      background: 'var(--green-dim)', borderRadius: 4,
+                      fontSize: 11, color: 'var(--green)',
+                    }}>
+                      Lat/lon/alt is the surveyed position configured on this node
+                    </div>
+                  ) : node.gps?.centroid ? (
+                    <div style={{
+                      marginTop: 4, padding: '5px 8px',
+                      background: 'var(--blue-dim)', borderRadius: 4,
+                      fontSize: 11, color: 'var(--blue)',
+                    }}>
+                      Lat/lon/alt is the GPS centroid average — no surveyed origin is configured on this node
+                    </div>
+                  ) : node.flags?.includes('POSITION_DERIVED') ? (
+                    <div style={{
+                      marginTop: 4, padding: '5px 8px',
+                      background: 'var(--blue-dim)', borderRadius: 4,
+                      fontSize: 11, color: 'var(--blue)',
+                    }}>
+                      Lat/lon/alt is calculated from this node's relative E/N/Alt offset to the primary's surveyed position — not an independent GPS fix
+                    </div>
+                  ) : null}
+                </>
+              )}
+              {/* "Surveyed" reflects whether this node's *position* (E/N/Alt
+                  relative to the primary) has been established — true for
+                  both the primary (via its GPS origin survey) and leaf
+                  nodes (via configured/measured offsets). This is distinct
+                  from whether we also have an absolute lat/lon for it. */}
               <div className="kv">
                 <span className="kv-key">Status</span>
-                <span className={`kv-val ${node.gps?.origin ? 'good' : 'warn'}`}>
-                  {node.gps?.origin ? 'Surveyed' : 'Estimated'}
-                </span>
+                <span className="kv-val good">Surveyed</span>
               </div>
-              {node.gps?.origin ? (
-                <div style={{
-                  marginTop: 4, padding: '5px 8px',
-                  background: 'var(--green-dim)', borderRadius: 4,
-                  fontSize: 11, color: 'var(--green)',
-                }}>
-                  Lat/lon/alt is the surveyed position configured on this node
-                </div>
-              ) : (
-                /* No surveyed origin reported (non-primary node, or not yet
-                   configured) — fall back to the GPS centroid (long-run
-                   average), the most stable absolute estimate available. */
-                <div style={{
-                  marginTop: 4, padding: '5px 8px',
-                  background: 'var(--blue-dim)', borderRadius: 4,
-                  fontSize: 11, color: 'var(--blue)',
-                }}>
-                  Lat/lon/alt is the GPS centroid average — no surveyed position is configured on this node
-                </div>
-              )}
             </>
           ) : (
             <div className="kv">

@@ -26,6 +26,24 @@ def _node_info(raw: dict) -> dict:
     return raw.get("node") or {}
 
 
+def _role(raw_role: Optional[str]) -> str:
+    """Normalise the firmware's role vocabulary onto the UI's.
+
+    Firmware reports `Role::Primary` / `Role::Node` (serialised e.g. as
+    "primary" / "node"). The frontend (NodeSidebar grouping, badge CSS —
+    see badge-primary/badge-leaf in index.css) was built around "PRIMARY"
+    / "LEAF". Without this mapping a secondary node's role normalises to
+    "NODE", which matches neither bucket — it's counted in the online
+    total but rendered in neither sidebar section. Anything that isn't
+    primary is a leaf in the UI's two-role architecture.
+    """
+    if (raw_role or "").strip().upper() == "PRIMARY":
+        return "PRIMARY"
+    if not raw_role:
+        return "UNKNOWN"
+    return "LEAF"
+
+
 def _position(raw: dict) -> tuple[Optional[dict], bool]:
     info = _node_info(raw)
     e, n, alt = info.get("posE"), info.get("posN"), info.get("posAlt")
@@ -164,6 +182,55 @@ def _status(reachable: bool, flags: list[str]) -> str:
     return "online"
 
 
+# Brisbane-latitude (~ -27.5°) flat-earth scale factors — the same ones the
+# firmware uses for its EMA divergence (NEU) calc. Fine for projecting
+# offsets at the <1km scale of this property; would need a proper geodesic
+# if the array ever spans enough latitude for the approximation to drift.
+_M_PER_DEG_LAT = 111_320.0
+_M_PER_DEG_LON = 98_740.0
+
+
+def _offset_to_latlon(origin: dict, e_m: float, n_m: float) -> dict:
+    """Project a local-tangent-plane E/N offset (metres) onto an absolute
+    lat/lon, treating `origin` as the tangent point."""
+    return {
+        "lat": origin["lat"] + (n_m / _M_PER_DEG_LAT),
+        "lon": origin["lon"] + (e_m / _M_PER_DEG_LON),
+    }
+
+
+def derive_relative_positions(mapped: list[dict]) -> None:
+    """Fill in `lat_lon` for nodes that are positioned only via a relative
+    E/N/Alt offset from the primary, by projecting that offset onto the
+    primary's absolute position. Mutates the mapped dicts in place.
+
+    Why: only the primary reports GPS — leaf nodes have no `lat_lon` of
+    their own, so `MapView` (which only plots nodes with `lat_lon`) can't
+    place them even though their position is known relative to the primary.
+    This derives a plottable absolute position for them.
+
+    This is explicitly a *derived* position, not a surveyed one — we tag it
+    with the `POSITION_DERIVED` flag so the UI can (later) distinguish
+    "surveyed/GPS-determined" from "calculated from relative offset" rather
+    than implying the same precision/provenance for both.
+    """
+    origin = None
+    for m in mapped:
+        if m.get("role") == "PRIMARY":
+            gps = m.get("gps") or {}
+            origin = gps.get("origin") or gps.get("centroid") or m.get("lat_lon")
+            break
+    if not origin:
+        return
+
+    for m in mapped:
+        if m.get("role") == "PRIMARY" or m.get("lat_lon") or not m.get("position_relative"):
+            continue
+        rel = m["position_relative"]
+        m["lat_lon"] = _offset_to_latlon(origin, rel["eM"], rel["nM"])
+        m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
+
+
 def map_status(role: str, reachable: bool, raw_status: Optional[dict]) -> dict:
     """Build the set of derived/display fields the frontend expects.
 
@@ -207,7 +274,7 @@ def map_status(role: str, reachable: bool, raw_status: Optional[dict]) -> dict:
         "status": _status(reachable, flags),
         # Prefer the role the node itself reports — more authoritative than
         # whatever the registry guessed at discovery time.
-        "role": (info.get("role") or role or "unknown").upper(),
+        "role": _role(info.get("role") or role),
         "lat_lon": _lat_lon(raw_status),
         "position_relative": position_relative,
         "position_known": position_known,
