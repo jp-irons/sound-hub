@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import NodeConfigModal from './NodeConfigModal.jsx'
 
 function relativeTime(isoString) {
   if (!isoString) return '—'
@@ -58,8 +59,9 @@ function bufferClass(f) {
   return 'ok'
 }
 
-export default function NodeDetail({ node, onClose }) {
+export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure }) {
   const [, setTick] = useState(0)
+  const [configOpen, setConfigOpen] = useState(false)
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
     return () => clearInterval(t)
@@ -86,7 +88,7 @@ export default function NodeDetail({ node, onClose }) {
         <div className={`status-dot ${node.status}`} />
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>{node.hostname}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 1 }}>
             {node.ipAddress ?? '—'} · fw {node.firmwareVersion ?? '—'}
           </div>
         </div>
@@ -183,14 +185,21 @@ export default function NodeDetail({ node, onClose }) {
                   ) : null}
                 </>
               )}
-              {/* "Surveyed" reflects whether this node's *position* (E/N/Alt
-                  relative to the primary) has been established — true for
-                  both the primary (via its GPS origin survey) and leaf
-                  nodes (via configured/measured offsets). This is distinct
-                  from whether we also have an absolute lat/lon for it. */}
+              {/* This reflects the operator-set provenance flag
+                  (`positionStatus`): "Surveyed" means the operator has
+                  confirmed this E/N/Alt as ground truth — a fixed anchor
+                  the solver/calibration won't auto-correct. "Estimated"
+                  means it's still provisional and subject to refinement.
+                  This is independent of whether the position is *known*
+                  (handled by the relPos branch here) — a known position
+                  can still be only an estimate. */}
               <div className="kv">
                 <span className="kv-key">Status</span>
-                <span className="kv-val good">Surveyed</span>
+                {node.positionStatus === 'surveyed' ? (
+                  <span className="kv-val good">Surveyed</span>
+                ) : (
+                  <span className="kv-val" style={{ color: 'var(--blue)' }}>Estimated</span>
+                )}
               </div>
             </>
           ) : (
@@ -386,6 +395,94 @@ export default function NodeDetail({ node, onClose }) {
         borderTop: '1px solid var(--border)',
         display: 'flex', flexDirection: 'column', gap: 7,
       }}>
+        {/* Admission controls — context-sensitive on approval_status.
+            Pending: needs an admit/decline decision. Approved: can be
+            declined (e.g. decommissioning) or removed outright. Rejected:
+            can be reversed (re-approved) or removed outright. Remove is
+            irreversible (DELETE), so it always asks for confirmation. */}
+        {node.approvalStatus === 'pending' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div style={{ display: 'flex', gap: 7 }}>
+              <button
+                className="btn btn-primary"
+                style={{ flex: 1 }}
+                onClick={() => onApprove?.(node.id)}
+                title="Admit this node into the active array — it will be polled, mapped, and included in TDOA"
+              >
+                Approve
+              </button>
+              <button
+                className="btn"
+                style={{ flex: 1, borderColor: 'var(--red)', color: 'var(--red)' }}
+                onClick={() => onReject?.(node.id)}
+                title="Decline this node — keeps it out of the active array (reversible later)"
+              >
+                Reject
+              </button>
+            </div>
+            <button
+              className="btn"
+              style={{ width: '100%' }}
+              onClick={() => {
+                if (window.confirm(`Remove ${node.hostname} permanently? This cannot be undone — the node will need to be re-discovered from scratch.`)) {
+                  onRemove?.(node.id)
+                }
+              }}
+              title="Permanently delete this node from the registry — skips the reject step"
+            >
+              Remove
+            </button>
+          </div>
+        )}
+        {node.approvalStatus === 'approved' && (
+          <div style={{ display: 'flex', gap: 7 }}>
+            <button
+              className="btn"
+              style={{ flex: 1, borderColor: 'var(--red)', color: 'var(--red)' }}
+              onClick={() => onReject?.(node.id)}
+              title="Decline this node — pulls it out of polling/map/TDOA (reversible later)"
+            >
+              Reject
+            </button>
+            <button
+              className="btn"
+              style={{ flex: 1 }}
+              onClick={() => {
+                if (window.confirm(`Remove ${node.hostname} permanently? This cannot be undone — the node will need to be re-discovered from scratch.`)) {
+                  onRemove?.(node.id)
+                }
+              }}
+              title="Permanently delete this node from the registry"
+            >
+              Remove
+            </button>
+          </div>
+        )}
+        {node.approvalStatus === 'rejected' && (
+          <div style={{ display: 'flex', gap: 7 }}>
+            <button
+              className="btn btn-primary"
+              style={{ flex: 1 }}
+              onClick={() => onApprove?.(node.id)}
+              title="Reverse the rejection — admit this node into the active array"
+            >
+              Re-approve
+            </button>
+            <button
+              className="btn"
+              style={{ flex: 1 }}
+              onClick={() => {
+                if (window.confirm(`Remove ${node.hostname} permanently? This cannot be undone — the node will need to be re-discovered from scratch.`)) {
+                  onRemove?.(node.id)
+                }
+              }}
+              title="Permanently delete this node from the registry"
+            >
+              Remove
+            </button>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 7 }}>
           <button
             className="btn btn-primary"
@@ -408,10 +505,26 @@ export default function NodeDetail({ node, onClose }) {
             Begin TOF Calibration
           </button>
         )}
-        <button className="btn" style={{ width: '100%' }} disabled title="Not yet implemented">
+        <button
+          className="btn"
+          style={{ width: '100%' }}
+          onClick={() => setConfigOpen(true)}
+          title="Edit this node's role, position, and origin settings"
+        >
           Configure
         </button>
       </div>
+
+      {configOpen && (
+        <NodeConfigModal
+          node={node}
+          onClose={() => setConfigOpen(false)}
+          onSubmit={async (patch) => {
+            await onConfigure?.(node.id, patch)
+            setConfigOpen(false)
+          }}
+        />
+      )}
     </div>
   )
 }

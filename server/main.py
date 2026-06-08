@@ -1,4 +1,4 @@
-"""Acoustic Base Station — FastAPI backend.
+"""Sound Hub — FastAPI backend.
 
 Responsibilities (Phase 1/2 of the basestation plan):
   - Maintain a registry of known SCN nodes (SQLite-backed identity, in-memory live status)
@@ -23,7 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
-log = logging.getLogger("acoustic_base.main")
+log = logging.getLogger("sound_hub.main")
 
 _poller_task: asyncio.Task | None = None
 
@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     await discovery.start()
     _poller_task = asyncio.create_task(poller.run())
-    log.info("Acoustic Base backend ready")
+    log.info("Sound Hub backend ready")
     yield
     log.info("Shutting down...")
     if _poller_task is not None:
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     await discovery.stop()
 
 
-app = FastAPI(title="Acoustic Base Station", lifespan=lifespan)
+app = FastAPI(title="Sound Hub", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

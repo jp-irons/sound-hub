@@ -160,6 +160,20 @@ def _audio(raw: dict) -> Optional[dict]:
     }
 
 
+def _position_status(raw: dict) -> str:
+    """Operator-set provenance flag for the node's E/N/Alt position.
+
+    Firmware reports `node.positionStatus` as "surveyed" (operator-confirmed
+    ground truth — treated as a fixed anchor) or "estimated" (provisional,
+    refined by ongoing calibration). Older firmware that predates this field
+    won't report it at all — default to "estimated" rather than implying a
+    confidence the node never claimed.
+    """
+    info = _node_info(raw)
+    value = (info.get("positionStatus") or "").strip().lower()
+    return "surveyed" if value == "surveyed" else "estimated"
+
+
 def _flags(position_known: bool, clock: dict, reachable: bool) -> list[str]:
     flags = []
     if not reachable:
@@ -258,6 +272,7 @@ def map_status(role: str, reachable: bool, raw_status: Optional[dict]) -> dict:
             "lat_lon": None,
             "position_relative": None,
             "position_known": False,
+            "position_status": "estimated",
             "gps": None,
             "clock": None,
             "audio": None,
@@ -278,6 +293,7 @@ def map_status(role: str, reachable: bool, raw_status: Optional[dict]) -> dict:
         "lat_lon": _lat_lon(raw_status),
         "position_relative": position_relative,
         "position_known": position_known,
+        "position_status": _position_status(raw_status),
         "gps": _gps(raw_status),
         "clock": clock,
         "audio": _audio(raw_status),

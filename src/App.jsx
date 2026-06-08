@@ -38,15 +38,75 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refresh])
 
+  // Node admission/removal actions — POST to the approval endpoints or
+  // DELETE the node, then re-pull the list so the UI reflects the new
+  // state immediately rather than waiting for the next poll tick.
+  const approveNode = useCallback(async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/nodes/${id}/approve`, { method: 'POST' })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      await refresh()
+    } catch (err) {
+      setError(err.message ?? String(err))
+    }
+  }, [refresh])
+
+  const rejectNode = useCallback(async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/nodes/${id}/reject`, { method: 'POST' })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      await refresh()
+    } catch (err) {
+      setError(err.message ?? String(err))
+    }
+  }, [refresh])
+
+  const removeNode = useCallback(async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/nodes/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      setSelectedId(curr => (curr === id ? null : curr))
+      await refresh()
+    } catch (err) {
+      setError(err.message ?? String(err))
+    }
+  }, [refresh])
+
+  // Unlike the admission actions above, this one re-throws on failure —
+  // the config modal needs the actual error message (e.g. the backend's
+  // 409 "origin already set on <other node>") to show the operator,
+  // rather than having it swallowed into the global error banner.
+  const configureNode = useCallback(async (id, patch) => {
+    const res = await fetch(`${API_BASE}/nodes/${id}/configure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch { /* not JSON — fall back to status text */ }
+      throw new Error(detail)
+    }
+    await refresh()
+  }, [refresh])
+
   const selectedNode = nodes.find(n => n.id === selectedId) ?? null
-  const onlineCount = nodes.filter(n => n.status === 'online').length
+
+  // Pending/rejected nodes aren't polled (see poller.py), so they'd always
+  // read as "offline" — counting them here would just be misleading noise
+  // in the top bar. Scope these summary counts to the active (approved) set.
+  const approvedNodes = nodes.filter(n => n.approvalStatus === 'approved')
+  const onlineCount = approvedNodes.filter(n => n.status === 'online').length
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <TopBar
-        totalNodes={nodes.length}
+        totalNodes={approvedNodes.length}
         onlineCount={onlineCount}
-        nodes={nodes}
+        nodes={approvedNodes}
       />
       {error && (
         <div style={{
@@ -64,6 +124,8 @@ export default function App() {
           nodes={nodes}
           selectedId={selectedId}
           onSelect={setSelectedId}
+          onApprove={approveNode}
+          onReject={rejectNode}
         />
         <MapView
           nodes={nodes}
@@ -74,6 +136,10 @@ export default function App() {
           <NodeDetail
             node={selectedNode}
             onClose={() => setSelectedId(null)}
+            onApprove={approveNode}
+            onReject={rejectNode}
+            onRemove={removeNode}
+            onConfigure={configureNode}
           />
         )}
       </div>

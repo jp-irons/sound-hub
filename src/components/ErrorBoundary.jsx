@@ -16,7 +16,7 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    console.error('Acoustic Base — render error caught by boundary:', error, info)
+    console.error('Sound Hub — render error caught by boundary:', error, info)
   }
 
   render() {

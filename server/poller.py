@@ -9,9 +9,9 @@ import logging
 
 import httpx
 
-from . import config, registry
+from . import config, db, registry
 
-log = logging.getLogger("acoustic_base.poller")
+log = logging.getLogger("sound_hub.poller")
 
 
 async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
@@ -38,7 +38,14 @@ async def run() -> None:
     async with httpx.AsyncClient(verify=False) as client:
         while True:
             try:
-                nodes = await registry.list_nodes()
+                # Only poll approved nodes — pending/rejected nodes haven't
+                # been admitted to the active array yet (or have been
+                # explicitly declined), so we don't reach out to them. This
+                # also means they never accrue gps/audio/clock data, which
+                # keeps them harmlessly absent from the map and TDOA-relevant
+                # views without any extra filtering downstream.
+                nodes = [n for n in await registry.list_nodes()
+                         if n["approval_status"] == db.APPROVED]
                 if nodes:
                     await asyncio.gather(*(_poll_one(client, n) for n in nodes))
             except asyncio.CancelledError:

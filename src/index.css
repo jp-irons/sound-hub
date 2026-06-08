@@ -41,7 +41,7 @@ body { background: var(--bg-base); overflow: hidden; height: 100vh; }
   text-transform: uppercase;
 }
 .badge-primary { background: var(--blue-dim); color: var(--blue); }
-.badge-leaf    { background: var(--border-muted); color: var(--text-secondary); }
+.badge-leaf    { background: var(--border-muted); color: var(--text-primary); }
 
 .status-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -75,7 +75,7 @@ body { background: var(--bg-base); overflow: hidden; height: 100vh; }
 
 .section-label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--text-muted);
+  text-transform: uppercase; color: var(--text-secondary);
   padding: 0 0 6px 0; margin-bottom: 8px;
   border-bottom: 1px solid var(--border-muted);
 }

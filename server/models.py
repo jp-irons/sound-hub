@@ -9,6 +9,27 @@ class ManualNodeRequest(BaseModel):
     host: str  # hostname or bare IP; we hit http://<host>/app/api/status to validate
 
 
+class NodeConfigRequest(BaseModel):
+    """Body for POST /api/nodes/{id}/configure — proxied verbatim (minus
+    unset fields) to the node's own POST /app/api/node-config.
+
+    All fields optional: the operator edits a subset in the modal and we
+    forward only what they changed, mirroring the node-side handler which
+    treats each field as independently settable. See NodeConfigHandler.cpp.
+    """
+    role: Optional[Literal["primary", "node", "remote"]] = None
+    posE: Optional[float] = None
+    posN: Optional[float] = None
+    posAlt: Optional[float] = None
+    position_status: Optional[Literal["surveyed", "estimated"]] = Field(default=None, alias="positionStatus")
+    is_origin: Optional[bool] = Field(default=None, alias="isOrigin")
+    origin_lat: Optional[float] = Field(default=None, alias="originLat")
+    origin_lon: Optional[float] = Field(default=None, alias="originLon")
+    origin_alt: Optional[float] = Field(default=None, alias="originAlt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float
@@ -86,6 +107,13 @@ class NodeView(BaseModel):
     ip_address: Optional[str] = Field(default=None, alias="ipAddress")
     role: str = "UNKNOWN"
     discovery_method: Literal["mdns", "manual"] = Field(default="mdns", alias="discoveryMethod")
+    # Operator admission gate — being seen on the network (mDNS/manual) only
+    # gets a node to "pending"; an explicit approve is required before it's
+    # treated as part of the active array (polling, map, TDOA). Rejected
+    # nodes are retained (not deleted) so the decision is reversible.
+    approval_status: Literal["pending", "approved", "rejected"] = Field(
+        default="pending", alias="approvalStatus"
+    )
     configured: bool = False
     reachable: bool = False
     last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
@@ -98,6 +126,11 @@ class NodeView(BaseModel):
     lat_lon: Optional[LatLon] = Field(default=None, alias="latLon")
     position_relative: Optional[PositionRelative] = Field(default=None, alias="positionRelative")
     position_known: bool = Field(default=False, alias="positionKnown")
+    # Operator-set provenance for the node's position: "surveyed" (confirmed
+    # ground truth, fixed anchor) vs "estimated" (provisional, refined by
+    # ongoing calibration). Distinct from `position_known` — a position can
+    # be known (relative offset configured) but still only an estimate.
+    position_status: Literal["surveyed", "estimated"] = Field(default="estimated", alias="positionStatus")
     gps: Optional[GpsView] = None
     clock: Optional[ClockView] = None
     audio: Optional[AudioView] = None

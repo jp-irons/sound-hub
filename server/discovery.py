@@ -22,12 +22,13 @@ from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZerocon
 
 from . import config, registry
 
-log = logging.getLogger("acoustic_base.discovery")
+log = logging.getLogger("sound_hub.discovery")
 
 _hostname_re = re.compile(rf"^{re.escape(config.MDNS_HOSTNAME_PREFIX)}", re.IGNORECASE)
 
 _azc: AsyncZeroconf | None = None
 _browser: AsyncServiceBrowser | None = None
+_rescan_task: asyncio.Task | None = None
 
 
 def _matches_scn_pattern(short_hostname: str) -> bool:
@@ -49,7 +50,17 @@ async def _register_discovered(zeroconf, service_type: str, name: str) -> None:
     addresses = info.parsed_scoped_addresses()
     ip_address = addresses[0] if addresses else None
 
-    log.info("Discovered SCN node '%s' at %s", short_hostname, ip_address)
+    # zeroconf often fires Added immediately followed by Updated for the same
+    # record (and now the periodic rescan re-confirms already-known nodes too
+    # — see _rescan_loop), so logging every resolution at `info` would be
+    # noisy. Only announce at `info` when this is genuinely new information —
+    # a node we haven't seen, or one that's moved to a different address.
+    existing = await registry.get_node(short_hostname)
+    if existing is None or existing["ip_address"] != ip_address:
+        log.info("Discovered SCN node '%s' at %s", short_hostname, ip_address)
+    else:
+        log.debug("Re-confirmed mDNS presence for '%s' at %s", short_hostname, ip_address)
+
     await registry.upsert_node(
         node_id=short_hostname,
         hostname=short_hostname,
@@ -71,20 +82,59 @@ def _on_state_change(zeroconf, service_type: str, name: str,
         asyncio.ensure_future(_register_discovered(zeroconf, service_type, name))
 
 
-async def start() -> None:
-    global _azc, _browser
-    _azc = AsyncZeroconf()
+def _start_browser() -> None:
+    """(Re)create the service browser against the existing AsyncZeroconf.
+
+    Constructing a fresh AsyncServiceBrowser sends out a new burst of PTR
+    queries — the same burst that happens at hub startup. That's the
+    mechanism _rescan_loop leans on to catch nodes whose mDNS announcements
+    were missed (see MDNS_RESCAN_INTERVAL_S in config.py for the rationale).
+    """
+    global _browser
     _browser = AsyncServiceBrowser(
         _azc.zeroconf,
         config.MDNS_SERVICE_TYPE,
         handlers=[_on_state_change],
     )
-    log.info("mDNS discovery started — watching '%s' for hostnames matching '%s*'",
-             config.MDNS_SERVICE_TYPE, config.MDNS_HOSTNAME_PREFIX)
+
+
+async def _rescan_loop() -> None:
+    """Periodically restart the browser to re-issue a fresh query burst.
+
+    Multicast announcements (including the firmware's own startup +
+    2-second-later re-announce) can simply get lost on Wi-Fi — restarting
+    the hub is what reliably catches a node in that state, so we do the
+    hub-restart-equivalent (tear down + recreate the browser) on a timer
+    rather than waiting on python-zeroconf's own slow query backoff.
+    """
+    while True:
+        await asyncio.sleep(config.MDNS_RESCAN_INTERVAL_S)
+        try:
+            log.debug("mDNS rescan — restarting browser to trigger a fresh query burst")
+            if _browser is not None:
+                await _browser.async_cancel()
+            _start_browser()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("mDNS rescan failed — continuing with existing browser")
+
+
+async def start() -> None:
+    global _azc, _rescan_task
+    _azc = AsyncZeroconf()
+    _start_browser()
+    _rescan_task = asyncio.create_task(_rescan_loop())
+    log.info("mDNS discovery started — watching '%s' for hostnames matching '%s*' "
+             "(rescanning every %.0fs)",
+             config.MDNS_SERVICE_TYPE, config.MDNS_HOSTNAME_PREFIX, config.MDNS_RESCAN_INTERVAL_S)
 
 
 async def stop() -> None:
-    global _azc, _browser
+    global _azc, _browser, _rescan_task
+    if _rescan_task is not None:
+        _rescan_task.cancel()
+        _rescan_task = None
     if _browser is not None:
         await _browser.async_cancel()
         _browser = None

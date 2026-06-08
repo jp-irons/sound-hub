@@ -62,9 +62,11 @@ export default function NodeCard({ node, selected, onSelect }) {
         background: selected ? 'var(--bg-card-hover)' : 'var(--bg-card)',
         borderRadius: '0 6px 6px 0',
         cursor: 'pointer',
-        transition: 'background 0.15s',
+        transition: 'background 0.15s, box-shadow 0.15s',
         display: 'flex', flexDirection: 'column', gap: 7,
-        outline: selected ? '1px solid var(--border)' : 'none',
+        // Echoes the white-ring highlight the selected node gets on the map —
+        // a thin neutral outline was too subtle to notice against the dark panel.
+        boxShadow: selected ? '0 0 0 1.5px var(--blue), 0 0 8px rgba(56,139,253,0.35)' : 'none',
       }}
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card-hover)' }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card)' }}
@@ -112,7 +114,7 @@ export default function NodeCard({ node, selected, onSelect }) {
       {node.audio && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Buffer</span>
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>Buffer</span>
             <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
               {node.audio.bufferUsedS != null ? `${node.audio.bufferUsedS.toFixed(0)}s` : '—'}
               {' / '}
@@ -154,14 +156,29 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'rgba(219,68,55,0.15)', padding: '1px 5px', borderRadius: 3,
           }}>UNREACHABLE</span>
         )}
-        {node.flags?.includes('POSITION_DERIVED') && (
-          <span
-            title="Map position calculated from relative E/N/Alt offset, not surveyed/GPS-determined"
-            style={{
-              fontSize: 10, color: 'var(--blue)',
-              background: 'var(--blue-dim)', padding: '1px 5px', borderRadius: 3,
-            }}
-          >POS DERIVED</span>
+        {/* Surveyed (operator-confirmed, fixed anchor) vs Estimated
+            (provisional, refined by ongoing calibration) — the
+            operator-set provenance flag for this node's position.
+            More actionable at a glance than POSITION_DERIVED, which is
+            really about lat/lon-projection mechanics, not trust level. */}
+        {node.positionKnown && (
+          node.positionStatus === 'surveyed' ? (
+            <span
+              title="Position is operator-confirmed ground truth — treated as a fixed anchor"
+              style={{
+                fontSize: 10, color: 'var(--green)',
+                background: 'var(--green-dim)', padding: '1px 5px', borderRadius: 3,
+              }}
+            >SURVEYED</span>
+          ) : (
+            <span
+              title="Position is provisional — subject to refinement by ongoing calibration"
+              style={{
+                fontSize: 10, color: 'var(--blue)',
+                background: 'var(--blue-dim)', padding: '1px 5px', borderRadius: 3,
+              }}
+            >ESTIMATED</span>
+          )
         )}
         {!node.flags?.length && node.audio?.lastTriggerAt && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>

@@ -33,7 +33,7 @@ export default function TopBar({ totalNodes, onlineCount, nodes }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 16 }}>🎙</span>
         <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: '-0.01em' }}>
-          Acoustic Base
+          Sound Hub
         </span>
         <span style={{
           fontSize: 10, fontWeight: 600, letterSpacing: '0.06em',
