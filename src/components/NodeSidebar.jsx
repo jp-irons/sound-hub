@@ -89,7 +89,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
           Nodes
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-          {approved.filter(n => n.status === 'online').length}/{approved.length} online
+          {approved.filter(n => n.status === 'online').length}/{approved.length} healthy
         </span>
       </div>
 

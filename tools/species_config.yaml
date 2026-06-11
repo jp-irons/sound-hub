@@ -1,0 +1,13 @@
+# species_config.yaml — BirdNET watch list
+#
+# Species listed here get full incident logging and WAV files saved.
+# Everything else is counted in the daily summary only.
+#
+# Use the common name exactly as BirdNET reports it.
+# Run mic_to_birdnet.py with --threshold 0.3 to discover what names BirdNET uses.
+
+watch:
+  - "Barn Owl"
+  - "Bush Stone-curlew"
+  - "Pheasant Coucal"
+  - "Little Egret"

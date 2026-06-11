@@ -48,7 +48,7 @@ export default function TopBar({ totalNodes, onlineCount, nodes }) {
 
       {/* Node status summary */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <StatusChip count={onlineCount} label="online" color="var(--green)" />
+        <StatusChip count={onlineCount} label="healthy" color="var(--green)" />
         {degraded > 0 && <StatusChip count={degraded} label="degraded" color="var(--yellow)" />}
         {offline  > 0 && <StatusChip count={offline}  label="offline"  color="var(--red)" />}
         <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
@@ -82,7 +82,7 @@ function StatusChip({ count, label, color }) {
     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
       <div style={{
         width: 7, height: 7, borderRadius: '50%', background: color,
-        boxShadow: label === 'online' ? `0 0 6px ${color}` : 'none',
+        boxShadow: label === 'healthy' ? `0 0 6px ${color}` : 'none',
       }} />
       <span style={{ fontSize: 12, color }}>
         {count} {label}
