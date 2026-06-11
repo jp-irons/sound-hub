@@ -16,6 +16,7 @@ venv/
 *.sqlite
 *.sqlite3
 audio/
+detections_audio/
 
 # Env / secrets
 .env

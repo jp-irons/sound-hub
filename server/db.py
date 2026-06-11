@@ -16,6 +16,17 @@ import aiosqlite
 from . import config
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS detections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source          TEXT,            -- filename or label (e.g. "upload", node WAV name)
+    analyzed_at     TEXT NOT NULL,   -- ISO8601 UTC
+    common_name     TEXT NOT NULL,
+    scientific_name TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    start_sec       REAL,            -- offset within the source file
+    end_sec         REAL
+);
+
 CREATE TABLE IF NOT EXISTS nodes (
     id               TEXT PRIMARY KEY,
     hostname         TEXT NOT NULL,
@@ -263,3 +274,66 @@ async def list_node_positions() -> dict[str, dict]:
         cursor = await conn.execute("SELECT * FROM node_positions")
         rows = await cursor.fetchall()
         return {row["node_id"]: dict(row) for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# detections CRUD
+# ---------------------------------------------------------------------------
+
+async def insert_detections(
+    source: str,
+    analyzed_at: str,
+    detections: list[dict],
+) -> None:
+    """Persist a batch of BirdNET detections from a single analysis run."""
+    async with connect() as conn:
+        await conn.executemany(
+            """INSERT INTO detections
+               (source, analyzed_at, common_name, scientific_name, confidence, start_sec, end_sec)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    source,
+                    analyzed_at,
+                    d.get("common_name", ""),
+                    d.get("scientific_name", ""),
+                    d.get("confidence", 0.0),
+                    d.get("start_time"),
+                    d.get("end_time"),
+                )
+                for d in detections
+            ],
+        )
+        await conn.commit()
+
+
+async def list_detections(
+    limit: int = 200,
+    min_conf: float = 0.0,
+    species: str | None = None,
+) -> list[dict]:
+    """Return recent detections, newest first.
+
+    species — optional substring filter on common_name (case-insensitive).
+    """
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        if species:
+            cursor = await conn.execute(
+                """SELECT * FROM detections
+                   WHERE confidence >= ?
+                     AND common_name LIKE ?
+                   ORDER BY analyzed_at DESC, id DESC
+                   LIMIT ?""",
+                (min_conf, f"%{species}%", limit),
+            )
+        else:
+            cursor = await conn.execute(
+                """SELECT * FROM detections
+                   WHERE confidence >= ?
+                   ORDER BY analyzed_at DESC, id DESC
+                   LIMIT ?""",
+                (min_conf, limit),
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

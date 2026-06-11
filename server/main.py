@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import db, discovery, poller
+from . import birdnet_worker, db, discovery, poller
 from .routes import router
 
 logging.basicConfig(
@@ -34,6 +34,9 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     await discovery.start()
     _poller_task = asyncio.create_task(poller.run())
+    # Load BirdNET model in a thread so the event loop is not blocked.
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, birdnet_worker.init)
     log.info("Sound Hub backend ready")
     yield
     log.info("Shutting down...")

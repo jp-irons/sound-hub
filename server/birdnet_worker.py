@@ -1,0 +1,62 @@
+"""BirdNET-Analyzer singleton for sound-hub.
+
+Loads the Analyzer once at startup (expensive — model weights + TFLite runtime)
+and exposes a thread-safe analyze_wav() function for route handlers.
+
+All birdnetlib/TensorFlow console output is suppressed; startup noise from the
+C++ TFLite runtime (written directly to the OS handle) cannot be intercepted
+but occurs only once during init().
+"""
+import contextlib
+import os
+from datetime import date
+
+# Populated by init() — None until the lifespan startup has completed.
+_analyzer = None
+
+
+def init() -> None:
+    """Load the BirdNET model.  Call once from the FastAPI lifespan startup
+    (in a thread executor so the event loop is not blocked).
+    """
+    global _analyzer
+    from birdnetlib.analyzer import Analyzer  # deferred — heavy import
+
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            _analyzer = Analyzer()
+
+
+def ready() -> bool:
+    return _analyzer is not None
+
+
+def analyze_wav(
+    path: str,
+    *,
+    use_geo: bool = False,
+    min_conf: float = 0.5,
+) -> list[dict]:
+    """Analyse a WAV file and return a list of detection dicts.
+
+    Each dict contains:
+        common_name, scientific_name, start_time, end_time, confidence
+
+    Raises RuntimeError if called before init().
+    """
+    if _analyzer is None:
+        raise RuntimeError("BirdNET worker not initialised — call init() first")
+
+    from birdnetlib import Recording  # deferred
+
+    kwargs: dict = {"min_conf": min_conf}
+    if use_geo:
+        today = date.today()
+        kwargs.update(lat=-27.5, lon=153.0, date=today)
+
+    recording = Recording(_analyzer, path, **kwargs)
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            recording.analyze()
+
+    return recording.detections or []

@@ -164,6 +164,20 @@ class ArrayOriginManual(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DetectionRecord(BaseModel):
+    """One BirdNET detection row — returned by GET /api/detections."""
+    id: int
+    source: Optional[str] = None
+    analyzed_at: str = Field(alias="analyzedAt")
+    common_name: str = Field(alias="commonName")
+    scientific_name: str = Field(alias="scientificName")
+    confidence: float
+    start_sec: Optional[float] = Field(default=None, alias="startSec")
+    end_sec: Optional[float] = Field(default=None, alias="endSec")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float

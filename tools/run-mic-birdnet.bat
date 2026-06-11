@@ -8,8 +8,10 @@ REM   --channel     Mic channel: 0-3 for a single channel, or "all" to average a
 REM   --threshold   Confidence threshold 0.0-1.0 (default 0.5)
 REM   --geo         Add this flag to enable Brisbane species/season filter
 REM   --output      CSV output filename (default: detections.csv)
+REM   --save-dir    Folder to save WAV chunks that contain detections (omit to discard)
 REM
-REM Uncomment --geo below to enable the Brisbane geo filter.
+REM To enable geo filter or save-dir, remove the REM from those lines.
+REM Make sure every active line except the last ends with ^
 
 cd /d "%~dp0"
 
@@ -25,7 +27,8 @@ python mic_to_birdnet.py ^
     --device "ReSpeaker" ^
     --channel 0 ^
     --threshold 0.5 ^
-    --output detections.csv
-    --geo
+    --output detections.csv^
+    --geo ^
+    --save-dir ../detections_audio
 
 pause

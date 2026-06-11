@@ -3,6 +3,7 @@ import TopBar from './components/TopBar.jsx'
 import NodeSidebar from './components/NodeSidebar.jsx'
 import MapView from './components/MapView.jsx'
 import NodeDetail from './components/NodeDetail.jsx'
+import DetectionsTab from './components/DetectionsTab.jsx'
 
 // FastAPI backend — see server/main.py. Runs on the same machine as the
 // Vite dev server during development (CORS is opened for localhost:5173).
@@ -13,6 +14,7 @@ const API_BASE = 'http://localhost:8000/api'
 const POLL_INTERVAL_MS = 5000
 
 export default function App() {
+  const [tab, setTab] = useState('nodes') // 'nodes' | 'detections'
   const [nodes, setNodes] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [error, setError] = useState(null)
@@ -117,6 +119,18 @@ export default function App() {
   const approvedNodes = nodes.filter(n => n.approvalStatus === 'approved')
   const onlineCount = approvedNodes.filter(n => n.status === 'online').length
 
+  const tabStyle = (t) => ({
+    padding: '4px 16px',
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: 'pointer',
+    border: 'none',
+    borderBottom: tab === t ? '2px solid var(--accent, #4da6ff)' : '2px solid transparent',
+    background: 'transparent',
+    color: tab === t ? 'var(--accent, #4da6ff)' : 'var(--text-muted, #888)',
+    transition: 'color 0.15s',
+  })
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       <TopBar
@@ -124,6 +138,19 @@ export default function App() {
         onlineCount={onlineCount}
         nodes={approvedNodes}
       />
+
+      {/* Tab bar */}
+      <div style={{
+        display: 'flex', alignItems: 'center',
+        borderBottom: '1px solid var(--border, #333)',
+        background: 'var(--surface1, #1e1e1e)',
+        paddingLeft: 8,
+        flexShrink: 0,
+      }}>
+        <button style={tabStyle('nodes')}    onClick={() => setTab('nodes')}>Nodes</button>
+        <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
+      </div>
+
       {error && (
         <div style={{
           padding: '6px 14px',
@@ -135,37 +162,46 @@ export default function App() {
           Is the backend running ({"uvicorn server.main:app --reload --port 8000"})?
         </div>
       )}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <NodeSidebar
-          nodes={nodes}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onApprove={approveNode}
-          onReject={rejectNode}
-        />
-        <MapView
-          nodes={nodes}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-        />
-        {selectedNode && (
-          <NodeDetail
-            node={selectedNode}
-            onClose={() => setSelectedId(null)}
+
+      {tab === 'nodes' && (
+        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+          <NodeSidebar
+            nodes={nodes}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
             onApprove={approveNode}
             onReject={rejectNode}
-            onRemove={removeNode}
-            onConfigure={configureNode}
-            onSetPosition={setNodePosition}
           />
-        )}
-      </div>
-      {loaded && nodes.length === 0 && !error && (
-        <div style={{
-          position: 'absolute', bottom: 14, left: 14,
-          fontSize: 12, color: 'var(--text-muted)',
-        }}>
-          No nodes registered yet — discovery runs automatically via mDNS, or add one manually from the backend.
+          <MapView
+            nodes={nodes}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+          {selectedNode && (
+            <NodeDetail
+              node={selectedNode}
+              onClose={() => setSelectedId(null)}
+              onApprove={approveNode}
+              onReject={rejectNode}
+              onRemove={removeNode}
+              onConfigure={configureNode}
+              onSetPosition={setNodePosition}
+            />
+          )}
+          {loaded && nodes.length === 0 && !error && (
+            <div style={{
+              position: 'absolute', bottom: 14, left: 14,
+              fontSize: 12, color: 'var(--text-muted)',
+            }}>
+              No nodes registered yet — discovery runs automatically via mDNS, or add one manually from the backend.
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'detections' && (
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          <DetectionsTab />
         </div>
       )}
     </div>

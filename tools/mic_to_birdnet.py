@@ -104,8 +104,13 @@ def analyse_chunk(
     chunk_dt: datetime,
     use_geo: bool,
     threshold: float,
+    save_dir: str | None = None,
 ) -> list[dict]:
-    """Write audio to a temp WAV, run BirdNET, return list of detection dicts."""
+    """Write audio to a temp WAV, run BirdNET, return list of detection dicts.
+
+    If save_dir is set and detections are found, the WAV is moved there rather
+    than deleted.  Filename: mic_YYYYMMDD_HHMMSS.wav
+    """
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         tmp_path = f.name
 
@@ -122,9 +127,18 @@ def analyse_chunk(
         with open(os.devnull, "w") as devnull:
             with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
                 recording.analyze()
-        return recording.detections or []
+        detections = recording.detections or []
+
+        if detections and save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            fname = chunk_dt.strftime("mic_%Y%m%d_%H%M%S.wav")
+            os.replace(tmp_path, os.path.join(save_dir, fname))
+            tmp_path = None  # already moved
+
+        return detections
     finally:
-        os.unlink(tmp_path)
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def append_to_csv(path: str, chunk_dt: datetime, detections: list[dict]):
@@ -174,6 +188,8 @@ def main():
                         help="Apply Brisbane geo/season filter to reduce false positives.")
     parser.add_argument("--output", default="detections.csv",
                         help="CSV output file path (default: detections.csv).")
+    parser.add_argument("--save-dir", default=None, metavar="DIR",
+                        help="Save WAV chunks that contain detections to this directory.")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -193,8 +209,10 @@ def main():
     print(f"  Device   : [{device_index}] {dev_info['name']} ({n_channels} ch)")
     print(f"  Channel  : {args.channel}")
     print(f"  Threshold: {args.threshold}")
-    print(f"  Geo filter: {'Brisbane (lat={BRISBANE_LAT}, lon={BRISBANE_LON})' if args.geo else 'OFF'}")
+    print(f"  Geo filter: {f'Brisbane (lat={BRISBANE_LAT}, lon={BRISBANE_LON})' if args.geo else 'OFF'}")
     print(f"  Output   : {args.output}")
+    if args.save_dir:
+        print(f"  Save WAVs : {args.save_dir}")
     print(f"\nLoading BirdNET model…", end=" ", flush=True)
 
     analyzer = Analyzer()
@@ -206,7 +224,7 @@ def main():
         while True:
             chunk_dt = datetime.now()
             audio = record_chunk(device_index, n_channels, args.channel)
-            detections = analyse_chunk(analyzer, audio, chunk_dt, args.geo, args.threshold)
+            detections = analyse_chunk(analyzer, audio, chunk_dt, args.geo, args.threshold, args.save_dir)
             print_detections(chunk_dt, detections)
             if detections:
                 append_to_csv(args.output, chunk_dt, detections)

@@ -1,16 +1,18 @@
 """API routes consumed by the React frontend (mounted under /api in main.py)."""
+import asyncio
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
-from . import config, db, registry, status_mapper
+from . import birdnet_worker, config, db, registry, status_mapper
 from .models import (
     ArrayOrigin, ArrayOriginManual,
-    AudioAckBody, AudioSampleRequest, ManualNodeRequest, NodeConfigRequest,
-    NodePosition, NodeView, TdoaRequest, TdoaResponse,
+    AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
+    NodeConfigRequest, NodePosition, NodeView, TdoaRequest, TdoaResponse,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -617,3 +619,84 @@ async def solve_tdoa(req: TdoaRequest):
         method=result.method,
         ambiguous_root=result.ambiguous_root[:3] if result.ambiguous_root else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# BirdNET detections
+# ---------------------------------------------------------------------------
+
+@router.post("/detections/analyze", response_model=list[DetectionRecord])
+async def analyze_audio(
+    file: UploadFile = File(..., description="WAV file to analyse"),
+    geo: bool = Query(default=False, description="Apply Brisbane geo/season filter"),
+    min_conf: float = Query(default=0.5, ge=0.0, le=1.0, description="Minimum confidence threshold"),
+):
+    """Upload a WAV file, run it through BirdNET, persist and return detections.
+
+    The file is analysed in a thread executor so the async event loop is not
+    blocked by the synchronous TFLite inference.  Results are stored in the
+    detections table and returned immediately.
+    """
+    if not birdnet_worker.ready():
+        raise HTTPException(status_code=503, detail="BirdNET model not yet loaded — try again in a moment")
+
+    # Stream upload to a temp file — birdnetlib needs a file path.
+    suffix = os.path.splitext(file.filename or "audio")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = tmp.name
+        tmp.write(await file.read())
+
+    try:
+        loop = asyncio.get_event_loop()
+        detections = await loop.run_in_executor(
+            None,
+            lambda: birdnet_worker.analyze_wav(tmp_path, use_geo=geo, min_conf=min_conf),
+        )
+    finally:
+        os.unlink(tmp_path)
+
+    analyzed_at = _now_iso()
+    source = file.filename or "upload"
+    if detections:
+        await db.insert_detections(source, analyzed_at, detections)
+        log.info("analyzed %s — %d detection(s)", source, len(detections))
+    else:
+        log.info("analyzed %s — no detections above %.2f", source, min_conf)
+
+    # Return DetectionRecord-shaped dicts (without DB ids for the upload response).
+    return [
+        DetectionRecord(
+            id=0,
+            source=source,
+            analyzed_at=analyzed_at,
+            common_name=d.get("common_name", ""),
+            scientific_name=d.get("scientific_name", ""),
+            confidence=d.get("confidence", 0.0),
+            start_sec=d.get("start_time"),
+            end_sec=d.get("end_time"),
+        )
+        for d in detections
+    ]
+
+
+@router.get("/detections", response_model=list[DetectionRecord])
+async def get_detections(
+    limit: int = Query(default=200, ge=1, le=1000),
+    min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+    species: str | None = Query(default=None, description="Filter by common name substring"),
+):
+    """Return stored detections, newest first."""
+    rows = await db.list_detections(limit=limit, min_conf=min_conf, species=species)
+    return [
+        DetectionRecord(
+            id=row["id"],
+            source=row.get("source"),
+            analyzed_at=row["analyzed_at"],
+            common_name=row["common_name"],
+            scientific_name=row["scientific_name"],
+            confidence=row["confidence"],
+            start_sec=row.get("start_sec"),
+            end_sec=row.get("end_sec"),
+        )
+        for row in rows
+    ]

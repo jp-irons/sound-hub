@@ -4,3 +4,7 @@ zeroconf
 httpx
 aiosqlite
 numpy
+python-multipart
+birdnet-analyzer
+birdnetlib
+soundfile
