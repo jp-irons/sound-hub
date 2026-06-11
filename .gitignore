@@ -15,6 +15,7 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
+audio/
 
 # Env / secrets
 .env
