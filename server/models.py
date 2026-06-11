@@ -265,4 +265,4 @@ class NodeView(BaseModel):
     audio: Optional[AudioView] = None
     esp_now: Optional[EspNowView] = Field(default=None, alias="espNow")
     flags: list[str] = []
-   firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")
+    firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")
