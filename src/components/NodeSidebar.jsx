@@ -64,8 +64,10 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
   const pending  = nodes.filter(n => n.approvalStatus === 'pending')
   const rejected = nodes.filter(n => n.approvalStatus === 'rejected')
 
-  const primary = approved.filter(n => n.role === 'PRIMARY')
-  const leaves  = approved.filter(n => n.role === 'LEAF')
+  // Anchor nodes: brokers (WiFi↔ESP-NOW bridge) or origin (spatial reference).
+  // A node may be both — it appears in Anchor Nodes regardless.
+  const anchors = approved.filter(n => n.role === 'BROKER' || n.isOrigin)
+  const leaves  = approved.filter(n => n.role !== 'BROKER' && !n.isOrigin)
 
   return (
     <div style={{
@@ -113,13 +115,13 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
           </div>
         )}
 
-        {primary.length > 0 && (
+        {anchors.length > 0 && (
           <div style={{ marginBottom: 2 }}>
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', padding: '0 4px 4px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Primary
+              Anchor Nodes
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {primary.map(node => (
+              {anchors.map(node => (
                 <NodeCard
                   key={node.id}
                   node={node}
@@ -134,7 +136,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
         {leaves.length > 0 && (
           <div>
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', padding: '0 4px 4px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Leaf Nodes
+              Nodes
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {leaves.map(node => (

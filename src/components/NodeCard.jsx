@@ -34,9 +34,9 @@ function bufferFraction(node) {
 }
 
 function bufferClass(fraction) {
-  if (fraction >= 0.95) return 'full'
-  if (fraction >= 0.75) return 'warn'
-  return 'ok'
+  if (fraction >= 0.90) return 'good'
+  if (fraction >= 0.25) return 'warn'
+  return 'low'
 }
 
 export default function NodeCard({ node, selected, onSelect }) {
@@ -71,11 +71,16 @@ export default function NodeCard({ node, selected, onSelect }) {
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card-hover)' }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card)' }}
     >
-      {/* Row 1: hostname + role + status dot */}
+      {/* Row 1: hostname + anchor indicators + status dot */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <div className={`status-dot ${node.status}`} />
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{node.hostname}</span>
-        <span className={`badge badge-${node.role.toLowerCase()}`}>{node.role}</span>
+        {node.role === 'BROKER' && (
+          <span title="Broker — relays ESP-NOW traffic to/from WiFi" style={{
+            fontSize: 10, color: 'var(--text-primary)',
+            background: 'var(--border)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
+          }}>BROKER</span>
+        )}
       </div>
 
       {/* Row 2: clock accuracy + RSSI */}
@@ -85,12 +90,16 @@ export default function NodeCard({ node, selected, onSelect }) {
           <span style={{ fontSize: 11, color: clockAccuracyColor(node) }}>
             {clockAccuracyLabel(node)}
           </span>
-          {node.clock?.source === 'GPS_NMEA' && (
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(NMEA)</span>
-          )}
-          {node.clock?.source === 'GPS_PPS' && (
-            <span style={{ fontSize: 10, color: 'var(--green)' }}>(PPS)</span>
-          )}
+          {(() => {
+            const s = node.clock?.source
+            if (s === 'GPS_PPS')              return <span style={{ fontSize: 10, color: 'var(--green)'      }}>(PPS)</span>
+            if (s === 'GPS_NMEA')             return <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(NMEA)</span>
+            if (s === 'NETWORK_GPS_PPS')      return <span style={{ fontSize: 10, color: 'var(--blue)'       }}>(Net PPS)</span>
+            if (s === 'NETWORK_GPS_NMEA')     return <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(Net NMEA)</span>
+            if (s === 'NETWORK_FREE_RUNNING') return <span style={{ fontSize: 10, color: 'var(--yellow)'     }}>(Net)</span>
+            if (s === 'FREE_RUNNING')         return <span style={{ fontSize: 10, color: 'var(--yellow)'     }}>(free)</span>
+            return null
+          })()}
         </div>
         {node.espNow && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 'auto' }}>
@@ -144,6 +153,12 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'rgba(219,109,40,0.15)', padding: '1px 5px', borderRadius: 3,
           }}>CLK UNSETTLED</span>
         )}
+        {node.flags?.includes('CLOCK_NO_UTC') && (
+          <span style={{
+            fontSize: 10, color: 'var(--yellow)',
+            background: 'var(--yellow-dim)', padding: '1px 5px', borderRadius: 3,
+          }}>NO UTC</span>
+        )}
         {node.flags?.includes('CLOCK_INVALID') && (
           <span style={{
             fontSize: 10, color: 'var(--red)',
@@ -156,11 +171,30 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'rgba(219,68,55,0.15)', padding: '1px 5px', borderRadius: 3,
           }}>UNREACHABLE</span>
         )}
+        {node.flags?.includes('AUDIO_STOPPED') && (
+          <span
+            title="SD card absent or failed — audio capture not running"
+            style={{
+              fontSize: 10, color: 'var(--red)',
+              background: 'rgba(219,68,55,0.15)', padding: '1px 5px', borderRadius: 3,
+            }}
+          >NO AUDIO</span>
+        )}
         {/* Surveyed (operator-confirmed, fixed anchor) vs Estimated
             (provisional, refined by ongoing calibration) — the
             operator-set provenance flag for this node's position.
             More actionable at a glance than POSITION_DERIVED, which is
             really about lat/lon-projection mechanics, not trust level. */}
+        {node.isOrigin && (
+          <span
+            title="Position reference node — coordinates used to set array origin"
+            style={{
+              fontSize: 10, color: 'var(--text-primary)',
+              background: 'var(--border)', padding: '1px 5px', borderRadius: 3,
+              fontWeight: 700,
+            }}
+          >POS REF</span>
+        )}
         {node.positionKnown && (
           node.positionStatus === 'surveyed' ? (
             <span

@@ -1,7 +1,25 @@
 """Pydantic schemas for the API."""
+from enum import Enum
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class AckStatus(str, Enum):
+    """Maps to AckStatus enum in EspNowMessages.hpp."""
+    ACK         = "ack"
+    DONE        = "done"
+    UNAVAILABLE = "unavailable"
+    ERROR       = "error"
+
+
+class AudioAckBody(BaseModel):
+    """Body for POST /api/audio/ack — broker-forwarded node ack."""
+    request_id: int       = Field(alias="requestId")
+    status: AckStatus
+    src_mac: str          = Field(alias="srcMac", description="Wi-Fi STA MAC of the responding node")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ManualNodeRequest(BaseModel):
@@ -9,23 +27,131 @@ class ManualNodeRequest(BaseModel):
     host: str  # hostname or bare IP; we hit http://<host>/app/api/status to validate
 
 
-class NodeConfigRequest(BaseModel):
-    """Body for POST /api/nodes/{id}/configure — proxied verbatim (minus
-    unset fields) to the node's own POST /app/api/node-config.
+# ---------------------------------------------------------------------------
+# TDOA solver request / response
+# ---------------------------------------------------------------------------
 
-    All fields optional: the operator edits a subset in the modal and we
-    forward only what they changed, mirroring the node-side handler which
-    treats each field as independently settable. See NodeConfigHandler.cpp.
+class NodeTimestamp(BaseModel):
+    """One node's GPS-disciplined arrival timestamp for a sound event."""
+    node_id: str = Field(alias="nodeId")
+    timestamp_us: float = Field(alias="timestampUs", description="Absolute GPS timestamp in microseconds")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TdoaRequest(BaseModel):
+    """Body for POST /api/tdoa/solve.
+
+    Supply one timestamp per participating node (minimum 4). The hub looks up
+    each node's position from its database; nodes without a stored position are
+    rejected with 422.
+
+    hint_point selects the physically meaningful root when the 4-node quadratic
+    yields two solutions. Provide any point in the expected source halfspace —
+    e.g. a point deep in the monitored forest. If omitted the solver falls back
+    to a centroid heuristic, which is unreliable for distant sources.
     """
-    role: Optional[Literal["primary", "node", "remote"]] = None
-    posE: Optional[float] = None
-    posN: Optional[float] = None
-    posAlt: Optional[float] = None
-    position_status: Optional[Literal["surveyed", "estimated"]] = Field(default=None, alias="positionStatus")
-    is_origin: Optional[bool] = Field(default=None, alias="isOrigin")
+    timestamps: list[NodeTimestamp]
+    hint_point: Optional[tuple[float, float, float]] = Field(
+        default=None,
+        alias="hintPoint",
+        description="(E, N, Alt) metres — any point in the expected source halfspace",
+    )
+    speed_of_sound: float = Field(
+        default=343.0,
+        alias="speedOfSound",
+        description="Speed of sound in m/s. Brisbane subtropical: ~343–348 m/s.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TdoaResponse(BaseModel):
+    """Result from POST /api/tdoa/solve."""
+    # Source position in the array's local coordinate frame (metres from origin).
+    x: float = Field(description="East offset from array origin (metres)")
+    y: float = Field(description="North offset from array origin (metres)")
+    z: float = Field(description="Altitude offset from array origin (metres)")
+    residual_m: float = Field(alias="residualM", description="RMS range residual (metres)")
+    method: str = Field(description="'quadratic' (4 nodes) or 'least_squares' (5+ nodes)")
+    # The mirror root, always returned for 4-node solves so the caller can
+    # inspect it or apply their own disambiguation logic.
+    ambiguous_root: Optional[tuple[float, float, float]] = Field(
+        default=None,
+        alias="ambiguousRoot",
+        description="Mirror root (E, N, Alt) if 4-node quadratic, else null",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NodeConfigRequest(BaseModel):
+    """Body for POST /api/nodes/{id}/configure — proxied to the node's own
+    POST /app/api/node-config (NodeConfigHandler.cpp — persists to NVS).
+
+    Post Track A refactor: only hub-pushable fields that are genuinely
+    node-resident remain here. Position data is no longer node-resident —
+    it lives in the hub's node_positions table and is managed via
+    PUT /api/nodes/{id}/position instead.
+
+    All fields optional: the operator edits a subset and we forward only
+    what they changed (exclude_unset), mirroring the node-side handler.
+    """
+    is_broker: Optional[bool] = Field(default=None, alias="isBroker")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NodePosition(BaseModel):
+    """Hub-stored position record for a node (node_positions table).
+
+    This is the operator-managed position — distinct from the GPS telemetry
+    the node reports live. The hub owns this data; the node never sees it.
+    """
+    pos_e: Optional[float] = Field(default=None, alias="posE")
+    pos_n: Optional[float] = Field(default=None, alias="posN")
+    pos_alt: Optional[float] = Field(default=None, alias="posAlt")
+    pos_status: Literal["surveyed", "estimated"] = Field(
+        default="estimated", alias="posStatus"
+    )
+    is_origin: bool = Field(default=False, alias="isOrigin")
     origin_lat: Optional[float] = Field(default=None, alias="originLat")
     origin_lon: Optional[float] = Field(default=None, alias="originLon")
     origin_alt: Optional[float] = Field(default=None, alias="originAlt")
+    # Operator-surveyed absolute coordinates — alternative to GPS centroid
+    # when setting array origin.  All three must be provided together.
+    surveyed_lat: Optional[float] = Field(default=None, alias="surveyedLat")
+    surveyed_lon: Optional[float] = Field(default=None, alias="surveyedLon")
+    surveyed_alt: Optional[float] = Field(default=None, alias="surveyedAlt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ArrayOrigin(BaseModel):
+    """Hub-level geographic datum for the node array (array_origin table).
+
+    Set by POST /api/origin/set-from-node/{node_id} (back-projected from a
+    node's GPS centroid + surveyed array offset) or by PUT /api/origin
+    (manual override).  Independent of any specific node.
+    """
+    lat: float
+    lon: float
+    alt_m: float = Field(alias="altM")
+    set_from: Optional[str] = Field(
+        default=None,
+        alias="setFrom",
+        description="node_id whose GPS centroid was used to establish this origin",
+    )
+    set_at: str = Field(alias="setAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ArrayOriginManual(BaseModel):
+    """Body for PUT /api/origin — manual lat/lon/alt override."""
+    lat: float
+    lon: float
+    alt_m: float = Field(alias="altM")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -61,15 +187,12 @@ class GpsView(BaseModel):
     live: Optional[GpsFix] = None
     ema: Optional[GpsFix] = None
     centroid: Optional[GpsFix] = None
-    # Surveyed/configured absolute position (primary node only — `null`
-    # elsewhere). Authoritative when present; preferred over the estimates
-    # above for `latLon`/the map marker. See status_mapper._origin.
-    origin: Optional[GpsFix] = None
 
 
 class ClockView(BaseModel):
     source: str
     accuracyUs: Optional[float] = None
+    syncAgeMs: Optional[float] = None
     offsetUs: Optional[float] = None
     kalmanSettled: Optional[bool] = None
     valid: Optional[bool] = None
@@ -91,14 +214,13 @@ class EspNowView(BaseModel):
 
 
 class NodeView(BaseModel):
-    """Merged registry record + live polled status — what the frontend consumes.
+    """Merged registry record + live polled status + hub position — what the
+    frontend consumes.
 
-    The structured fields below (status/latLon/positionRelative/gps/clock/
-    audio/espNow/flags) are derived from `raw_status` by `status_mapper`,
-    translating the firmware's real `/app/api/status` schema onto the shape
-    the frontend's mock data already established. `raw_status` is retained
-    as a passthrough for debugging — the frontend should prefer the
-    structured fields, which remain stable even if the firmware schema shifts.
+    Structured fields (status/latLon/positionRelative/gps/clock/audio/
+    espNow/flags) are derived from `raw_status` + hub position by
+    `status_mapper.map_status`. `raw_status` is retained as a passthrough
+    for debugging.
     """
     model_config = ConfigDict(populate_by_name=True)
 
@@ -107,10 +229,6 @@ class NodeView(BaseModel):
     ip_address: Optional[str] = Field(default=None, alias="ipAddress")
     role: str = "UNKNOWN"
     discovery_method: Literal["mdns", "manual"] = Field(default="mdns", alias="discoveryMethod")
-    # Operator admission gate — being seen on the network (mDNS/manual) only
-    # gets a node to "pending"; an explicit approve is required before it's
-    # treated as part of the active array (polling, map, TDOA). Rejected
-    # nodes are retained (not deleted) so the decision is reversible.
     approval_status: Literal["pending", "approved", "rejected"] = Field(
         default="pending", alias="approvalStatus"
     )
@@ -119,24 +237,25 @@ class NodeView(BaseModel):
     last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
     raw_status: Optional[dict] = Field(default=None, alias="rawStatus")
 
-    # --- Derived/structured view (see status_mapper.map_status), aliased to
-    # camelCase so the frontend can consume this directly — same naming
-    # convention mockNodes.js already established. ---
+    # --- Derived/structured view (see status_mapper.map_status) ---
     status: Literal["online", "degraded", "offline"] = "offline"
     lat_lon: Optional[LatLon] = Field(default=None, alias="latLon")
     position_relative: Optional[PositionRelative] = Field(default=None, alias="positionRelative")
     position_known: bool = Field(default=False, alias="positionKnown")
-    # Operator-set provenance for the node's position: "surveyed" (confirmed
-    # ground truth, fixed anchor) vs "estimated" (provisional, refined by
-    # ongoing calibration). Distinct from `position_known` — a position can
-    # be known (relative offset configured) but still only an estimate.
-    position_status: Literal["surveyed", "estimated"] = Field(default="estimated", alias="positionStatus")
+    position_status: Literal["surveyed", "estimated"] = Field(
+        default="estimated", alias="positionStatus"
+    )
+    is_origin: bool = Field(default=False, alias="isOrigin")
+    # Hub-computed: horizontal distance (metres) between stored survey origin
+    # and the node's GPS centroid. Non-null only when is_origin=True and GPS
+    # centroid is available. One input to position trust — not a composite.
+    survey_disagreement_m: Optional[float] = Field(
+        default=None, alias="surveyDisagreementM"
+    )
     gps: Optional[GpsView] = None
     clock: Optional[ClockView] = None
     audio: Optional[AudioView] = None
     esp_now: Optional[EspNowView] = Field(default=None, alias="espNow")
     flags: list[str] = []
 
-    # Not yet sourced anywhere (firmware doesn't report it) — present so the
-    # frontend's existing display code has a stable field to read "—" from.
     firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")

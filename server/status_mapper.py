@@ -1,23 +1,17 @@
 """Maps the firmware's real `/app/api/status` schema onto the structured
 shape the frontend expects (see src/data/mockNodes.js for the reference shape).
 
-Why this exists: the mock UI was built against a guessed schema before any
-real hardware was reachable. Now that we've seen a live response from
-soundcapture-ed5de4, several things differ from the guess:
+Architecture note (2026-06-09): nodes no longer report position data
+(`posE/N/Alt`, `positionStatus`, `isOrigin`, `originLat/Lon/Alt`,
+`surveyDisagreementM`). All position ownership has moved to the hub's
+`node_positions` SQLite table. Nodes report only GPS telemetry (raw fix,
+EMA, centroid) which the hub passthrouh for display and uses to compute
+`surveyDisagreementM` against the stored position.
 
-  - `audio.sampleRateHz` is 48000, not 16000 — and that's *correct*, not an
-    oversight: at 16kHz, Nyquist (8kHz) would be below the 16-18kHz
-    calibration-chirp band, so the chirps couldn't be captured at all. 48kHz
-    gives headroom to ~24kHz and matches BirdNET's native processing rate.
-  - GPS reporting is much richer than guessed — three views (`gps` live,
-    `gpsEma`, `gpsCentroid`) rather than one flat object.
-  - The firmware does not (yet) report a numeric clock accuracy, firmware
-    version, ESP-NOW link stats, or trigger timestamps. Where the mock UI
-    expects a number we don't have, we pass `None` through — see the
-    NodeCard/NodeDetail tweaks for graceful "—" rendering.
-
-This module is the single place that translation happens, so as the firmware
-schema evolves we touch one file rather than hunting through routes/components.
+Role vocabulary has also changed: firmware now reports `node.isBroker` (bool)
+rather than `node.role` (enum). The frontend still uses "PRIMARY"/"LEAF" for
+grouping/badge CSS; this module maps isBroker onto that vocabulary so Track C
+(frontend reshape) can happen independently.
 """
 from typing import Optional
 
@@ -26,55 +20,33 @@ def _node_info(raw: dict) -> dict:
     return raw.get("node") or {}
 
 
-def _role(raw_role: Optional[str]) -> str:
-    """Normalise the firmware's role vocabulary onto the UI's.
+def _role(raw: dict) -> str:
+    """Map firmware's isBroker bool onto the frontend's PRIMARY/LEAF vocabulary.
 
-    Firmware reports `Role::Primary` / `Role::Node` (serialised e.g. as
-    "primary" / "node"). The frontend (NodeSidebar grouping, badge CSS —
-    see badge-primary/badge-leaf in index.css) was built around "PRIMARY"
-    / "LEAF". Without this mapping a secondary node's role normalises to
-    "NODE", which matches neither bucket — it's counted in the online
-    total but rendered in neither sidebar section. Anything that isn't
-    primary is a leaf in the UI's two-role architecture.
-    """
-    if (raw_role or "").strip().upper() == "PRIMARY":
-        return "PRIMARY"
-    if not raw_role:
-        return "UNKNOWN"
-    return "LEAF"
-
-
-def _position(raw: dict) -> tuple[Optional[dict], bool]:
-    info = _node_info(raw)
-    e, n, alt = info.get("posE"), info.get("posN"), info.get("posAlt")
-    known = e is not None and n is not None and alt is not None
-    return ({"eM": e, "nM": n, "altM": alt} if known else None), known
-
-
-def _origin(raw: dict) -> Optional[dict]:
-    """Pull the configured/surveyed absolute position out of `node`.
-
-    Firmware now reports `node.originLat/originLon/originAlt` — populated
-    only on the primary node (its surveyed position, set at configuration
-    time), `null` everywhere else. This is the authoritative absolute
-    position when present; everything else (centroid/EMA/live fix) is just
-    an estimate of where the GPS *thinks* the node is.
+    Firmware (post Track A) reports `node.isBroker: bool`. The frontend's
+    NodeSidebar grouping and badge CSS use "PRIMARY"/"LEAF" — preserved here
+    so Track C can reshape the frontend independently. Absent isBroker
+    (e.g. a node still running pre-refactor firmware) returns "UNKNOWN".
     """
     info = _node_info(raw)
-    lat, lon = info.get("originLat"), info.get("originLon")
-    if lat is None or lon is None:
-        return None
-    return {"lat": lat, "lon": lon, "altM": info.get("originAlt")}
+    is_broker = info.get("isBroker")
+    if is_broker is True:
+        return "BROKER"
+    if is_broker is False:
+        return "LEAF"
+    return "UNKNOWN"
 
 
-def _lat_lon(raw: dict) -> Optional[dict]:
-    """Prefer the surveyed origin (authoritative, primary-only), then the
-    long-running centroid average (far more stable than an instantaneous
-    fix for a node that's been sitting in one spot for hours), then the
-    live fix as a last resort."""
-    origin = _origin(raw)
-    if origin:
-        return {"lat": origin["lat"], "lon": origin["lon"]}
+def _lat_lon_from_gps(raw: dict) -> Optional[dict]:
+    """Derive a GPS-based lat/lon for display when no surveyed position exists.
+
+    Used as a fallback before the array origin is established — e.g. during
+    initial deployment when nodes are online but not yet surveyed.  Once the
+    hub array_origin is set, derive_relative_positions() projects all
+    surveyed nodes from their stored E/N offsets and overrides this value.
+
+    Priority: GPS centroid (most stable) → live fix.
+    """
     centroid = raw.get("gpsCentroid")
     if centroid and centroid.get("latitude") is not None:
         return {"lat": centroid["latitude"], "lon": centroid["longitude"]}
@@ -108,38 +80,44 @@ def _gps(raw: dict) -> Optional[dict]:
         "divergenceAlt": ema.get("divergenceAlt"),
         # Three views of "where the GPS *thinks* it is" — the live
         # instantaneous fix (jittery), the EMA-smoothed fix, and the
-        # long-running centroid average (most stable estimate). `origin`
-        # is different in kind: it's the surveyed/configured absolute
-        # position (primary node only) — authoritative, not an estimate —
-        # and is what `latLon`/the map marker prefers when present.
+        # long-running centroid average (most stable estimate).
         "live": _fix(gps),
         "ema": _fix(ema),
         "centroid": _fix(centroid),
-        "origin": _origin(raw),
     }
+
+
+_FIRMWARE_CLOCK_SOURCE = {
+    "GPS PPS":                "GPS_PPS",
+    "GPS NMEA":               "GPS_NMEA",
+    "Network - GPS PPS":      "NETWORK_GPS_PPS",
+    "Network - GPS NMEA":     "NETWORK_GPS_NMEA",
+    "Network - free running": "NETWORK_FREE_RUNNING",
+    "Free running":           "FREE_RUNNING",
+}
 
 
 def _clock(raw: dict) -> dict:
     clock = raw.get("clock") or {}
-    gps = raw.get("gps") or {}
+    gps   = raw.get("gps")   or {}
 
-    if clock.get("ppsDisciplined"):
+    fw_source = clock.get("source")
+    if fw_source and fw_source in _FIRMWARE_CLOCK_SOURCE:
+        source = _FIRMWARE_CLOCK_SOURCE[fw_source]
+    elif clock.get("ppsDisciplined"):
         source = "GPS_PPS"
     elif gps.get("available"):
         source = "GPS_NMEA"
     else:
-        source = "ESPNOW_KALMAN"
+        source = "FREE_RUNNING"
 
     return {
-        "source": source,
-        # Not yet reported by firmware — PPS discipline isn't wired up on
-        # this build (see firmware status memory). Surfacing `None` rather
-        # than a guessed number; UI shows "—".
-        "accuracyUs": None,
-        "offsetUs": None,
+        "source":        source,
+        "accuracyUs":    clock.get("uncertaintyUs"),
+        "syncAgeMs":     clock.get("syncAgeMs"),
+        "offsetUs":      None,
         "kalmanSettled": None,
-        # Extra field beyond the mock shape — handy to show directly.
-        "valid": clock.get("valid"),
+        "valid":         clock.get("valid"),
     }
 
 
@@ -149,42 +127,34 @@ def _audio(raw: dict) -> Optional[dict]:
         return None
     return {
         "bufferCapacityS": audio.get("bufferCapacitySecs"),
-        "bufferUsedS": audio.get("bufferFillSecs"),
+        "bufferUsedS": audio.get("storedSecs"),
         "sampleRateHz": audio.get("sampleRateHz"),
-        # Not reported — ICS-43434 is a 24-bit MEMS mic; firmware likely
-        # delivers 16- or 32-bit samples over I2S. Leave unknown rather
-        # than guess; UI shows "—".
-        "bitDepth": None,
+        "bitDepth": audio.get("bitsPerSample"),
         "lastTriggerAt": None,
         "running": audio.get("running"),
     }
 
 
-def _position_status(raw: dict) -> str:
-    """Operator-set provenance flag for the node's E/N/Alt position.
-
-    Firmware reports `node.positionStatus` as "surveyed" (operator-confirmed
-    ground truth — treated as a fixed anchor) or "estimated" (provisional,
-    refined by ongoing calibration). Older firmware that predates this field
-    won't report it at all — default to "estimated" rather than implying a
-    confidence the node never claimed.
-    """
-    info = _node_info(raw)
-    value = (info.get("positionStatus") or "").strip().lower()
-    return "surveyed" if value == "surveyed" else "estimated"
+def _position_from_hub(node_pos: Optional[dict]) -> tuple[Optional[dict], bool]:
+    """Extract relative position (E/N/Alt) from the hub's position record."""
+    if not node_pos:
+        return None, False
+    e, n, alt = node_pos.get("pos_e"), node_pos.get("pos_n"), node_pos.get("pos_alt")
+    known = e is not None and n is not None and alt is not None
+    return ({"eM": e, "nM": n, "altM": alt} if known else None), known
 
 
 def _flags(position_known: bool, clock: dict, reachable: bool) -> list[str]:
     flags = []
     if not reachable:
-        # A momentary poll miss shouldn't blank the UI — the registry retains
-        # the last raw_status (see registry.update_live_status), and we keep
-        # mapping it below. We just flag that it may be stale.
         flags.append("UNREACHABLE")
     if not position_known:
         flags.append("POSITION_UNKNOWN")
     if clock.get("valid") is False:
-        flags.append("CLOCK_INVALID")
+        if clock.get("source") == "NETWORK_FREE_RUNNING":
+            flags.append("CLOCK_NO_UTC")
+        else:
+            flags.append("CLOCK_INVALID")
     return flags
 
 
@@ -196,10 +166,8 @@ def _status(reachable: bool, flags: list[str]) -> str:
     return "online"
 
 
-# Brisbane-latitude (~ -27.5°) flat-earth scale factors — the same ones the
-# firmware uses for its EMA divergence (NEU) calc. Fine for projecting
-# offsets at the <1km scale of this property; would need a proper geodesic
-# if the array ever spans enough latitude for the approximation to drift.
+# Brisbane-latitude (~-27.5°) flat-earth scale factors — used for EMA
+# divergence and survey disagreement computation. Fine at <1 km scale.
 _M_PER_DEG_LAT = 111_320.0
 _M_PER_DEG_LON = 98_740.0
 
@@ -213,92 +181,156 @@ def _offset_to_latlon(origin: dict, e_m: float, n_m: float) -> dict:
     }
 
 
-def derive_relative_positions(mapped: list[dict]) -> None:
-    """Fill in `lat_lon` for nodes that are positioned only via a relative
-    E/N/Alt offset from the primary, by projecting that offset onto the
-    primary's absolute position. Mutates the mapped dicts in place.
+def survey_disagreement_m(
+    node_pos: Optional[dict],
+    raw: dict,
+    array_origin: Optional[dict] = None,
+) -> Optional[float]:
+    """Compute the horizontal distance between the node's projected survey
+    position and its GPS centroid estimate, in metres.
 
-    Why: only the primary reports GPS — leaf nodes have no `lat_lon` of
-    their own, so `MapView` (which only plots nodes with `lat_lon`) can't
-    place them even though their position is known relative to the primary.
-    This derives a plottable absolute position for them.
+    Meaningful for any node that has both a surveyed E/N position and an
+    active GPS centroid — not limited to the is_origin node.  Returns None
+    if array_origin is not set, the node has no position, or GPS centroid
+    is unavailable.
 
-    This is explicitly a *derived* position, not a surveyed one — we tag it
-    with the `POSITION_DERIVED` flag so the UI can (later) distinguish
-    "surveyed/GPS-determined" from "calculated from relative offset" rather
-    than implying the same precision/provenance for both.
+    This is one input to operator confidence in the surveyed position — not
+    a single composite trust verdict.
     """
-    origin = None
-    for m in mapped:
-        if m.get("role") == "PRIMARY":
-            gps = m.get("gps") or {}
-            origin = gps.get("origin") or gps.get("centroid") or m.get("lat_lon")
-            break
-    if not origin:
+    if not node_pos or array_origin is None:
+        return None
+    pos_e = node_pos.get("pos_e")
+    pos_n = node_pos.get("pos_n")
+    if pos_e is None or pos_n is None:
+        return None
+    centroid = (raw or {}).get("gpsCentroid") or {}
+    if centroid.get("latitude") is None:
+        return None
+    # Project the stored E/N position to lat/lon for comparison.
+    surveyed = _offset_to_latlon(
+        {"lat": array_origin["lat"], "lon": array_origin["lon"]}, pos_e, pos_n
+    )
+    dlat = centroid["latitude"] - surveyed["lat"]
+    dlon = centroid["longitude"] - surveyed["lon"]
+    return ((dlat * _M_PER_DEG_LAT) ** 2 + (dlon * _M_PER_DEG_LON) ** 2) ** 0.5
+
+
+def derive_relative_positions(
+    mapped: list[dict],
+    array_origin: Optional[dict] = None,
+) -> None:
+    """Fill in `lat_lon` for all nodes that have a stored E/N/Alt position.
+    Mutates the mapped dicts in place.
+
+    `array_origin` is the hub-level geographic datum — a dict with keys
+    `lat`, `lon`, `alt_m` from the `array_origin` DB table.  It is independent
+    of any specific node; pass it in from routes._mapped_nodes().
+
+    If `array_origin` is None (not yet configured), falls back to the GPS
+    centroid of the first online BROKER node — a pre-survey display aid only,
+    not used for TDOA.
+
+    All nodes with a stored position_relative are projected from the datum,
+    including any node marked is_origin (it sits at its own E/N offset in the
+    array frame, which may not be 0,0).
+    """
+    if array_origin is None:
+        # Pre-survey fallback: use BROKER GPS centroid as an approximate datum.
+        for m in mapped:
+            if m.get("role") == "BROKER":
+                gps = m.get("gps") or {}
+                centroid = gps.get("centroid")
+                if centroid:
+                    array_origin = {"lat": centroid["lat"], "lon": centroid["lon"]}
+                break
+
+    if array_origin is None:
         return
 
+    origin_latlon = {"lat": array_origin["lat"], "lon": array_origin["lon"]}
+
     for m in mapped:
-        if m.get("role") == "PRIMARY" or m.get("lat_lon") or not m.get("position_relative"):
+        if not m.get("position_relative"):
             continue
         rel = m["position_relative"]
-        m["lat_lon"] = _offset_to_latlon(origin, rel["eM"], rel["nM"])
-        m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
+        m["lat_lon"] = _offset_to_latlon(origin_latlon, rel["eM"], rel["nM"])
+        # Mark non-origin nodes so the UI can distinguish projected vs. direct.
+        if not m.get("is_origin"):
+            m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
 
 
-def map_status(role: str, reachable: bool, raw_status: Optional[dict]) -> dict:
+def map_status(
+    role: str,
+    reachable: bool,
+    raw_status: Optional[dict],
+    node_pos: Optional[dict] = None,
+    array_origin: Optional[dict] = None,
+) -> dict:
     """Build the set of derived/display fields the frontend expects.
+
+    `node_pos` is the hub's persisted position record for this node (from
+    `db.get_node_position`), or None if no position has been set yet.
+
+    `lat_lon` is left None here for nodes with a stored position — it will
+    be filled by derive_relative_positions() once the hub array_origin is
+    known.  For nodes without a stored position that happen to be online,
+    _lat_lon_from_gps() provides a display fallback.
 
     Returns a dict suitable for spreading into NodeView — callers merge this
     with the persisted identity fields (id, hostname, ip_address, ...).
-
-    IMPORTANT: `reachable` reflects only the *most recent* poll. A single
-    missed cycle (WiFi blip, timeout) sets it False, but `registry` retains
-    the last-known `raw_status` rather than clearing it. We deliberately keep
-    mapping that cached status here — flagging it UNREACHABLE/degraded rather
-    than nulling out gps/clock/audio — because:
-      (a) last-known values (buffer fill, GPS lock, etc.) are operationally
-          more useful than a blank panel during a transient drop, and
-      (b) several frontend components (e.g. TopBar's "last trigger" scan)
-          assume `audio`/`gps`/`clock` are present whenever a node has ever
-          reported — abruptly nulling them on every routine poll miss was
-          producing intermittent null-deref crashes (blank/black screen,
-          recoverable only by reload).
-    Only a node that has *never* successfully reported gets fully-null fields.
     """
+    position_relative, position_known = _position_from_hub(node_pos)
+    is_origin = bool(node_pos and node_pos.get("is_origin"))
+    pos_status = (node_pos or {}).get("pos_status", "estimated")
+
     if not raw_status:
+        # Node is offline — live telemetry unavailable, but hub-stored position
+        # is still valid and must not be discarded.  derive_relative_positions()
+        # will project lat_lon from the stored offset + hub array_origin.
+        flags = ["UNREACHABLE"]
+        if not position_known:
+            flags.append("POSITION_UNKNOWN")
         return {
             "status": "offline",
             "role": role,
-            "lat_lon": None,
-            "position_relative": None,
-            "position_known": False,
-            "position_status": "estimated",
+            "lat_lon": None,          # filled by derive_relative_positions()
+            "position_relative": position_relative,
+            "position_known": position_known,
+            "position_status": pos_status,
+            "is_origin": is_origin,
+            "survey_disagreement_m": None,
             "gps": None,
             "clock": None,
             "audio": None,
             "esp_now": None,
-            "flags": ["UNREACHABLE"],
+            "firmware_version": None,
+            "flags": flags,
         }
 
-    position_relative, position_known = _position(raw_status)
     clock = _clock(raw_status)
+    audio = _audio(raw_status)
     flags = _flags(position_known, clock, reachable)
-    info = _node_info(raw_status)
+    if audio is not None and audio.get("running") is False:
+        flags.append("AUDIO_STOPPED")
+
+    # lat_lon: only set from GPS here for nodes without a stored position
+    # (pre-survey display fallback).  Nodes with stored positions get their
+    # lat_lon projected from the hub array_origin by derive_relative_positions().
+    lat_lon = None if position_known else _lat_lon_from_gps(raw_status)
 
     return {
         "status": _status(reachable, flags),
-        # Prefer the role the node itself reports — more authoritative than
-        # whatever the registry guessed at discovery time.
-        "role": _role(info.get("role") or role),
-        "lat_lon": _lat_lon(raw_status),
+        "role": _role(raw_status),
+        "lat_lon": lat_lon,
         "position_relative": position_relative,
         "position_known": position_known,
-        "position_status": _position_status(raw_status),
+        "position_status": pos_status,
+        "is_origin": is_origin,
+        "survey_disagreement_m": survey_disagreement_m(node_pos, raw_status, array_origin),
         "gps": _gps(raw_status),
         "clock": clock,
-        "audio": _audio(raw_status),
-        # Not present in the primary node's status — TODO confirm whether
-        # leaf nodes report ESP-NOW link stats once one is on the network.
+        "audio": audio,
         "esp_now": None,
+        "firmware_version": _node_info(raw_status).get("firmwareVersion"),
         "flags": flags,
     }

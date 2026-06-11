@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import NodeConfigModal from './NodeConfigModal.jsx'
+import NodePositionModal from './NodePositionModal.jsx'
 
 function relativeTime(isoString) {
   if (!isoString) return '—'
@@ -15,10 +16,13 @@ function fmt(val, suffix = '') {
 
 function clockSourceLabel(source) {
   const map = {
-    GPS_PPS:       'GPS PPS (hardware)',
-    GPS_NMEA:      'GPS NMEA (stage 1)',
-    ESPNOW_KALMAN: 'ESP-NOW + Kalman',
-    NONE:          'None',
+    GPS_PPS:              'GPS PPS (hardware)',
+    GPS_NMEA:             'GPS NMEA (stage 1)',
+    NETWORK_GPS_PPS:      'Network — GPS PPS',
+    NETWORK_GPS_NMEA:     'Network — GPS NMEA',
+    NETWORK_FREE_RUNNING: 'Network — free running',
+    FREE_RUNNING:         'Free running',
+    NONE:                 'None',
   }
   return map[source] ?? source
 }
@@ -54,14 +58,15 @@ function fmtFix(fix) {
 }
 
 function bufferClass(f) {
-  if (f >= 0.95) return 'full'
-  if (f >= 0.75) return 'warn'
-  return 'ok'
+  if (f >= 0.90) return 'good'
+  if (f >= 0.25) return 'warn'
+  return 'low'
 }
 
-export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure }) {
+export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure, onSetPosition }) {
   const [, setTick] = useState(0)
   const [configOpen, setConfigOpen] = useState(false)
+  const [positionOpen, setPositionOpen] = useState(false)
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
     return () => clearInterval(t)
@@ -92,7 +97,20 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             {node.ipAddress ?? '—'} · fw {node.firmwareVersion ?? '—'}
           </div>
         </div>
-        <span className={`badge badge-${node.role.toLowerCase()}`}>{node.role}</span>
+        {node.isOrigin && (
+          <span title="Position reference node — coordinates used to set array origin" style={{
+            fontSize: 10, color: 'var(--text-primary)',
+            background: 'var(--border)', padding: '1px 6px', borderRadius: 3, fontWeight: 700,
+            letterSpacing: '0.04em',
+          }}>POS REF</span>
+        )}
+        {node.role === 'BROKER' && (
+          <span title="Broker — relays ESP-NOW traffic to/from WiFi" style={{
+            fontSize: 10, color: 'var(--text-primary)',
+            background: 'var(--border)', padding: '1px 6px', borderRadius: 3, fontWeight: 700,
+            letterSpacing: '0.04em',
+          }}>BROKER</span>
+        )}
         <button
           onClick={onClose}
           style={{
@@ -118,8 +136,9 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             <div key={flag} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ color: 'var(--yellow)', fontSize: 12 }}>⚠</span>
               <span style={{ color: 'var(--yellow)', fontSize: 12 }}>
-                {flag === 'POSITION_UNKNOWN' && 'Position unknown — TOF calibration required'}
+                {flag === 'POSITION_UNKNOWN' && 'Position unknown — set via Set Position'}
                 {flag === 'CLOCK_UNSETTLED'  && 'Clock not yet settled — Kalman still converging'}
+                {flag === 'CLOCK_NO_UTC'     && 'No UTC reference — TDOA relative only'}
               </span>
             </div>
           ))}
@@ -135,44 +154,28 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           {relPos ? (
             <>
               <div className="kv">
-                <span className="kv-key">E / N / Alt</span>
+                <span className="kv-key">N / E / Alt</span>
                 <span className="kv-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                  {relPos.eM.toFixed(2)}m · {relPos.nM.toFixed(2)}m · {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(2)}m
+                  {relPos.nM.toFixed(2)}m · {relPos.eM.toFixed(2)}m · {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(2)}m
                 </span>
               </div>
-              {/* Lat/Lon/Alt only applies to nodes with a GPS-derived
-                  absolute position (currently just the primary). Leaf
-                  nodes are positioned purely via their relative E/N/Alt
-                  offset from the primary — they have no lat/lon of their
-                  own to show, so we skip the row rather than render "—". */}
-              {(node.gps?.origin || node.gps?.centroid || node.latLon) && (
+              {/* Lat/Lon — projected from hub array_origin + stored E/N offset,
+                  or GPS centroid fallback when no array origin is set yet. */}
+              {node.latLon && (
                 <>
                   <div className="kv">
-                    <span className="kv-key">Lat / Lon / Alt</span>
+                    <span className="kv-key">Lat / Lon</span>
                     <span className="kv-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                      {fmtFix(node.gps?.origin ?? node.gps?.centroid ?? node.latLon)}
+                      {node.latLon.lat.toFixed(6)}, {node.latLon.lon.toFixed(6)}
                     </span>
                   </div>
-                  {/* Three distinct provenances for this lat/lon — picking
-                      the wrong explanation here is actively misleading
-                      (e.g. telling a GPS-less leaf node its position came
-                      from "the GPS centroid average"), so check explicitly
-                      rather than assuming "not origin" means "GPS centroid". */}
-                  {node.gps?.origin ? (
+                  {node.isOrigin ? (
                     <div style={{
                       marginTop: 4, padding: '5px 8px',
                       background: 'var(--green-dim)', borderRadius: 4,
                       fontSize: 11, color: 'var(--green)',
                     }}>
-                      Lat/lon/alt is the surveyed position configured on this node
-                    </div>
-                  ) : node.gps?.centroid ? (
-                    <div style={{
-                      marginTop: 4, padding: '5px 8px',
-                      background: 'var(--blue-dim)', borderRadius: 4,
-                      fontSize: 11, color: 'var(--blue)',
-                    }}>
-                      Lat/lon/alt is the GPS centroid average — no surveyed origin is configured on this node
+                      GPS reference node — used to establish hub array origin
                     </div>
                   ) : node.flags?.includes('POSITION_DERIVED') ? (
                     <div style={{
@@ -180,9 +183,17 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                       background: 'var(--blue-dim)', borderRadius: 4,
                       fontSize: 11, color: 'var(--blue)',
                     }}>
-                      Lat/lon/alt is calculated from this node's relative E/N/Alt offset to the primary's surveyed position — not an independent GPS fix
+                      Projected from hub array origin via N/E/Alt offset
                     </div>
-                  ) : null}
+                  ) : (
+                    <div style={{
+                      marginTop: 4, padding: '5px 8px',
+                      background: 'var(--blue-dim)', borderRadius: 4,
+                      fontSize: 11, color: 'var(--blue)',
+                    }}>
+                      GPS centroid estimate — array origin not yet configured
+                    </div>
+                  )}
                 </>
               )}
               {/* This reflects the operator-set provenance flag
@@ -201,6 +212,14 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                   <span className="kv-val" style={{ color: 'var(--blue)' }}>Estimated</span>
                 )}
               </div>
+              {node.surveyDisagreementM != null && (
+                <div className="kv">
+                  <span className="kv-key">Survey Δ</span>
+                  <span className={`kv-val ${node.surveyDisagreementM < 2 ? 'good' : node.surveyDisagreementM < 5 ? 'warn' : 'bad'}`}>
+                    {node.surveyDisagreementM.toFixed(2)} m from GPS centroid
+                  </span>
+                </div>
+              )}
             </>
           ) : (
             <div className="kv">
@@ -231,6 +250,16 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
               </span>
             </div>
           )}
+          {node.clock?.syncAgeMs != null && (
+            <div className="kv">
+              <span className="kv-key">Last sync</span>
+              <span className="kv-val">
+                {node.clock.syncAgeMs < 1000
+                  ? `${node.clock.syncAgeMs} ms ago`
+                  : `${(node.clock.syncAgeMs / 1000).toFixed(1)} s ago`}
+              </span>
+            </div>
+          )}
           {node.clock?.valid != null && (
             <div className="kv">
               <span className="kv-key">Valid</span>
@@ -247,7 +276,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
               </span>
             </div>
           )}
-          {node.clock?.source === 'GPS_NMEA' && (
+          {(node.clock?.source === 'GPS_NMEA' || node.clock?.source === 'NETWORK_GPS_NMEA') && (
             <div style={{
               marginTop: 6, padding: '5px 8px',
               background: 'var(--blue-dim)', borderRadius: 4,
@@ -268,11 +297,11 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                 {node.gps.locked ? `Yes — ${node.gps.satellites} satellites` : 'No lock'}
               </span>
             </div>
-            {node.gps.origin && (
+            {false && /* node.gps.origin removed — origin is now a hub-level config */ (
               <div className="kv">
                 <span className="kv-key">Surveyed origin</span>
                 <span className="kv-val good" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                  {fmtFix(node.gps.origin)}
+                  —
                 </span>
               </div>
             )}
@@ -508,8 +537,16 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
         <button
           className="btn"
           style={{ width: '100%' }}
+          onClick={() => setPositionOpen(true)}
+          title="Set this node's position in the hub's position database"
+        >
+          Set Position
+        </button>
+        <button
+          className="btn"
+          style={{ width: '100%' }}
           onClick={() => setConfigOpen(true)}
-          title="Edit this node's role, position, and origin settings"
+          title="Configure node-resident settings (broker mode)"
         >
           Configure
         </button>
@@ -522,6 +559,16 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           onSubmit={async (patch) => {
             await onConfigure?.(node.id, patch)
             setConfigOpen(false)
+          }}
+        />
+      )}
+
+      {positionOpen && (
+        <NodePositionModal
+          node={node}
+          onClose={() => setPositionOpen(false)}
+          onSubmit={async (pos) => {
+            await onSetPosition?.(node.id, pos)
           }}
         />
       )}

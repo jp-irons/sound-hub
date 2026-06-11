@@ -40,8 +40,6 @@ body { background: var(--bg-base); overflow: hidden; height: 100vh; }
   font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.badge-primary { background: var(--blue-dim); color: var(--blue); }
-.badge-leaf    { background: var(--border-muted); color: var(--text-primary); }
 
 .status-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -57,9 +55,9 @@ body { background: var(--bg-base); overflow: hidden; height: 100vh; }
 .fill-bar-inner {
   height: 100%; border-radius: 2px; transition: width 0.3s;
 }
-.fill-bar-inner.ok   { background: var(--green); }
+.fill-bar-inner.good { background: var(--green); }
 .fill-bar-inner.warn { background: var(--yellow); }
-.fill-bar-inner.full { background: var(--red); }
+.fill-bar-inner.low  { background: var(--red); }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;

@@ -72,15 +72,31 @@ export default function App() {
     }
   }, [refresh])
 
-  // Unlike the admission actions above, this one re-throws on failure —
-  // the config modal needs the actual error message (e.g. the backend's
-  // 409 "origin already set on <other node>") to show the operator,
+  // Unlike the admission actions above, these re-throw on failure —
+  // the modals need the actual error message to show the operator,
   // rather than having it swallowed into the global error banner.
   const configureNode = useCallback(async (id, patch) => {
     const res = await fetch(`${API_BASE}/nodes/${id}/configure`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
+    })
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch { /* not JSON — fall back to status text */ }
+      throw new Error(detail)
+    }
+    await refresh()
+  }, [refresh])
+
+  const setNodePosition = useCallback(async (id, position) => {
+    const res = await fetch(`${API_BASE}/nodes/${id}/position`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(position),
     })
     if (!res.ok) {
       let detail = `${res.status} ${res.statusText}`
@@ -140,6 +156,7 @@ export default function App() {
             onReject={rejectNode}
             onRemove={removeNode}
             onConfigure={configureNode}
+            onSetPosition={setNodePosition}
           />
         )}
       </div>

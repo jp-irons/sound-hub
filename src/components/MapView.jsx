@@ -1,6 +1,7 @@
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
-import { useEffect } from 'react'
-import { GOD_NODE_LATLON } from '../data/mockNodes.js'
+import { useEffect, useState } from 'react'
+
+const API_BASE = 'http://localhost:8000/api'
 
 const STATUS_COLOR = {
   online:   '#3fb950',
@@ -20,8 +21,25 @@ function MapFocus({ nodes, selectedId }) {
   return null
 }
 
+// Fallback map centre used before the hub array origin is configured.
+// Actual property location — matches the coordinates in src/data/mockNodes.js.
+const PROPERTY_FALLBACK = [-27.497347, 152.996641]
+
 export default function MapView({ nodes, selectedId, onSelect }) {
-  const center = [GOD_NODE_LATLON.lat, GOD_NODE_LATLON.lon]
+  const [arrayOrigin, setArrayOrigin] = useState(null)
+
+  // Load the hub array origin once on mount — it's a hub-level config,
+  // not derived from any node, so we don't need to reload on every poll.
+  useEffect(() => {
+    fetch(`${API_BASE}/origin`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data) setArrayOrigin(data) })
+      .catch(() => {})
+  }, [])
+
+  const center = arrayOrigin
+    ? [arrayOrigin.lat, arrayOrigin.lon]
+    : PROPERTY_FALLBACK
 
   return (
     <div style={{ flex: 1, position: 'relative' }}>
@@ -69,7 +87,7 @@ export default function MapView({ nodes, selectedId, onSelect }) {
                   </div>
                   {relPos && (
                     <div style={{ fontSize: 11, marginTop: 4, color: '#777', fontFamily: 'monospace' }}>
-                      E {relPos.eM.toFixed(1)}m · N {relPos.nM.toFixed(1)}m · Alt {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(1)}m
+                      N {relPos.nM.toFixed(1)}m · E {relPos.eM.toFixed(1)}m · Alt {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(1)}m
                     </div>
                   )}
                   <div style={{ fontSize: 11, marginTop: 4, color: '#777' }}>
