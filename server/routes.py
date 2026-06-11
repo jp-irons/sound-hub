@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from . import config, db, registry, status_mapper
 from .models import (
     ArrayOrigin, ArrayOriginManual,
-    AudioAckBody, ManualNodeRequest, NodeConfigRequest,
+    AudioAckBody, AudioSampleRequest, ManualNodeRequest, NodeConfigRequest,
     NodePosition, NodeView, TdoaRequest, TdoaResponse,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
@@ -426,16 +426,133 @@ async def clear_origin():
     await db.clear_array_origin()
 
 
-@router.post("/nodes/{node_id}/sample")
-async def request_sample(node_id: str):
-    """Request an audio sample pull from a node. STUB — pull protocol TBD."""
+# ---------------------------------------------------------------------------
+# Audio pull — control plane endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/audio/ack", status_code=204)
+async def audio_ack(body: AudioAckBody):
+    """Receive a broker-forwarded node ack (ACK / DONE / UNAVAILABLE / ERROR).
+
+    The broker calls this after hearing an AudioAckMsg from a node over ESP-NOW.
+    Updates the in-memory request tracker so callers polling
+    GET /audio/requests/{id} see the latest status.
+    """
+    entry = _audio_requests.setdefault(body.request_id, {"acks": []})
+    entry["acks"].append({
+        "status": body.status,
+        "srcMac": body.src_mac,
+        "at": _now_iso(),
+    })
+    log.info("audio ack id=%s status=%s from %s", body.request_id, body.status, body.src_mac)
+
+
+@router.post("/audio/push", status_code=200)
+async def audio_push(
+    request: Request,
+    requestId: int = Query(..., description="Matches the originating AudioRequestMsg.requestId"),
+    srcMac: str    = Query(..., description="Wi-Fi STA MAC of the sending node (xx:xx:xx:xx:xx:xx)"),
+):
+    """Receive a WAV audio segment pushed directly from a node.
+
+    The node POSTs here after receiving an AUDIO_REQUEST and successfully
+    retrieving the segment from its ring buffer.  The file is saved to the
+    audio/ directory as audio_{requestId}_{srcMac}.wav.
+    """
+    data = await request.body()
+    os.makedirs(_AUDIO_DIR, exist_ok=True)
+    fname = f"audio_{requestId}_{srcMac.replace(':', '')}.wav"
+    with open(os.path.join(_AUDIO_DIR, fname), "wb") as fh:
+        fh.write(data)
+    entry = _audio_requests.setdefault(requestId, {"acks": []})
+    entry.update({"file": fname, "bytes": len(data), "savedAt": _now_iso()})
+    log.info("audio push id=%s from %s — %d bytes → %s", requestId, srcMac, len(data), fname)
+
+
+@router.get("/audio/requests/{request_id}")
+async def get_audio_request(request_id: int):
+    """Poll the status of an audio pull request.
+
+    Returns the ack history and, once the push has arrived, the saved filename
+    and byte count.  Resets on hub restart (Phase 1 — intentional).
+    """
+    entry = _audio_requests.get(request_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return {"requestId": request_id, **entry}
+
+
+@router.post("/nodes/{node_id}/sample", status_code=202)
+async def request_sample(node_id: str, req: AudioSampleRequest):
+    """Trigger an audio pull from a node for a specific UTC time range.
+
+    Flow:
+      1. Resolves the target node's wifiMac from its last polled status.
+      2. Finds the currently reachable broker node.
+      3. POSTs the AudioRequestMsg JSON to the broker's /espnow/relay endpoint.
+      4. Returns {requestId, status: "relayed"} immediately — poll
+         GET /audio/requests/{requestId} for ack and push progress.
+
+    Errors:
+      404 — node not found in registry
+      422 — node wifiMac not yet known (wait for next status poll)
+      503 — no reachable broker, or broker IP unknown
+      502 — broker relay endpoint returned an error
+    """
     node = await registry.get_node(node_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
-    raise HTTPException(
-        status_code=501,
-        detail="Not implemented — awaiting audio pull protocol",
-    )
+
+    # Resolve the target node's WiFi STA MAC from its last polled status.
+    live      = registry.get_live_status(node_id)
+    raw       = live.get("raw_status") or {}
+    node_info = raw.get("node", {})
+    target_mac = node_info.get("wifiMac")
+    if not target_mac:
+        raise HTTPException(
+            status_code=422,
+            detail="Node wifiMac not yet known — wait for next status poll",
+        )
+
+    # Find the first reachable broker node.
+    broker_ip = None
+    for n, lv, _ in await _mapped_nodes():
+        r = (lv.get("raw_status") or {}).get("node", {})
+        if r.get("isBroker") is True and lv.get("reachable"):
+            broker_ip = n.get("ip_address")
+            break
+    if broker_ip is None:
+        raise HTTPException(status_code=503, detail="No reachable broker node found")
+
+    import random
+    request_id = random.randint(1, 2**31 - 1)
+    _audio_requests[request_id] = {
+        "acks": [],
+        "targetMac": target_mac,
+        "createdAt": _now_iso(),
+    }
+
+    payload = {
+        "requestId": request_id,
+        "targetMac": target_mac,
+        "tStartUs":  req.t_start_us,
+        "tEndUs":    req.t_end_us,
+        "hubIp":     config.BASE_STATION_IP,
+        "hubPort":   config.BASE_STATION_PORT,
+    }
+
+    async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
+        r = await client.post(f"{config.NODE_SCHEME}://{broker_ip}/espnow/relay", json=payload)
+
+    if r.status_code not in (200, 202):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Broker relay rejected: HTTP {r.status_code}",
+        )
+
+    log.info("audio pull relayed — id=%s node=%s mac=%s [%s … %s]",
+             request_id, node_id, target_mac, req.t_start_us, req.t_end_us)
+    return {"requestId": request_id, "status": "relayed"}
 
 
 # ---------------------------------------------------------------------------
@@ -451,67 +568,46 @@ async def solve_tdoa(req: TdoaRequest):
     plus the RMS residual and (for 4-node solves) the mirror root.
 
     Errors:
-      422 — fewer than 4 timestamps, unknown node ID, node has no stored
-            position, or the solver rejects the geometry as singular.
+      422 — fewer than 4 timestamps, unknown node ID, node has no stored position
+      500 — solver failure (degenerate geometry)
     """
     if len(req.timestamps) < 4:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Need at least 4 node timestamps, got {len(req.timestamps)}",
-        )
-
-    positions = await db.list_node_positions()
+        raise HTTPException(status_code=422, detail="At least 4 node timestamps required")
 
     nodes: list[TdoaNode] = []
     timestamps_us: list[float] = []
-    missing_position: list[str] = []
-    unknown_node: list[str] = []
-
-    for nt in req.timestamps:
-        # Check the node is registered.
-        node_row = await registry.get_node(nt.node_id)
-        if node_row is None:
-            unknown_node.append(nt.node_id)
-            continue
-
-        pos = positions.get(nt.node_id)
-        if pos is None or pos.get("pos_e") is None or pos.get("pos_n") is None or pos.get("pos_alt") is None:
-            missing_position.append(nt.node_id)
-            continue
-
-        # Coordinate mapping: hub (posE, posN, posAlt) → solver (x, y, z).
-        nodes.append(TdoaNode(nt.node_id, pos["pos_e"], pos["pos_n"], pos["pos_alt"]))
-        timestamps_us.append(nt.timestamp_us)
-
-    if unknown_node:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown node IDs (not in registry): {unknown_node}",
-        )
-    if missing_position:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Nodes have no stored position: {missing_position}",
-        )
-    if len(nodes) < 4:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Only {len(nodes)} nodes have positions; need at least 4",
-        )
+    for ts_entry in req.timestamps:
+        node = await registry.get_node(ts_entry.node_id)
+        if node is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown node {ts_entry.node_id!r}",
+            )
+        pos = await db.get_node_position(ts_entry.node_id)
+        if pos is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"No stored position for node {ts_entry.node_id!r}",
+            )
+        if pos.get("pos_e") is None or pos.get("pos_n") is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Position for node {ts_entry.node_id!r} is incomplete (pos_e/pos_n missing)",
+            )
+        nodes.append(TdoaNode(
+            node_id=ts_entry.node_id,
+            x=pos["pos_e"],
+            y=pos["pos_n"],
+            z=pos.get("pos_alt") or 0.0,
+        ))
+        timestamps_us.append(ts_entry.timestamp_us)
 
     try:
-        result = tdoa_solve(
-            nodes,
-            timestamps_us,
-            speed_of_sound=req.speed_of_sound,
-            hint_point=req.hint_point,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    ambiguous = None
-    if result.ambiguous_root is not None:
-        ambiguous = (result.ambiguous_root[0], result.ambiguous_root[1], result.ambiguous_root[2])
+        result = tdoa_solve(nodes, timestamps_us,
+                            speed_of_sound=req.speed_of_sound,
+                            hint_point=req.hint_point)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Solver error: {exc}") from exc
 
     return TdoaResponse(
         x=result.x,
@@ -519,85 +615,5 @@ async def solve_tdoa(req: TdoaRequest):
         z=result.z,
         residual_m=result.residual,
         method=result.method,
-        ambiguous_root=ambiguous,
+        ambiguous_root=result.ambiguous_root[:3] if result.ambiguous_root else None,
     )
-
-
-# ---------------------------------------------------------------------------
-# Audio pull control plane
-# ---------------------------------------------------------------------------
-
-@router.post("/audio/ack", status_code=200)
-async def post_audio_ack(body: AudioAckBody):
-    """Receive a node ack forwarded by the broker (POST /api/audio/ack).
-
-    The broker's EspNowControl::handleAudioAck calls this after receiving an
-    AudioAckMsg over ESP-NOW.  Stores the ack in _audio_requests so the
-    operator can poll GET /api/audio/requests/{id} instead of tailing broker
-    serial output.
-    """
-    entry = _audio_requests.setdefault(body.request_id, {"acks": []})
-    entry["acks"].append({
-        "status": body.status,
-        "srcMac": body.src_mac,
-        "at": _now_iso(),
-    })
-    log.info("audio ack id=%d status=%s from %s", body.request_id, body.status, body.src_mac)
-    return {"ok": True}
-
-
-@router.get("/audio/requests/{request_id}")
-async def get_audio_request(request_id: int):
-    """Return the accumulated acks for a given request ID.
-
-    Useful for verifying end-to-end ack delivery without serial monitors.
-    Returns 404 if the hub has never seen an ack for this request.
-    """
-    entry = _audio_requests.get(request_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="request not found")
-    return {"requestId": request_id, **entry}
-
-
-@router.post("/audio/push", status_code=200)
-async def push_audio(
-    request: Request,
-    request_id: int = Query(..., alias="requestId"),
-    src_mac: str = Query(default="unknown", alias="srcMac"),
-):
-    """Receive a WAV audio segment pushed directly from a node.
-
-    The node calls this after receiving an AudioRequestMsg and confirming the
-    segment is available (ACK already sent via ESP-NOW).  On success it will
-    send a DONE ack over ESP-NOW; on failure an ERROR ack.
-
-    Saves the WAV to audio/<requestId>_<srcMac>_<timestamp>.wav and records
-    the upload in the in-memory request tracker.
-    """
-    data = await request.body()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty body")
-
-    os.makedirs(_AUDIO_DIR, exist_ok=True)
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe_mac = src_mac.replace(":", "")
-    filename = f"{request_id}_{safe_mac}_{ts}.wav"
-    filepath = os.path.join(_AUDIO_DIR, filename)
-
-    with open(filepath, "wb") as f:
-        f.write(data)
-
-    log.info("audio push id=%d from %s — %d bytes saved to %s",
-             request_id, src_mac, len(data), filename)
-
-    # Record in the in-memory tracker so GET /audio/requests/{id} reflects it.
-    entry = _audio_requests.setdefault(request_id, {"acks": []})
-    entry.setdefault("pushes", []).append({
-        "srcMac": src_mac,
-        "bytes": len(data),
-        "file": filename,
-        "at": _now_iso(),
-    })
-
-    return {"ok": True, "file": filename, "bytes": len(data)}

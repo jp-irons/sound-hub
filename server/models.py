@@ -22,6 +22,14 @@ class AudioAckBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AudioSampleRequest(BaseModel):
+    """Body for POST /api/nodes/{id}/sample — trigger an audio pull from a node."""
+    t_start_us: int = Field(alias="tStartUs", description="UTC µs — inclusive segment start")
+    t_end_us:   int = Field(alias="tEndUs",   description="UTC µs — exclusive segment end")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ManualNodeRequest(BaseModel):
     """Body for POST /api/nodes/manual — fallback discovery path."""
     host: str  # hostname or bare IP; we hit http://<host>/app/api/status to validate
@@ -243,7 +251,7 @@ class NodeView(BaseModel):
     position_relative: Optional[PositionRelative] = Field(default=None, alias="positionRelative")
     position_known: bool = Field(default=False, alias="positionKnown")
     position_status: Literal["surveyed", "estimated"] = Field(
-        default="estimated", alias="positionStatus"
+          default="estimated", alias="positionStatus"
     )
     is_origin: bool = Field(default=False, alias="isOrigin")
     # Hub-computed: horizontal distance (metres) between stored survey origin
@@ -257,5 +265,4 @@ class NodeView(BaseModel):
     audio: Optional[AudioView] = None
     esp_now: Optional[EspNowView] = Field(default=None, alias="espNow")
     flags: list[str] = []
-
-    firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")
+   firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")

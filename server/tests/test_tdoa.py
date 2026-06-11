@@ -313,7 +313,8 @@ def _make_ts_payload(source_xyz, hint=None):
 def client():
     """TestClient with DB and registry calls mocked out."""
     with (
-        patch("server.db.list_node_positions", new_callable=AsyncMock, return_value=FAKE_POSITIONS),
+        patch("server.db.get_node_position", new_callable=AsyncMock,
+              side_effect=lambda nid: FAKE_POSITIONS.get(nid)),
         patch("server.registry.get_node", new_callable=AsyncMock,
               side_effect=lambda nid: FAKE_REGISTRY.get(nid)),
         patch("server.db.init_db", new_callable=AsyncMock),
@@ -375,14 +376,14 @@ class TestTdoaRoute:
     def test_node_without_position_422(self, client):
         """Node is registered but has no position in the hub DB."""
         body = _make_ts_payload((0.0, 30.0, 5.0))
+        positions_minus_n3 = {k: v for k, v in FAKE_POSITIONS.items() if k != ID_N3}
         with patch(
-            "server.db.list_node_positions",
-            new_callable=AsyncMock,
-            return_value={k: v for k, v in FAKE_POSITIONS.items() if k != ID_N3},
+            "server.db.get_node_position", new_callable=AsyncMock,
+            side_effect=lambda nid: positions_minus_n3.get(nid),
         ):
             resp = client.post("/api/tdoa/solve", json=body)
         assert resp.status_code == 422
-        assert "no stored position" in resp.json()["detail"]
+        assert "No stored position" in resp.json()["detail"]
 
     def test_custom_speed_of_sound(self, client):
         """Speed-of-sound override is accepted and used."""
@@ -405,5 +406,5 @@ class TestTdoaRoute:
         resp = client.post("/api/tdoa/solve", json=body)
         assert resp.status_code == 200
         data = resp.json()
-        err = math.sqrt((data["x"]-src[0])**2 + (data["y"]-src[1])**2 + (data["z"]-src[2])**2)
+        err = math.sqrt((data["x"]-            src[0])**2 + (data["y"]-src[1])**2 + (data["z"]-src[2])**2)
         assert err < 0.01
