@@ -59,6 +59,14 @@ INCIDENT_FIELDS = ["timestamp", "common_name", "scientific_name", "confidence", 
 
 # ── Species config ────────────────────────────────────────────────────────────
 
+def config_mtime(config_path: str) -> float:
+    """Return the modification time of the config file, or 0.0 if it doesn't exist."""
+    try:
+        return os.path.getmtime(config_path)
+    except OSError:
+        return 0.0
+
+
 def load_watch_list(config_path: str) -> set[str]:
     """Return a set of lower-cased common names that should be watched."""
     if not os.path.exists(config_path):
@@ -275,7 +283,8 @@ def main():
     (root / "detections").mkdir(parents=True, exist_ok=True)
     (root / "samples").mkdir(parents=True, exist_ok=True)
 
-    watch_list = load_watch_list(args.species_config)
+    watch_list   = load_watch_list(args.species_config)
+    watch_mtime  = config_mtime(args.species_config)
 
     # Resolve device
     try:
@@ -312,6 +321,13 @@ def main():
     try:
         while True:
             chunk_dt = datetime.now()
+
+            # Reload watch list if species_config.yaml has changed
+            current_mtime = config_mtime(args.species_config)
+            if current_mtime != watch_mtime:
+                watch_list  = load_watch_list(args.species_config)
+                watch_mtime = current_mtime
+                print(f"\n  [config reloaded] Watching: {', '.join(sorted(watch_list)) or 'none'}\n")
 
             # Midnight rollover
             if chunk_dt.date() != paths["date"]:
