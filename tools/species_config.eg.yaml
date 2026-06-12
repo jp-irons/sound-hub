@@ -1,13 +1,15 @@
-# species_config.yaml — BirdNET watch list
+# species_config.yaml — BirdNET species filter
 #
-# Species listed here get full incident logging and WAV files saved.
-# Everything else is counted in the daily summary only.
+# Species listed under 'summarise' are counted only — no incident log, no WAV saved.
+# Everything else gets full incident logging and WAV files saved.
 #
+# Add a species here when its detections become too noisy to be useful.
 # Use the common name exactly as BirdNET reports it.
 # Run mic_to_birdnet.py with --threshold 0.3 to discover what names BirdNET uses.
 
-watch:
-  - "Barn Owl"
-  - "Bush Stone-curlew"
-  - "Pheasant Coucal"
-  - "Little Egret"
+summarise:
+#  - "Torresian Crow"
+#  - "Rainbow Lorikeet"
+#  - "Gray Butcherbird"
+#  - "Pied Currawong"
+#  - "Australian Magpie"

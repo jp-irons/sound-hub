@@ -67,30 +67,30 @@ def config_mtime(config_path: str) -> float:
         return 0.0
 
 
-def load_watch_list(config_path: str) -> set[str]:
-    """Return a set of lower-cased common names that should be watched."""
+def load_summarise_list(config_path: str) -> set[str]:
+    """Return a set of lower-cased common names that should be counted only (no WAV/incident)."""
     if not os.path.exists(config_path):
         print(f"  Warning: species config not found at '{config_path}' "
-              "— all species treated as common.")
+              "— all species will get full incident logging.")
         return set()
 
     if _HAS_YAML:
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-        names = cfg.get("watch", [])
+        names = cfg.get("summarise", [])
     else:
-        # Minimal fallback parser for "  - Name" lines under a "watch:" key
+        # Minimal fallback parser for "  - Name" lines under a "summarise:" key
         names = []
-        in_watch = False
+        in_section = False
         with open(config_path, encoding="utf-8") as f:
             for line in f:
                 stripped = line.rstrip()
-                if stripped.strip() == "watch:":
-                    in_watch = True
-                elif in_watch and stripped.startswith("  - "):
+                if stripped.strip() == "summarise:":
+                    in_section = True
+                elif in_section and stripped.startswith("  - "):
                     names.append(stripped[4:].strip().strip('"\''))
-                elif in_watch and stripped and not stripped.startswith(" "):
-                    in_watch = False
+                elif in_section and stripped and not stripped.startswith(" "):
+                    in_section = False
 
     return {n.lower() for n in names}
 
@@ -283,8 +283,8 @@ def main():
     (root / "detections").mkdir(parents=True, exist_ok=True)
     (root / "samples").mkdir(parents=True, exist_ok=True)
 
-    watch_list   = load_watch_list(args.species_config)
-    watch_mtime  = config_mtime(args.species_config)
+    summarise_list = load_summarise_list(args.species_config)
+    watch_mtime    = config_mtime(args.species_config)
 
     # Resolve device
     try:
@@ -302,10 +302,10 @@ def main():
     print(f"  Geo filter : {'Brisbane' if args.geo else 'OFF'}")
     print(f"  Detections : {(root / 'detections').resolve()}")
     print(f"  Samples    : {(root / 'samples').resolve()}")
-    if watch_list:
-        print(f"  Watching   : {', '.join(sorted(watch_list))}")
+    if summarise_list:
+        print(f"  Summarise  : {', '.join(sorted(summarise_list))}")
     else:
-        print(f"  Watching   : (none — all species counted only)")
+        print(f"  Summarise  : (none — all species get full incident logging)")
     print(f"\nLoading BirdNET model…", end=" ", flush=True)
 
     analyzer = Analyzer()
@@ -322,12 +322,12 @@ def main():
         while True:
             chunk_dt = datetime.now()
 
-            # Reload watch list if species_config.yaml has changed
+            # Reload summarise list if species_config.yaml has changed
             current_mtime = config_mtime(args.species_config)
             if current_mtime != watch_mtime:
-                watch_list  = load_watch_list(args.species_config)
-                watch_mtime = current_mtime
-                print(f"\n  [config reloaded] Watching: {', '.join(sorted(watch_list)) or 'none'}\n")
+                summarise_list = load_summarise_list(args.species_config)
+                watch_mtime    = current_mtime
+                print(f"\n  [config reloaded] Summarise only: {', '.join(sorted(summarise_list)) or 'none'}\n")
 
             # Midnight rollover
             if chunk_dt.date() != paths["date"]:
@@ -343,22 +343,22 @@ def main():
 
             ts = chunk_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-            # Save WAV once per chunk if any watched species present.
-            # Filed under the first watched species detected.
-            watched_hits = [
+            # Save WAV once per chunk if any non-suppressed species present.
+            # Filed under the first such species detected.
+            incident_hits = [
                 d for d in detections
-                if d.get("common_name", "").lower() in watch_list
+                if d.get("common_name", "").lower() not in summarise_list
             ]
             wav_path = ""
-            if watched_hits:
-                primary  = watched_hits[0].get("common_name", "Unknown")
+            if incident_hits:
+                primary  = incident_hits[0].get("common_name", "Unknown")
                 wav_path = save_wav(audio, chunk_dt, paths["wav_base"], primary)
 
             for d in detections:
-                name       = d.get("common_name", "")
-                is_watched = name.lower() in watch_list
-                conf       = d.get("confidence", 0.0)
-                note       = "*** WATCH ***" if is_watched else ""
+                name          = d.get("common_name", "")
+                is_suppressed = name.lower() in summarise_list
+                conf          = d.get("confidence", 0.0)
+                note          = "summary only" if is_suppressed else ""
 
                 print(
                     f"  {chunk_dt.strftime('%H:%M:%S')}  "
@@ -366,7 +366,7 @@ def main():
                 )
 
                 update_summary(counts, d, ts)
-                if is_watched:
+                if not is_suppressed:
                     append_incident(paths["incidents"], ts, d, wav_path)
 
             save_summary(paths["summary"], counts)
