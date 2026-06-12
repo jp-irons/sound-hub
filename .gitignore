@@ -17,6 +17,8 @@ venv/
 *.sqlite3
 audio/
 detections_audio/
+tools/run-mic-birdnet.bat
+tools/species_config.yaml
 
 # Env / secrets
 .env
