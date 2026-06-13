@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.11 or later
+- Python 3.12 (required — 3.13+ is incompatible with birdnetlib/tensorflow-cpu; see WSL2 section for how `setup.sh` handles this automatically)
 - Node.js 18 or later and npm
 - Git
 
@@ -312,14 +312,50 @@ files directly from `dist/`).
 
 ### Internet exposure
 
-The LAN deployment uses plain HTTP on port 80.  To expose Sound Hub on the
-internet with HTTPS, see `config/nginx.conf.example` — it is pre-configured
-for certbot / Let's Encrypt.  Run certbot inside WSL2:
+The LAN deployment uses plain HTTP on port 80.  Two options for HTTPS internet access:
+
+#### Option A — Cloudflare Tunnel (recommended)
+
+No router port forwarding required.  TLS is handled by Cloudflare.  Free tier is sufficient.
+
+1. Create a free Cloudflare account and add your domain (or use a `*.trycloudflare.com` hostname for testing without a domain).
+2. Inside WSL2, install `cloudflared`:
+   ```bash
+   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
+   sudo dpkg -i cloudflared.deb
+   ```
+3. Authenticate and create a tunnel:
+   ```bash
+   cloudflared tunnel login
+   cloudflared tunnel create sound-hub
+   ```
+4. Create `~/.cloudflared/config.yml`:
+   ```yaml
+   tunnel: <tunnel-id>
+   credentials-file: /home/<user>/.cloudflared/<tunnel-id>.json
+   ingress:
+     - hostname: soundhub.yourdomain.com
+       service: http://localhost:80
+     - service: http_status:404
+   ```
+5. Route DNS and run:
+   ```bash
+   cloudflared tunnel route dns sound-hub soundhub.yourdomain.com
+   cloudflared tunnel run sound-hub
+   ```
+6. To run as a systemd service:
+   ```bash
+   sudo cloudflared service install
+   sudo systemctl enable --now cloudflared
+   ```
+
+#### Option B — certbot / Let's Encrypt
+
+Requires a domain pointing at your public IP and router port-forwarding of TCP 80 and 443 to the NUC.
 
 ```bash
 sudo apt install certbot python3-certbot-nginx
 sudo certbot --nginx -d yourdomain.example.com
 ```
 
-Certbot will patch the nginx config with TLS certificates and set up
-automatic renewal.
+Certbot will patch the nginx config with TLS certificates and set up automatic renewal.
