@@ -23,7 +23,7 @@ echo ""
 echo "▶ Installing system packages..."
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends \
-    nginx python3-pip python3-venv nodejs npm curl
+    nginx python3-pip python3-venv nodejs npm curl ffmpeg
 
 # ── 2. Python venv ────────────────────────────────────────────────────────────
 echo "▶ Setting up Python venv..."
