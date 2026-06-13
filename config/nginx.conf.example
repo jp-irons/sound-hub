@@ -1,0 +1,73 @@
+# Sound Hub — nginx reverse proxy
+#
+# Serves the SPA and proxies /api/ to FastAPI on localhost:8000.
+# Place this file at /etc/nginx/sites-available/sound-hub and symlink:
+#   sudo ln -s /etc/nginx/sites-available/sound-hub /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Prerequisites:
+#   sudo apt install nginx certbot python3-certbot-nginx
+#   sudo certbot --nginx -d yourdomain.example.com
+#   (certbot will add the ssl_certificate / ssl_certificate_key lines and
+#    the HTTPS redirect block automatically)
+#
+# After certbot runs, replace YOUR_DOMAIN below and set SPA_ROOT to the
+# path of your built SPA (e.g. /home/jon/sound-hub/frontend/dist).
+
+# Rate-limit zone for the login endpoint: 5 requests/minute per IP.
+limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+
+    # Redirect all HTTP to HTTPS.
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name YOUR_DOMAIN;
+
+    # TLS — certbot populates these:
+    # ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    # include             /etc/letsencrypt/options-ssl-nginx.conf;
+    # ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options    "nosniff"                             always;
+    add_header X-Frame-Options           "SAMEORIGIN"                          always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin"     always;
+
+    # ---------- API (FastAPI backend) ----------
+    location /api/ {
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # Rate-limit the login endpoint specifically.
+    location = /api/auth/login {
+        limit_req zone=login_limit burst=3 nodelay;
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    # ---------- SPA (static files) ----------
+    root SPA_ROOT;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

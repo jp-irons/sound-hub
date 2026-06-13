@@ -8,7 +8,7 @@ function relativeTime(isoString) {
   return `${Math.floor(diff / 3600000)}h ago`
 }
 
-export default function TopBar({ totalNodes, onlineCount, nodes }) {
+export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout }) {
   const [tick, setTick] = useState(0)
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
@@ -68,11 +68,47 @@ export default function TopBar({ totalNodes, onlineCount, nodes }) {
 
       <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
 
-      {/* Base station connection status (stub) */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <div className="status-dot online" />
-        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Base online</span>
-      </div>
+      {/* User identity + sign out */}
+      {user ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <div style={{
+              width: 22, height: 22, borderRadius: '50%',
+              background: 'var(--accent, #4da6ff)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11, fontWeight: 700, color: '#fff',
+            }}>
+              {user.username[0].toUpperCase()}
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              {user.username}
+            </span>
+            <span style={{
+              fontSize: 10, color: 'var(--text-muted)',
+              background: 'var(--surface2, #2a2a2a)',
+              border: '1px solid var(--border, #333)',
+              borderRadius: 3, padding: '1px 5px',
+            }}>
+              {user.role}
+            </span>
+          </div>
+          <button
+            onClick={onLogout}
+            style={{
+              fontSize: 11, color: 'var(--text-muted)',
+              background: 'transparent', border: '1px solid var(--border, #333)',
+              borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div className="status-dot online" />
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Not signed in</span>
+        </div>
+      )}
     </div>
   )
 }

@@ -16,6 +16,25 @@ import aiosqlite
 from . import config
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT NOT NULL UNIQUE,
+    hashed_password TEXT NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'viewer',
+    created_at      TEXT NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT NOT NULL,
+    username    TEXT,
+    source_ip   TEXT,
+    method      TEXT,
+    path        TEXT,
+    status_code INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS detections (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     source          TEXT,            -- filename or label (e.g. "upload", node WAV name)
@@ -303,6 +322,62 @@ async def insert_detections(
                 )
                 for d in detections
             ],
+        )
+        await conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# users CRUD
+# ---------------------------------------------------------------------------
+
+async def count_users() -> int:
+    """Return total number of user accounts."""
+    async with connect() as conn:
+        cursor = await conn.execute("SELECT COUNT(*) FROM users")
+        (n,) = await cursor.fetchone()
+        return n
+
+
+async def get_user(username: str) -> dict | None:
+    """Return a user record by username, or None if not found."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM users WHERE username = ? AND active = 1", (username,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def create_user(username: str, hashed_password: str, role: str, created_at: str) -> None:
+    """Insert a new user account."""
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT INTO users (username, hashed_password, role, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (username, hashed_password, role, created_at),
+        )
+        await conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# audit_log
+# ---------------------------------------------------------------------------
+
+async def write_audit_entry(
+    timestamp: str,
+    username: str | None,
+    source_ip: str | None,
+    method: str,
+    path: str,
+    status_code: int,
+) -> None:
+    """Append one row to the audit log."""
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT INTO audit_log (timestamp, username, source_ip, method, path, status_code)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (timestamp, username, source_ip, method, path, status_code),
         )
         await conn.commit()
 

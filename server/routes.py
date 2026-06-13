@@ -6,9 +6,12 @@ import tempfile
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel
 
 from . import birdnet_worker, config, db, registry, status_mapper
+from .auth import get_current_user, require_admin, require_node
+from .auth import get_current_user, require_admin, require_node
 from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
@@ -22,6 +25,74 @@ _AUDIO_DIR = os.path.join(os.path.dirname(__file__), "..", "audio")
 log = logging.getLogger("sound_hub.routes")
 router = APIRouter()
 
+
+# ---------------------------------------------------------------------------
+# Auth request / response models
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+
+class SetupRequest(BaseModel):
+    username: str
+    password: str
+
+class UserInfo(BaseModel):
+    username: str
+    role: str
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/setup", response_model=UserInfo, status_code=201)
+async def setup_first_user(req: SetupRequest):
+    """Create the initial admin account.
+
+    Only available while the users table is empty — returns 404 once any
+    user exists.  Hit this endpoint after first startup to initialise credentials.
+    """
+    if await db.count_users() > 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not req.username or not req.password:
+        raise HTTPException(status_code=422, detail="Username and password required")
+    from .auth import hash_password
+    hashed = hash_password(req.password)
+    await db.create_user(req.username, hashed, "admin", _now_iso())
+    log.info("First admin account created: %s", req.username)
+    return UserInfo(username=req.username, role="admin")
+
+
+@router.post("/auth/login", response_model=LoginResponse)
+async def login(req: LoginRequest):
+    """Validate credentials and return a JWT Bearer token."""
+    from .auth import create_token, verify_password
+    user = await db.get_user(req.username)
+    if user is None or not verify_password(req.password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = create_token(user["username"], user["role"])
+    log.info("Login: %s", user["username"])
+    return LoginResponse(access_token=token, role=user["role"])
+
+
+@router.get("/auth/me", response_model=UserInfo)
+async def me(user: dict = Depends(get_current_user)):
+    """Return the current authenticated user's identity."""
+    return UserInfo(username=user["username"], role=user["role"])
+
+
+# ---------------------------------------------------------------------------
 # In-memory audio request tracker.
 # Keyed by requestId (int).  Each entry: {"acks": [{"status", "srcMac", "at"}, ...]}
 # Reset on process restart — this is intentional for Phase 1 (test/debug aid).
@@ -125,7 +196,7 @@ async def get_node(node_id: str):
     raise HTTPException(status_code=404, detail="Node not found")
 
 
-@router.post("/nodes/manual", response_model=NodeView)
+@router.post("/nodes/manual", response_model=NodeView, dependencies=[Depends(require_admin)])
 async def add_manual_node(req: ManualNodeRequest):
     """Fallback discovery path — add a node by hostname or bare IP."""
     host = req.host.strip()
@@ -156,7 +227,7 @@ async def add_manual_node(req: ManualNodeRequest):
     raise HTTPException(status_code=500, detail="Node registered but not found in mapped set")
 
 
-@router.delete("/nodes/{node_id}", status_code=204)
+@router.delete("/nodes/{node_id}", status_code=204, dependencies=[Depends(require_admin)])
 async def remove_node(node_id: str):
     node = await registry.get_node(node_id)
     if node is None:
@@ -175,19 +246,19 @@ async def _set_approval(node_id: str, status: str) -> NodeView:
     raise HTTPException(status_code=500, detail="Node updated but not found in mapped set")
 
 
-@router.post("/nodes/{node_id}/approve", response_model=NodeView)
+@router.post("/nodes/{node_id}/approve", response_model=NodeView, dependencies=[Depends(require_admin)])
 async def approve_node(node_id: str):
     """Admit a discovered node into the active array."""
     return await _set_approval(node_id, db.APPROVED)
 
 
-@router.post("/nodes/{node_id}/reject", response_model=NodeView)
+@router.post("/nodes/{node_id}/reject", response_model=NodeView, dependencies=[Depends(require_admin)])
 async def reject_node(node_id: str):
     """Decline a discovered node — keep it out of the active array."""
     return await _set_approval(node_id, db.REJECTED)
 
 
-@router.get("/nodes/{node_id}/config")
+@router.get("/nodes/{node_id}/config", dependencies=[Depends(require_admin)])
 async def get_node_config(node_id: str):
     """Fetch a node's current persisted config — used to pre-fill the
     operator's edit form so they're editing real values, not guessing."""
@@ -208,7 +279,7 @@ async def get_node_config(node_id: str):
         )
 
 
-@router.post("/nodes/{node_id}/configure")
+@router.post("/nodes/{node_id}/configure", dependencies=[Depends(require_admin)])
 async def configure_node(node_id: str, req: NodeConfigRequest):
     """Push config changes to a node by proxying to its own
     POST /app/api/node-config (NodeConfigHandler.cpp — persists to NVS).
@@ -257,7 +328,7 @@ async def get_node_position(node_id: str):
     return _node_position_from_row(pos)
 
 
-@router.put("/nodes/{node_id}/position", response_model=NodePosition)
+@router.put("/nodes/{node_id}/position", response_model=NodePosition, dependencies=[Depends(require_admin)])
 async def set_node_position(node_id: str, req: NodePosition):
     """Set or update the hub-stored position for a node.
 
@@ -312,7 +383,7 @@ async def get_origin():
     )
 
 
-@router.post("/origin/set-from-node/{node_id}", response_model=ArrayOrigin)
+@router.post("/origin/set-from-node/{node_id}", response_model=ArrayOrigin, dependencies=[Depends(require_admin)])
 async def set_origin_from_node(
     node_id: str,
     source: str = Query(
@@ -400,7 +471,7 @@ async def set_origin_from_node(
     )
 
 
-@router.put("/origin", response_model=ArrayOrigin)
+@router.put("/origin", response_model=ArrayOrigin, dependencies=[Depends(require_admin)])
 async def set_origin_manual(req: ArrayOriginManual):
     """Manually override the hub array origin with explicit lat/lon/alt.
 
@@ -418,7 +489,7 @@ async def set_origin_manual(req: ArrayOriginManual):
     return ArrayOrigin(lat=req.lat, lon=req.lon, alt_m=req.alt_m, set_from=None, set_at=set_at)
 
 
-@router.delete("/origin", status_code=204)
+@router.delete("/origin", status_code=204, dependencies=[Depends(require_admin)])
 async def clear_origin():
     """Clear the hub array origin and the is_origin marker on all nodes.
 
@@ -432,7 +503,7 @@ async def clear_origin():
 # Audio pull — control plane endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/audio/ack", status_code=204)
+@router.post("/audio/ack", status_code=204, dependencies=[Depends(require_node)])
 async def audio_ack(body: AudioAckBody):
     """Receive a broker-forwarded node ack (ACK / DONE / UNAVAILABLE / ERROR).
 
@@ -449,7 +520,7 @@ async def audio_ack(body: AudioAckBody):
     log.info("audio ack id=%s status=%s from %s", body.request_id, body.status, body.src_mac)
 
 
-@router.post("/audio/push", status_code=200)
+@router.post("/audio/push", status_code=200, dependencies=[Depends(require_node)])
 async def audio_push(
     request: Request,
     requestId: int = Query(..., description="Matches the originating AudioRequestMsg.requestId"),
@@ -484,7 +555,7 @@ async def get_audio_request(request_id: int):
     return {"requestId": request_id, **entry}
 
 
-@router.post("/nodes/{node_id}/sample", status_code=202)
+@router.post("/nodes/{node_id}/sample", status_code=202, dependencies=[Depends(require_admin)])
 async def request_sample(node_id: str, req: AudioSampleRequest):
     """Trigger an audio pull from a node for a specific UTC time range.
 
@@ -617,86 +688,5 @@ async def solve_tdoa(req: TdoaRequest):
         z=result.z,
         residual_m=result.residual,
         method=result.method,
-        ambiguous_root=result.ambiguous_root[:3] if result.ambiguous_root else None,
+        alt_solution=result.alt_solution,
     )
-
-
-# ---------------------------------------------------------------------------
-# BirdNET detections
-# ---------------------------------------------------------------------------
-
-@router.post("/detections/analyze", response_model=list[DetectionRecord])
-async def analyze_audio(
-    file: UploadFile = File(..., description="WAV file to analyse"),
-    geo: bool = Query(default=False, description="Apply Brisbane geo/season filter"),
-    min_conf: float = Query(default=0.5, ge=0.0, le=1.0, description="Minimum confidence threshold"),
-):
-    """Upload a WAV file, run it through BirdNET, persist and return detections.
-
-    The file is analysed in a thread executor so the async event loop is not
-    blocked by the synchronous TFLite inference.  Results are stored in the
-    detections table and returned immediately.
-    """
-    if not birdnet_worker.ready():
-        raise HTTPException(status_code=503, detail="BirdNET model not yet loaded — try again in a moment")
-
-    # Stream upload to a temp file — birdnetlib needs a file path.
-    suffix = os.path.splitext(file.filename or "audio")[1] or ".wav"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp_path = tmp.name
-        tmp.write(await file.read())
-
-    try:
-        loop = asyncio.get_event_loop()
-        detections = await loop.run_in_executor(
-            None,
-            lambda: birdnet_worker.analyze_wav(tmp_path, use_geo=geo, min_conf=min_conf),
-        )
-    finally:
-        os.unlink(tmp_path)
-
-    analyzed_at = _now_iso()
-    source = file.filename or "upload"
-    if detections:
-        await db.insert_detections(source, analyzed_at, detections)
-        log.info("analyzed %s — %d detection(s)", source, len(detections))
-    else:
-        log.info("analyzed %s — no detections above %.2f", source, min_conf)
-
-    # Return DetectionRecord-shaped dicts (without DB ids for the upload response).
-    return [
-        DetectionRecord(
-            id=0,
-            source=source,
-            analyzed_at=analyzed_at,
-            common_name=d.get("common_name", ""),
-            scientific_name=d.get("scientific_name", ""),
-            confidence=d.get("confidence", 0.0),
-            start_sec=d.get("start_time"),
-            end_sec=d.get("end_time"),
-        )
-        for d in detections
-    ]
-
-
-@router.get("/detections", response_model=list[DetectionRecord])
-async def get_detections(
-    limit: int = Query(default=200, ge=1, le=1000),
-    min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
-    species: str | None = Query(default=None, description="Filter by common name substring"),
-):
-    """Return stored detections, newest first."""
-    rows = await db.list_detections(limit=limit, min_conf=min_conf, species=species)
-    return [
-        DetectionRecord(
-            id=row["id"],
-            source=row.get("source"),
-            analyzed_at=row["analyzed_at"],
-            common_name=row["common_name"],
-            scientific_name=row["scientific_name"],
-            confidence=row["confidence"],
-            start_sec=row.get("start_sec"),
-            end_sec=row.get("end_sec"),
-        )
-        for row in rows
-    ]

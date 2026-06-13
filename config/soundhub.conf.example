@@ -1,0 +1,75 @@
+# Sound Hub — configuration
+#
+# Copy this file to config/soundhub.conf and adjust the settings for your
+# installation.  config/soundhub.conf is git-ignored — this example is the
+# only config file that should ever be committed.
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+
+# This machine's reserved LAN address — pushed to nodes during provisioning
+# so they know where to send audio back.  Set this to the IP of the machine
+# running sound-hub on your network.
+#
+# 192.168.101.x is this installation's subnet; most home networks use
+# 192.168.0.x or 192.168.1.x — adjust accordingly.
+#
+# BASE_STATION_IP and NODE_LAN_SUBNET must be on the same subnet, e.g.:
+#   BASE_STATION_IP  = "192.168.1.10"
+#   NODE_LAN_SUBNET  = "192.168.1.0/24"
+#
+# TODO: auto-detect at startup by finding the local interface on the LAN
+# subnet, with this value as a manual override.
+BASE_STATION_IP   = "192.168.101.220"
+BASE_STATION_PORT = 8000
+
+# ---------------------------------------------------------------------------
+# mDNS discovery
+# ---------------------------------------------------------------------------
+
+# SCN nodes advertise over standard _http._tcp; filtered by hostname prefix.
+# Adjust if the node firmware advertises under a different service type or
+# hostname pattern.
+MDNS_SERVICE_TYPE    = "_http._tcp.local."
+MDNS_HOSTNAME_PREFIX = "soundcapture-"
+
+# How often (seconds) to restart the mDNS browser to force a fresh query
+# burst.  See server/discovery.py for the rationale.
+MDNS_RESCAN_INTERVAL_S = 180.0
+
+# ---------------------------------------------------------------------------
+# Status polling
+# ---------------------------------------------------------------------------
+
+# Nodes serve over HTTPS with a self-signed cert — verify=False is
+# intentional on a closed home LAN.
+NODE_SCHEME            = "https"
+STATUS_POLL_INTERVAL_S = 5.0
+STATUS_TIMEOUT_S       = 3.0
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+
+# Path to the SQLite database file.  Relative paths are resolved from the
+# directory where uvicorn is launched (typically the repo root).
+DB_PATH = "sound_hub.db"
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+# JWT secret key is loaded from this file at startup and auto-generated on
+# first run.  Never commit this file.
+AUTH_SECRET_FILE      = "auth_secret.key"
+AUTH_TOKEN_EXPIRE_HOURS = 8
+AUTH_ALGORITHM        = "HS256"
+
+# ---------------------------------------------------------------------------
+# Node trust
+# ---------------------------------------------------------------------------
+
+# Audio push/ack endpoints are restricted to this subnet.  Must match the
+# subnet of BASE_STATION_IP above.
+NODE_LAN_SUBNET = "192.168.101.0/24"

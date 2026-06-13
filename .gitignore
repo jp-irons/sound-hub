@@ -23,15 +23,10 @@ tools/species_config.yaml
 # Env / secrets
 .env
 .env.*
+auth_secret.key
 
-# Editor / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
+# Local config (copy from *.example — never commit)
+config/soundhub.conf
+config/nginx.conf
 
-# Logs
-*.log
-npm-debug.log*
-tools/detections.csv
-tools/run-mic-birdnet-watch.bat
+# 

@@ -4,30 +4,71 @@ import NodeSidebar from './components/NodeSidebar.jsx'
 import MapView from './components/MapView.jsx'
 import NodeDetail from './components/NodeDetail.jsx'
 import DetectionsTab from './components/DetectionsTab.jsx'
+import AuthOverlay from './components/AuthOverlay.jsx'
+import { apiFetch, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
 
-// FastAPI backend — see server/main.py. Runs on the same machine as the
-// Vite dev server during development (CORS is opened for localhost:5173).
 const API_BASE = 'http://localhost:8000/api'
-
-// Matches the backend's own poll interval (server/config.py
-// STATUS_POLL_INTERVAL_S) — no point refreshing faster than the data changes.
 const POLL_INTERVAL_MS = 5000
 
 export default function App() {
-  const [tab, setTab] = useState('nodes') // 'nodes' | 'detections'
+  // 'loading' | 'setup' | 'login' | 'authenticated'
+  const [authState, setAuthState] = useState('loading')
+  const [user, setUser] = useState(null)   // { username, role }
+
+  const [tab, setTab] = useState('nodes')
   const [nodes, setNodes] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [error, setError] = useState(null)
   const [loaded, setLoaded] = useState(false)
 
+  // Wire up the 401 callback so any apiFetch can flip us back to login.
+  useEffect(() => {
+    onUnauthenticated(() => {
+      setUser(null)
+      setAuthState('login')
+    })
+  }, [])
+
+  // On mount, check whether first-run setup is needed or just login.
+  useEffect(() => {
+    async function checkAuth() {
+      try {
+        const res = await fetch(`${API_BASE}/auth/status`)
+        const body = await res.json()
+        setAuthState(body.setup_required ? 'setup' : 'login')
+      } catch {
+        // Backend unreachable — show login and let the error surface naturally.
+        setAuthState('login')
+      }
+    }
+    checkAuth()
+  }, [])
+
+  function handleAuthSuccess(token, username, role) {
+    setToken(token)
+    setUser({ username, role })
+    setAuthState('authenticated')
+  }
+
+  function handleLogout() {
+    clearToken()
+    setUser(null)
+    setAuthState('login')
+  }
+
+  // -------------------------------------------------------------------------
+  // Data fetching
+  // -------------------------------------------------------------------------
+
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/nodes`)
+      const res = await apiFetch('/nodes')
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       const data = await res.json()
       setNodes(data)
       setError(null)
     } catch (err) {
+      if (err instanceof AuthError) return   // overlay handles it
       setError(err.message ?? String(err))
     } finally {
       setLoaded(true)
@@ -35,50 +76,52 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (authState !== 'authenticated') return
     refresh()
     const interval = setInterval(refresh, POLL_INTERVAL_MS)
     return () => clearInterval(interval)
-  }, [refresh])
+  }, [authState, refresh])
 
-  // Node admission/removal actions — POST to the approval endpoints or
-  // DELETE the node, then re-pull the list so the UI reflects the new
-  // state immediately rather than waiting for the next poll tick.
+  // -------------------------------------------------------------------------
+  // Node actions
+  // -------------------------------------------------------------------------
+
   const approveNode = useCallback(async (id) => {
     try {
-      const res = await fetch(`${API_BASE}/nodes/${id}/approve`, { method: 'POST' })
+      const res = await apiFetch(`/nodes/${id}/approve`, { method: 'POST' })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       await refresh()
     } catch (err) {
+      if (err instanceof AuthError) return
       setError(err.message ?? String(err))
     }
   }, [refresh])
 
   const rejectNode = useCallback(async (id) => {
     try {
-      const res = await fetch(`${API_BASE}/nodes/${id}/reject`, { method: 'POST' })
+      const res = await apiFetch(`/nodes/${id}/reject`, { method: 'POST' })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       await refresh()
     } catch (err) {
+      if (err instanceof AuthError) return
       setError(err.message ?? String(err))
     }
   }, [refresh])
 
   const removeNode = useCallback(async (id) => {
     try {
-      const res = await fetch(`${API_BASE}/nodes/${id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/nodes/${id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       setSelectedId(curr => (curr === id ? null : curr))
       await refresh()
     } catch (err) {
+      if (err instanceof AuthError) return
       setError(err.message ?? String(err))
     }
   }, [refresh])
 
-  // Unlike the admission actions above, these re-throw on failure —
-  // the modals need the actual error message to show the operator,
-  // rather than having it swallowed into the global error banner.
   const configureNode = useCallback(async (id, patch) => {
-    const res = await fetch(`${API_BASE}/nodes/${id}/configure`, {
+    const res = await apiFetch(`/nodes/${id}/configure`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -88,14 +131,14 @@ export default function App() {
       try {
         const body = await res.json()
         if (body?.detail) detail = body.detail
-      } catch { /* not JSON — fall back to status text */ }
+      } catch { /* not JSON */ }
       throw new Error(detail)
     }
     await refresh()
   }, [refresh])
 
   const setNodePosition = useCallback(async (id, position) => {
-    const res = await fetch(`${API_BASE}/nodes/${id}/position`, {
+    const res = await apiFetch(`/nodes/${id}/position`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(position),
@@ -105,17 +148,17 @@ export default function App() {
       try {
         const body = await res.json()
         if (body?.detail) detail = body.detail
-      } catch { /* not JSON — fall back to status text */ }
+      } catch { /* not JSON */ }
       throw new Error(detail)
     }
     await refresh()
   }, [refresh])
 
-  const selectedNode = nodes.find(n => n.id === selectedId) ?? null
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
 
-  // Pending/rejected nodes aren't polled (see poller.py), so they'd always
-  // read as "offline" — counting them here would just be misleading noise
-  // in the top bar. Scope these summary counts to the active (approved) set.
+  const selectedNode = nodes.find(n => n.id === selectedId) ?? null
   const approvedNodes = nodes.filter(n => n.approvalStatus === 'approved')
   const onlineCount = approvedNodes.filter(n => n.status === 'online').length
 
@@ -133,10 +176,18 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+
+      {/* Auth overlay — setup or login */}
+      {(authState === 'setup' || authState === 'login') && (
+        <AuthOverlay mode={authState} onSuccess={handleAuthSuccess} />
+      )}
+
       <TopBar
         totalNodes={approvedNodes.length}
         onlineCount={onlineCount}
         nodes={approvedNodes}
+        user={user}
+        onLogout={handleLogout}
       />
 
       {/* Tab bar */}
@@ -147,7 +198,7 @@ export default function App() {
         paddingLeft: 8,
         flexShrink: 0,
       }}>
-        <button style={tabStyle('nodes')}    onClick={() => setTab('nodes')}>Nodes</button>
+        <button style={tabStyle('nodes')}      onClick={() => setTab('nodes')}>Nodes</button>
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
       </div>
 
@@ -172,38 +223,20 @@ export default function App() {
             onApprove={approveNode}
             onReject={rejectNode}
           />
-          <MapView
-            nodes={nodes}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-          />
-          {selectedNode && (
+          {selectedNode ? (
             <NodeDetail
               node={selectedNode}
-              onClose={() => setSelectedId(null)}
-              onApprove={approveNode}
-              onReject={rejectNode}
               onRemove={removeNode}
               onConfigure={configureNode}
               onSetPosition={setNodePosition}
             />
-          )}
-          {loaded && nodes.length === 0 && !error && (
-            <div style={{
-              position: 'absolute', bottom: 14, left: 14,
-              fontSize: 12, color: 'var(--text-muted)',
-            }}>
-              No nodes registered yet — discovery runs automatically via mDNS, or add one manually from the backend.
-            </div>
+          ) : (
+            <MapView nodes={approvedNodes} onSelectNode={setSelectedId} />
           )}
         </div>
       )}
 
-      {tab === 'detections' && (
-        <div style={{ flex: 1, overflow: 'hidden' }}>
-          <DetectionsTab />
-        </div>
-      )}
+      {tab === 'detections' && <DetectionsTab />}
     </div>
   )
 }

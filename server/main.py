@@ -13,7 +13,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import birdnet_worker, db, discovery, poller
@@ -32,6 +34,12 @@ _poller_task: asyncio.Task | None = None
 async def lifespan(app: FastAPI):
     global _poller_task
     await db.init_db()
+    if await db.count_users() == 0:
+        log.warning(
+            "⚠  No user accounts configured. "
+            "POST to http://%s:%s/api/auth/setup to create the admin account.",
+            "localhost", 8000,
+        )
     await discovery.start()
     _poller_task = asyncio.create_task(poller.run())
     # Load BirdNET model in a thread so the event loop is not blocked.
@@ -53,5 +61,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def audit_middleware(request: Request, call_next):
+    """Log all authenticated admin actions to the audit_log table."""
+    response = await call_next(request)
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        username = getattr(request.state, "auth_user", None)
+        if username:
+            await db.write_audit_entry(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                username=username,
+                source_ip=request.client.host if request.client else None,
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+            )
+    return response
+
 
 app.include_router(router, prefix="/api")
