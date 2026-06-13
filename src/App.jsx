@@ -5,14 +5,15 @@ import MapView from './components/MapView.jsx'
 import NodeDetail from './components/NodeDetail.jsx'
 import DetectionsTab from './components/DetectionsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
+import UsersTab from './components/UsersTab.jsx'
 import { apiFetch, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
 
 const API_BASE = 'http://localhost:8000/api'
 const POLL_INTERVAL_MS = 5000
 
 export default function App() {
-  // 'loading' | 'setup' | 'login' | 'authenticated'
-  const [authState, setAuthState] = useState('loading')
+  // 'login' | 'setup' | 'authenticated'
+  const [authState, setAuthState] = useState('login')
   const [user, setUser] = useState(null)   // { username, role }
 
   const [tab, setTab] = useState('nodes')
@@ -29,16 +30,18 @@ export default function App() {
     })
   }, [])
 
-  // On mount, check whether first-run setup is needed or just login.
+  // On mount, check whether first-run setup is needed.
+  // authState starts as 'login' so the overlay is visible immediately;
+  // we only switch to 'setup' if the backend says no users exist yet.
   useEffect(() => {
     async function checkAuth() {
       try {
         const res = await fetch(`${API_BASE}/auth/status`)
         const body = await res.json()
-        setAuthState(body.setup_required ? 'setup' : 'login')
+        if (body.setup_required) setAuthState('setup')
+        // else leave as 'login' — already correct
       } catch {
-        // Backend unreachable — show login and let the error surface naturally.
-        setAuthState('login')
+        // Backend unreachable — leave as 'login', error will surface on submit.
       }
     }
     checkAuth()
@@ -188,6 +191,7 @@ export default function App() {
         nodes={approvedNodes}
         user={user}
         onLogout={handleLogout}
+        onSignIn={() => setAuthState('login')}
       />
 
       {/* Tab bar */}
@@ -200,6 +204,9 @@ export default function App() {
       }}>
         <button style={tabStyle('nodes')}      onClick={() => setTab('nodes')}>Nodes</button>
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
+        {user?.role === 'admin' && (
+          <button style={tabStyle('users')} onClick={() => setTab('users')}>Users</button>
+        )}
       </div>
 
       {error && (
@@ -237,6 +244,7 @@ export default function App() {
       )}
 
       {tab === 'detections' && <DetectionsTab />}
+      {tab === 'users'      && <UsersTab user={user} />}
     </div>
   )
 }

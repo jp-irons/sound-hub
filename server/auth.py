@@ -7,6 +7,14 @@ get_current_user
     Sets request.state.auth_user so the audit middleware can log it.
     Raises 401 if the token is missing or invalid.
 
+require_viewer
+    Calls get_current_user and returns the user.  Any authenticated role
+    (admin or viewer) is accepted.
+    This is the seam for future optional-auth support: when unauthenticated
+    read access is wanted, change this dependency to return None instead of
+    raising, and all reader routes will open up without touching their
+    signatures.
+
 require_admin
     Calls get_current_user and checks role == 'admin'.
     Raises 403 if the user is a viewer.
@@ -52,7 +60,7 @@ def _load_or_create_secret() -> str:
         return path.read_text().strip()
     secret = secrets.token_hex(32)
     path.write_text(secret)
-    log.info("Generated new JWT secret → %s", path)
+    log.info("Generated new JWT secret -> %s", path)
     return secret
 
 
@@ -125,6 +133,17 @@ async def get_current_user(
         )
 
     request.state.auth_user = username
+    return user
+
+
+async def require_viewer(user: dict = Depends(get_current_user)) -> dict:
+    """Require any authenticated user (admin or viewer).
+
+    This is the intended seam for future optional-auth support: when
+    unauthenticated read access is wanted, change this dependency to
+    return None instead of raising 401, and all reader routes will
+    open up without touching their signatures.
+    """
     return user
 
 

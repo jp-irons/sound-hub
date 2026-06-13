@@ -360,6 +360,47 @@ async def create_user(username: str, hashed_password: str, role: str, created_at
         await conn.commit()
 
 
+async def list_users() -> list[dict]:
+    """Return all active user accounts (no hashed_password)."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT username, role, created_at FROM users WHERE active = 1 ORDER BY created_at"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def delete_user(username: str) -> None:
+    """Soft-delete a user account by setting active = 0."""
+    async with connect() as conn:
+        await conn.execute(
+            "UPDATE users SET active = 0 WHERE username = ?", (username,)
+        )
+        await conn.commit()
+
+
+async def count_active_admins() -> int:
+    """Return the number of active admin accounts."""
+    async with connect() as conn:
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
+        )
+        (n,) = await cursor.fetchone()
+        return n
+
+
+async def update_user_password(username: str, hashed_password: str) -> bool:
+    """Update a user's password.  Returns False if the user does not exist."""
+    async with connect() as conn:
+        cursor = await conn.execute(
+            "UPDATE users SET hashed_password = ? WHERE username = ? AND active = 1",
+            (hashed_password, username),
+        )
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
 # ---------------------------------------------------------------------------
 # audit_log
 # ---------------------------------------------------------------------------

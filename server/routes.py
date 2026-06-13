@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from pydantic import BaseModel
 
 from . import birdnet_worker, config, db, registry, status_mapper
-from .auth import get_current_user, require_admin, require_node
+from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
@@ -45,6 +45,19 @@ class SetupRequest(BaseModel):
 class UserInfo(BaseModel):
     username: str
     role: str
+
+class UserListItem(BaseModel):
+    username: str
+    role: str
+    created_at: str
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "viewer"
+
+class ChangePasswordRequest(BaseModel):
+    password: str
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +112,66 @@ async def auth_status():
     or the login screen.  No auth required.
     """
     return {"setup_required": await db.count_users() == 0}
+
+
+# ---------------------------------------------------------------------------
+# User management  (admin only)
+# ---------------------------------------------------------------------------
+
+@router.get("/users", response_model=list[UserListItem], dependencies=[Depends(require_admin)])
+async def list_users():
+    """List all active user accounts."""
+    return await db.list_users()
+
+
+@router.post("/users", response_model=UserListItem, status_code=201, dependencies=[Depends(require_admin)])
+async def create_user(req: CreateUserRequest):
+    """Create a new user account."""
+    if not req.username.strip():
+        raise HTTPException(status_code=422, detail="Username is required")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    if req.role not in ("admin", "viewer"):
+        raise HTTPException(status_code=422, detail="Role must be 'admin' or 'viewer'")
+    if await db.get_user(req.username.strip()) is not None:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    from .auth import hash_password
+    hashed = hash_password(req.password)
+    await db.create_user(req.username.strip(), hashed, req.role, _now_iso())
+    log.info("User created: %s (role=%s)", req.username.strip(), req.role)
+    return UserListItem(username=req.username.strip(), role=req.role, created_at=_now_iso())
+
+
+@router.delete("/users/{username}", status_code=204, dependencies=[Depends(require_admin)])
+async def delete_user(username: str, caller: dict = Depends(require_admin)):
+    """Delete a user account.
+
+    Raises 409 if the target is the last active admin (lockout prevention).
+    Raises 404 if the user does not exist.
+    """
+    target = await db.get_user(username)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target["role"] == "admin" and await db.count_active_admins() <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete the last admin account",
+        )
+    await db.delete_user(username)
+    log.info("User deleted: %s", username)
+
+
+@router.put("/users/{username}/password", status_code=204, dependencies=[Depends(require_admin)])
+async def change_password(username: str, req: ChangePasswordRequest):
+    """Change a user's password."""
+    if len(req.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    from .auth import hash_password
+    updated = await db.update_user_password(username, hash_password(req.password))
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    log.info("Password changed for: %s", username)
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +265,12 @@ async def health():
     return {"status": "ok"}
 
 
-@router.get("/nodes", response_model=list[NodeView])
+@router.get("/nodes", response_model=list[NodeView], dependencies=[Depends(require_viewer)])
 async def list_nodes():
     return [_build_view(node, live, derived) for node, live, derived in await _mapped_nodes()]
 
 
-@router.get("/nodes/{node_id}", response_model=NodeView)
+@router.get("/nodes/{node_id}", response_model=NodeView, dependencies=[Depends(require_viewer)])
 async def get_node(node_id: str):
     for node, live, derived in await _mapped_nodes():
         if node["id"] == node_id:
@@ -319,7 +392,7 @@ async def configure_node(node_id: str, req: NodeConfigRequest):
 # Node position management (hub-owned, not proxied to node)
 # ---------------------------------------------------------------------------
 
-@router.get("/nodes/{node_id}/position", response_model=NodePosition)
+@router.get("/nodes/{node_id}/position", response_model=NodePosition, dependencies=[Depends(require_viewer)])
 async def get_node_position(node_id: str):
     """Return the hub-stored position for a node.
 
@@ -377,7 +450,7 @@ async def set_node_position(node_id: str, req: NodePosition):
 # Hub array origin  (geographic datum — independent of any node)
 # ---------------------------------------------------------------------------
 
-@router.get("/origin", response_model=ArrayOrigin)
+@router.get("/origin", response_model=ArrayOrigin, dependencies=[Depends(require_viewer)])
 async def get_origin():
     """Return the current hub array origin, or 404 if not yet configured."""
     origin = await db.get_array_origin()
@@ -551,7 +624,7 @@ async def audio_push(
     log.info("audio push id=%s from %s — %d bytes → %s", requestId, srcMac, len(data), fname)
 
 
-@router.get("/audio/requests/{request_id}")
+@router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
 async def get_audio_request(request_id: int):
     """Poll the status of an audio pull request.
 
@@ -632,7 +705,7 @@ async def request_sample(node_id: str, req: AudioSampleRequest):
             detail=f"Broker relay rejected: HTTP {r.status_code}",
         )
 
-    log.info("audio pull relayed — id=%s node=%s mac=%s [%s … %s]",
+    log.info("audio pull relayed -- id=%s node=%s mac=%s [%s ... %s]",
              request_id, node_id, target_mac, req.t_start_us, req.t_end_us)
     return {"requestId": request_id, "status": "relayed"}
 
@@ -641,7 +714,7 @@ async def request_sample(node_id: str, req: AudioSampleRequest):
 # TDOA solver
 # ---------------------------------------------------------------------------
 
-@router.post("/tdoa/solve", response_model=TdoaResponse)
+@router.post("/tdoa/solve", response_model=TdoaResponse, dependencies=[Depends(require_viewer)])
 async def solve_tdoa(req: TdoaRequest):
     """Solve for an acoustic source position given GPS-timestamped arrivals.
 
@@ -650,8 +723,8 @@ async def solve_tdoa(req: TdoaRequest):
     plus the RMS residual and (for 4-node solves) the mirror root.
 
     Errors:
-      422 — fewer than 4 timestamps, unknown node ID, node has no stored position
-      500 — solver failure (degenerate geometry)
+      422 -- fewer than 4 timestamps, unknown node ID, node has no stored position
+      500 -- solver failure (degenerate geometry)
     """
     if len(req.timestamps) < 4:
         raise HTTPException(status_code=422, detail="At least 4 node timestamps required")

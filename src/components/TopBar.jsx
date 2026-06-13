@@ -8,7 +8,7 @@ function relativeTime(isoString) {
   return `${Math.floor(diff / 3600000)}h ago`
 }
 
-export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout }) {
+export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout, onSignIn }) {
   const [tick, setTick] = useState(0)
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
@@ -104,10 +104,19 @@ export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout 
           </button>
         </div>
       ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <button
+          onClick={onSignIn}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: 'transparent',
+            border: '1px solid var(--border, #333)',
+            borderRadius: 4, padding: '3px 10px',
+            cursor: 'pointer',
+          }}
+        >
           <div className="status-dot online" />
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Not signed in</span>
-        </div>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Sign in</span>
+        </button>
       )}
     </div>
   )
