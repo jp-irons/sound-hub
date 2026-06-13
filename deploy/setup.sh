@@ -74,7 +74,7 @@ echo "▶ Installing systemd service..."
 sed \
     -e "s|__REPO_DIR__|$REPO_DIR|g" \
     -e "s|__USER__|$RUN_USER|g" \
-    "$DEPLOY_DIR/soundhub.service" \
+    "$REPO_DIR/config/soundhub.service" \
     | sudo tee /etc/systemd/system/soundhub.service > /dev/null
 
 sudo systemctl daemon-reload
@@ -86,7 +86,7 @@ echo "  soundhub: $(sudo systemctl is-active soundhub)"
 echo "▶ Configuring nginx..."
 sed \
     -e "s|__REPO_DIR__|$REPO_DIR|g" \
-    "$DEPLOY_DIR/nginx-lan.conf" \
+    "$REPO_DIR/config/nginx-lan.conf" \
     | sudo tee /etc/nginx/sites-available/sound-hub > /dev/null
 
 sudo ln -sf /etc/nginx/sites-available/sound-hub /etc/nginx/sites-enabled/sound-hub
