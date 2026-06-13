@@ -250,44 +250,36 @@ async def get_array_origin() -> dict | None:
 
 
 async def set_array_origin(
+    *,
     lat: float,
     lon: float,
     alt_m: float,
     set_from: str | None,
     set_at: str,
 ) -> None:
-    """Insert or replace the hub array origin.
-
-    Also clears the is_origin marker from all node_positions rows, then sets
-    it on set_from (if provided) so the UI can show which node was used.
-    Both writes happen in one transaction.
-    """
+    """Insert or replace the hub array origin (always row id=1)."""
     async with connect() as conn:
         await conn.execute(
             """INSERT OR REPLACE INTO array_origin (id, lat, lon, alt_m, set_from, set_at)
                VALUES (1, ?, ?, ?, ?, ?)""",
             (lat, lon, alt_m, set_from, set_at),
         )
-        # Reset all is_origin markers, then flag the source node.
-        await conn.execute("UPDATE node_positions SET is_origin = 0")
-        if set_from:
-            await conn.execute(
-                "UPDATE node_positions SET is_origin = 1 WHERE node_id = ?",
-                (set_from,),
-            )
         await conn.commit()
 
 
 async def clear_array_origin() -> None:
-    """Delete the hub array origin and clear all is_origin markers."""
+    """Remove the hub array origin row."""
     async with connect() as conn:
         await conn.execute("DELETE FROM array_origin WHERE id = 1")
-        await conn.execute("UPDATE node_positions SET is_origin = 0")
         await conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# node_positions bulk read
+# ---------------------------------------------------------------------------
+
 async def list_node_positions() -> dict[str, dict]:
-    """Return all position records keyed by node_id — used in bulk mapping."""
+    """Return all node position records keyed by node_id."""
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM node_positions")
@@ -296,50 +288,19 @@ async def list_node_positions() -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# detections CRUD
-# ---------------------------------------------------------------------------
-
-async def insert_detections(
-    source: str,
-    analyzed_at: str,
-    detections: list[dict],
-) -> None:
-    """Persist a batch of BirdNET detections from a single analysis run."""
-    async with connect() as conn:
-        await conn.executemany(
-            """INSERT INTO detections
-               (source, analyzed_at, common_name, scientific_name, confidence, start_sec, end_sec)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            [
-                (
-                    source,
-                    analyzed_at,
-                    d.get("common_name", ""),
-                    d.get("scientific_name", ""),
-                    d.get("confidence", 0.0),
-                    d.get("start_time"),
-                    d.get("end_time"),
-                )
-                for d in detections
-            ],
-        )
-        await conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# users CRUD
+# User accounts CRUD
 # ---------------------------------------------------------------------------
 
 async def count_users() -> int:
-    """Return total number of user accounts."""
+    """Return the total number of active users."""
     async with connect() as conn:
-        cursor = await conn.execute("SELECT COUNT(*) FROM users")
-        (n,) = await cursor.fetchone()
-        return n
+        cursor = await conn.execute("SELECT COUNT(*) FROM users WHERE active = 1")
+        (count,) = await cursor.fetchone()
+        return count
 
 
 async def get_user(username: str) -> dict | None:
-    """Return a user record by username, or None if not found."""
+    """Return a user by username, or None if not found / inactive."""
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
@@ -349,19 +310,21 @@ async def get_user(username: str) -> dict | None:
         return dict(row) if row else None
 
 
-async def create_user(username: str, hashed_password: str, role: str, created_at: str) -> None:
-    """Insert a new user account."""
+async def create_user(
+    username: str, hashed_password: str, role: str, created_at: str
+) -> None:
+    """Insert a new active user."""
     async with connect() as conn:
         await conn.execute(
-            """INSERT INTO users (username, hashed_password, role, created_at)
-               VALUES (?, ?, ?, ?)""",
+            """INSERT INTO users (username, hashed_password, role, created_at, active)
+               VALUES (?, ?, ?, ?, 1)""",
             (username, hashed_password, role, created_at),
         )
         await conn.commit()
 
 
 async def list_users() -> list[dict]:
-    """Return all active user accounts (no hashed_password)."""
+    """Return all active users ordered by creation date."""
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
@@ -371,8 +334,18 @@ async def list_users() -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def count_active_admins() -> int:
+    """Return the number of active admin users."""
+    async with connect() as conn:
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
+        )
+        (count,) = await cursor.fetchone()
+        return count
+
+
 async def delete_user(username: str) -> None:
-    """Soft-delete a user account by setting active = 0."""
+    """Soft-delete a user (sets active=0)."""
     async with connect() as conn:
         await conn.execute(
             "UPDATE users SET active = 0 WHERE username = ?", (username,)
@@ -380,18 +353,8 @@ async def delete_user(username: str) -> None:
         await conn.commit()
 
 
-async def count_active_admins() -> int:
-    """Return the number of active admin accounts."""
-    async with connect() as conn:
-        cursor = await conn.execute(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
-        )
-        (n,) = await cursor.fetchone()
-        return n
-
-
 async def update_user_password(username: str, hashed_password: str) -> bool:
-    """Update a user's password.  Returns False if the user does not exist."""
+    """Update a user's password. Returns True if the user was found and updated."""
     async with connect() as conn:
         cursor = await conn.execute(
             "UPDATE users SET hashed_password = ? WHERE username = ? AND active = 1",
@@ -402,54 +365,43 @@ async def update_user_password(username: str, hashed_password: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# audit_log
+# Detections CRUD
 # ---------------------------------------------------------------------------
 
-async def write_audit_entry(
-    timestamp: str,
-    username: str | None,
-    source_ip: str | None,
-    method: str,
-    path: str,
-    status_code: int,
+async def insert_detections(
+    source: str, analyzed_at: str, detections: list[dict]
 ) -> None:
-    """Append one row to the audit log."""
+    """Bulk-insert BirdNET detection rows."""
     async with connect() as conn:
-        await conn.execute(
-            """INSERT INTO audit_log (timestamp, username, source_ip, method, path, status_code)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (timestamp, username, source_ip, method, path, status_code),
+        await conn.executemany(
+            """INSERT INTO detections
+               (source, analyzed_at, common_name, scientific_name,
+                confidence, start_sec, end_sec)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    source,
+                    analyzed_at,
+                    d["common_name"],
+                    d["scientific_name"],
+                    d["confidence"],
+                    d.get("start_time"),
+                    d.get("end_time"),
+                )
+                for d in detections
+            ],
         )
         await conn.commit()
 
 
-async def list_detections(
-    limit: int = 200,
-    min_conf: float = 0.0,
-    species: str | None = None,
-) -> list[dict]:
-    """Return recent detections, newest first.
-
-    species — optional substring filter on common_name (case-insensitive).
-    """
+async def list_detections(limit: int = 200) -> list[dict]:
+    """Return the most recent detections ordered newest-first."""
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
-        if species:
-            cursor = await conn.execute(
-                """SELECT * FROM detections
-                   WHERE confidence >= ?
-                     AND common_name LIKE ?
-                   ORDER BY analyzed_at DESC, id DESC
-                   LIMIT ?""",
-                (min_conf, f"%{species}%", limit),
-            )
-        else:
-            cursor = await conn.execute(
-                """SELECT * FROM detections
-                   WHERE confidence >= ?
-                   ORDER BY analyzed_at DESC, id DESC
-                   LIMIT ?""",
-                (min_conf, limit),
-            )
+        cursor = await conn.execute(
+            """SELECT * FROM detections
+               ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
+            (limit,),
+        )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]

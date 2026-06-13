@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import birdnet_worker, config, db, registry, status_mapper
 from .auth import get_current_user, require_admin, require_node, require_viewer
@@ -15,6 +15,7 @@ from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeConfigRequest, NodePosition, NodeView, TdoaRequest, TdoaResponse,
+    LatLon,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -258,6 +259,60 @@ async def _mapped_nodes() -> list[tuple[dict, dict, dict]]:
     mapped = [derived for _, _, derived in triples]
     status_mapper.derive_relative_positions(mapped, array_origin=array_origin)
     return triples
+
+
+# ---------------------------------------------------------------------------
+# Public endpoints — no auth required, safe for external exposure.
+# Returns a slim subset of node data: position + status only.
+# IP addresses, firmware versions, raw status, and all diagnostic
+# internals are deliberately excluded.
+# ---------------------------------------------------------------------------
+
+class PublicNodeView(BaseModel):
+    """Slim node view for unauthenticated / public map access."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    hostname: str
+    role: str
+    status: str
+    lat_lon: LatLon | None = Field(default=None, alias="latLon")
+    position_known: bool   = Field(default=False, alias="positionKnown")
+    is_origin: bool        = Field(default=False, alias="isOrigin")
+
+
+@router.get("/public/nodes", response_model=list[PublicNodeView])
+async def public_list_nodes():
+    """Unauthenticated node list for public map display.
+
+    Only returns approved nodes.  Omits all sensitive fields (IP address,
+    firmware version, raw status, clock/audio/GPS internals).
+    """
+    return [
+        PublicNodeView(
+            id=node["id"],
+            hostname=node["hostname"],
+            role=derived["role"],
+            status=derived["status"],
+            lat_lon=derived["lat_lon"],
+            position_known=derived["position_known"],
+            is_origin=derived["is_origin"],
+        )
+        for node, _live, derived in await _mapped_nodes()
+        if node["approval_status"] == db.APPROVED
+    ]
+
+
+@router.get("/public/origin")
+async def public_origin():
+    """Unauthenticated array origin for map centering.
+
+    Returns only lat/lon/alt — no audit metadata.
+    """
+    origin = await db.get_array_origin()
+    if origin is None:
+        raise HTTPException(status_code=404, detail="Array origin not configured")
+    return {"lat": origin["lat"], "lon": origin["lon"], "altM": origin["alt_m"]}
 
 
 @router.get("/health")
@@ -729,40 +784,44 @@ async def solve_tdoa(req: TdoaRequest):
     if len(req.timestamps) < 4:
         raise HTTPException(status_code=422, detail="At least 4 node timestamps required")
 
-    nodes: list[TdoaNode] = []
+    positions = await db.list_node_positions()
+
+    solver_nodes: list[TdoaNode] = []
     timestamps_us: list[float] = []
-    for ts_entry in req.timestamps:
-        node = await registry.get_node(ts_entry.node_id)
-        if node is None:
+    for ts in req.timestamps:
+        node_pos = positions.get(ts.node_id)
+        if node_pos is None:
             raise HTTPException(
                 status_code=422,
-                detail=f"Unknown node {ts_entry.node_id!r}",
+                detail=f"Node '{ts.node_id}' has no stored position",
             )
-        pos = await db.get_node_position(ts_entry.node_id)
-        if pos is None:
+        if any(node_pos.get(k) is None for k in ("pos_e", "pos_n", "pos_alt")):
             raise HTTPException(
                 status_code=422,
-                detail=f"No stored position for node {ts_entry.node_id!r}",
+                detail=f"Node '{ts.node_id}' position is incomplete (pos_e/pos_n/pos_alt required)",
             )
-        if pos.get("pos_e") is None or pos.get("pos_n") is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Position for node {ts_entry.node_id!r} is incomplete (pos_e/pos_n missing)",
-            )
-        nodes.append(TdoaNode(
-            node_id=ts_entry.node_id,
-            x=pos["pos_e"],
-            y=pos["pos_n"],
-            z=pos.get("pos_alt") or 0.0,
+        solver_nodes.append(TdoaNode(
+            node_id=ts.node_id,
+            x=node_pos["pos_e"],
+            y=node_pos["pos_n"],
+            z=node_pos["pos_alt"],
         ))
-        timestamps_us.append(ts_entry.timestamp_us)
+        timestamps_us.append(ts.timestamp_us)
 
     try:
-        result = tdoa_solve(nodes, timestamps_us,
-                            speed_of_sound=req.speed_of_sound,
-                            hint_point=req.hint_point)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Solver error: {exc}") from exc
+        result = tdoa_solve(
+            nodes=solver_nodes,
+            timestamps_us=timestamps_us,
+            speed_of_sound=req.speed_of_sound,
+            hint_point=req.hint_point,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=f"Solver failure: {exc}")
+
+    ambiguous: tuple[float, float, float] | None = None
+    if result.ambiguous_root is not None:
+        ax, ay, az, _ = result.ambiguous_root
+        ambiguous = (ax, ay, az)
 
     return TdoaResponse(
         x=result.x,
@@ -770,5 +829,50 @@ async def solve_tdoa(req: TdoaRequest):
         z=result.z,
         residual_m=result.residual,
         method=result.method,
-        alt_solution=result.alt_solution,
+        ambiguous_root=ambiguous,
     )
+
+
+# ---------------------------------------------------------------------------
+# Detections
+# ---------------------------------------------------------------------------
+
+@router.get("/detections", response_model=list[DetectionRecord])
+async def list_detections(limit: int = Query(default=200, ge=1, le=2000)):
+    """Return the most recent BirdNET detections, newest first."""
+    rows = await db.list_detections(limit=limit)
+    return [DetectionRecord(**row) for row in rows]
+
+
+@router.post("/detections/analyze", response_model=list[DetectionRecord], status_code=201)
+async def analyze_wav(file: UploadFile = File(...)):
+    """Upload a WAV file, run BirdNET analysis, persist and return detections.
+
+    The analyzer runs synchronously in a thread pool so the event loop is not
+    blocked.  Returns 503 if the BirdNET model has not finished loading yet.
+    """
+    if not birdnet_worker.ready():
+        raise HTTPException(status_code=503, detail="BirdNET model not yet loaded — try again shortly")
+
+    import asyncio
+
+    suffix = ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(None, birdnet_worker.analyze_wav, tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    if not raw:
+        return []
+
+    analyzed_at = datetime.now(timezone.utc).isoformat()
+    source = file.filename or "upload"
+    await db.insert_detections(source, analyzed_at, raw)
+
+    rows = await db.list_detections(limit=len(raw))
+    return [DetectionRecord(**row) for row in rows[:len(raw)]]

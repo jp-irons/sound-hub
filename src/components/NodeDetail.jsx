@@ -63,7 +63,7 @@ function bufferClass(f) {
   return 'low'
 }
 
-export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure, onSetPosition }) {
+export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure, onSetPosition, isAdmin = false }) {
   const [, setTick] = useState(0)
   const [configOpen, setConfigOpen] = useState(false)
   const [positionOpen, setPositionOpen] = useState(false)
@@ -78,9 +78,8 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
 
   return (
     <div style={{
-      width: 320, flexShrink: 0,
+      flex: 1,
       background: 'var(--bg-panel)',
-      borderLeft: '1px solid var(--border)',
       display: 'flex', flexDirection: 'column',
       overflow: 'hidden',
     }}>
@@ -418,7 +417,8 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
         </div>
       </div>
 
-      {/* Actions footer */}
+      {/* Actions footer — admin only */}
+      {isAdmin && (
       <div style={{
         padding: '10px 14px',
         borderTop: '1px solid var(--border)',
@@ -551,6 +551,8 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           Configure
         </button>
       </div>
+      )}
+
 
       {configOpen && (
         <NodeConfigModal

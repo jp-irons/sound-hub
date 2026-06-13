@@ -43,42 +43,21 @@ async def lifespan(app: FastAPI):
     await discovery.start()
     _poller_task = asyncio.create_task(poller.run())
     # Load BirdNET model in a thread so the event loop is not blocked.
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, birdnet_worker.init)
-    log.info("Sound Hub backend ready")
+    await asyncio.get_running_loop().run_in_executor(None, birdnet_worker.init)
+    log.info("BirdNET model loaded")
     yield
-    log.info("Shutting down...")
-    if _poller_task is not None:
+    if _poller_task:
         _poller_task.cancel()
-    await discovery.stop()
 
 
 app = FastAPI(title="Sound Hub", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:4173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def audit_middleware(request: Request, call_next):
-    """Log all authenticated admin actions to the audit_log table."""
-    response = await call_next(request)
-    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-        username = getattr(request.state, "auth_user", None)
-        if username:
-            await db.write_audit_entry(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                username=username,
-                source_ip=request.client.host if request.client else None,
-                method=request.method,
-                path=request.url.path,
-                status_code=response.status_code,
-            )
-    return response
-
 
 app.include_router(router, prefix="/api")

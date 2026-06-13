@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import NodeCard from './NodeCard.jsx'
 
-// Compact row for pending/rejected nodes — these aren't polled (see
-// poller.py), so they have no status/audio/clock data to show. All they
-// need is identity plus the admission decision buttons.
-function AdmissionRow({ node, onSelect, onApprove, onReject, variant }) {
+// Compact row for pending/rejected nodes.
+// Action buttons are only shown to admins.
+function AdmissionRow({ node, onSelect, onApprove, onReject, variant, isAdmin }) {
   return (
     <div
       onClick={() => onSelect(node.id)}
@@ -21,60 +20,58 @@ function AdmissionRow({ node, onSelect, onApprove, onReject, variant }) {
         <span style={{ fontWeight: 600, fontSize: 12, flex: 1 }}>{node.hostname}</span>
         <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{node.ipAddress ?? '—'}</span>
       </div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        {variant !== 'pending' && (
-          <button
-            className="btn"
-            style={{ flex: 1, fontSize: 11, padding: '3px 8px' }}
-            onClick={e => { e.stopPropagation(); onApprove(node.id) }}
-            title="Re-approve this node — admit it back into the active array"
-          >
-            Approve
-          </button>
-        )}
-        {variant === 'pending' && (
-          <>
+      {isAdmin && (
+        <div style={{ display: 'flex', gap: 6 }}>
+          {variant !== 'pending' && (
             <button
-              className="btn btn-primary"
+              className="btn"
               style={{ flex: 1, fontSize: 11, padding: '3px 8px' }}
               onClick={e => { e.stopPropagation(); onApprove(node.id) }}
-              title="Admit this node into the active array"
+              title="Re-approve this node"
             >
               Approve
             </button>
-            <button
-              className="btn"
-              style={{ flex: 1, fontSize: 11, padding: '3px 8px', borderColor: 'var(--red)', color: 'var(--red)' }}
-              onClick={e => { e.stopPropagation(); onReject(node.id) }}
-              title="Decline this node — keep it out of the active array (reversible)"
-            >
-              Reject
-            </button>
-          </>
-        )}
-      </div>
+          )}
+          {variant === 'pending' && (
+            <>
+              <button
+                className="btn btn-primary"
+                style={{ flex: 1, fontSize: 11, padding: '3px 8px' }}
+                onClick={e => { e.stopPropagation(); onApprove(node.id) }}
+                title="Admit this node into the active array"
+              >
+                Approve
+              </button>
+              <button
+                className="btn"
+                style={{ flex: 1, fontSize: 11, padding: '3px 8px', borderColor: 'var(--red)', color: 'var(--red)' }}
+                onClick={e => { e.stopPropagation(); onReject(node.id) }}
+                title="Decline this node"
+              >
+                Reject
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, onReject }) {
+export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, onReject, isAdmin = false }) {
   const [showRejected, setShowRejected] = useState(false)
 
   const approved = nodes.filter(n => n.approvalStatus === 'approved')
   const pending  = nodes.filter(n => n.approvalStatus === 'pending')
   const rejected = nodes.filter(n => n.approvalStatus === 'rejected')
 
-  // Anchor nodes: brokers (WiFi↔ESP-NOW bridge) or origin (spatial reference).
-  // A node may be both — it appears in Anchor Nodes regardless.
   const anchors = approved.filter(n => n.role === 'BROKER' || n.isOrigin)
   const leaves  = approved.filter(n => n.role !== 'BROKER' && !n.isOrigin)
 
   return (
     <div style={{
-      width: 268,
-      flexShrink: 0,
+      flex: 1,
       background: 'var(--bg-panel)',
-      borderRight: '1px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden',
@@ -95,7 +92,9 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
 
       {/* Node list */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {pending.length > 0 && (
+
+        {/* Pending — only show section when admin */}
+        {isAdmin && pending.length > 0 && (
           <div style={{ marginBottom: 2 }}>
             <div style={{ fontSize: 10, color: 'var(--yellow)', padding: '0 4px 4px', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
               Pending approval ({pending.length})
@@ -109,6 +108,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
                   onApprove={onApprove}
                   onReject={onReject}
                   variant="pending"
+                  isAdmin={isAdmin}
                 />
               ))}
             </div>
@@ -151,9 +151,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
           </div>
         )}
 
-        {/* Rejected nodes are kept (not deleted — see registry.set_approval_status)
-            so a decision can be reversed. They're tucked behind a collapsed
-            toggle so they don't clutter the main list. */}
+        {/* Rejected — visible to all, but re-approve action only for admins */}
         {rejected.length > 0 && (
           <div style={{ marginTop: 4, borderTop: '1px solid var(--border-muted)', paddingTop: 8 }}>
             <button
@@ -178,6 +176,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
                     onApprove={onApprove}
                     onReject={onReject}
                     variant="rejected"
+                    isAdmin={isAdmin}
                   />
                 ))}
               </div>

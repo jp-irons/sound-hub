@@ -8,16 +8,12 @@ const MIN_PASSWORD_LENGTH = 8
  * Full-screen auth overlay.
  *
  * mode='setup'  — first run, no users exist yet
- *                 Fields: username, password, confirm password
- *                 Submits to POST /api/auth/setup
- *
- * mode='login'  — returning user
- *                 Fields: username, password
- *                 Submits to POST /api/auth/login
+ * mode='login'  — returning user; shows "Browse without signing in" option
  *
  * onSuccess(token, username, role) — called on successful auth
+ * onBrowse() — called when user chooses to browse unauthenticated (login mode only)
  */
-export default function AuthOverlay({ mode, onSuccess }) {
+export default function AuthOverlay({ mode, onSuccess, onBrowse }) {
   const [username, setUsername]   = useState('')
   const [password, setPassword]   = useState('')
   const [confirm,  setConfirm]    = useState('')
@@ -58,7 +54,6 @@ export default function AuthOverlay({ mode, onSuccess }) {
         return
       }
 
-      // Setup returns {username, role}; login returns {access_token, role}
       if (isSetup) {
         // After setup succeeds, immediately log in to get a token
         const loginRes = await fetch(`${API_BASE}/auth/login`, {
@@ -145,6 +140,16 @@ export default function AuthOverlay({ mode, onSuccess }) {
             {busy ? 'Please wait…' : isSetup ? 'Create account' : 'Sign in'}
           </button>
         </form>
+
+        {/* Cancel — returns to unauthenticated map view (login mode only) */}
+        {!isSetup && onBrowse && (
+          <button
+            onClick={onBrowse}
+            style={styles.browseLink}
+          >
+            Cancel
+          </button>
+        )}
       </div>
     </div>
   )
@@ -212,5 +217,15 @@ const styles = {
     border: 'none', borderRadius: 6,
     padding: '10px 0', cursor: 'pointer',
     opacity: 1, transition: 'opacity 0.15s',
+  },
+  browseLink: {
+    marginTop: 16,
+    background: 'none', border: 'none',
+    color: 'var(--text-muted, #888)',
+    fontSize: 12, cursor: 'pointer',
+    width: '100%', textAlign: 'center',
+    padding: '4px 0',
+    textDecoration: 'underline',
+    textDecorationColor: 'var(--border, #444)',
   },
 }

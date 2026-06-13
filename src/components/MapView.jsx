@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 
 const API_BASE = 'http://localhost:8000/api'
 
+const displayStatus = s => s === 'online' ? 'healthy' : s
+
 const STATUS_COLOR = {
   online:   '#3fb950',
   degraded: '#d29922',
@@ -22,16 +24,23 @@ function MapFocus({ nodes, selectedId }) {
 }
 
 // Fallback map centre used before the hub array origin is configured.
-// Actual property location — matches the coordinates in src/data/mockNodes.js.
 const PROPERTY_FALLBACK = [-27.497347, 152.996641]
 
-export default function MapView({ nodes, selectedId, onSelect }) {
+/**
+ * props:
+ *   nodes       — array of node objects (full NodeView or slim PublicNodeView)
+ *   selectedId  — currently selected node id (authenticated only, else null)
+ *   onSelectNode — callback(id) when a node is clicked (authenticated only, else null)
+ *   selectable  — true when authenticated; false for unauthenticated browsing.
+ *                 When false, clicking a node opens a minimal Popup instead of
+ *                 selecting it, and no sensitive fields (IP, relPos) are shown.
+ */
+export default function MapView({ nodes, selectedId, onSelectNode, selectable = true }) {
   const [arrayOrigin, setArrayOrigin] = useState(null)
 
-  // Load the hub array origin once on mount — it's a hub-level config,
-  // not derived from any node, so we don't need to reload on every poll.
+  // Use the public/origin endpoint — no auth required, safe for unauthenticated map.
   useEffect(() => {
-    fetch(`${API_BASE}/origin`)
+    fetch(`${API_BASE}/public/origin`)
       .then(res => res.ok ? res.json() : null)
       .then(data => { if (data) setArrayOrigin(data) })
       .catch(() => {})
@@ -60,11 +69,11 @@ export default function MapView({ nodes, selectedId, onSelect }) {
         <MapFocus nodes={nodes} selectedId={selectedId} />
 
         {nodes.map(node => {
-          if (!node.latLon) return null  // node-3 position unknown
+          if (!node.latLon) return null
 
           const isSelected = node.id === selectedId
-          const color = STATUS_COLOR[node.status]
-          const relPos = node.positionRelative
+          const color = STATUS_COLOR[node.status] ?? STATUS_COLOR.offline
+          const relPos = node.positionRelative  // undefined for PublicNodeView
 
           return (
             <CircleMarker
@@ -77,23 +86,34 @@ export default function MapView({ nodes, selectedId, onSelect }) {
                 fillOpacity: 0.9,
                 weight: isSelected ? 2.5 : 1.5,
               }}
-              eventHandlers={{ click: () => onSelect(node.id) }}
+              eventHandlers={selectable ? { click: () => onSelectNode?.(node.id) } : {}}
             >
               <Popup>
-                <div style={{ minWidth: 140 }}>
-                  <strong>{node.hostname}</strong>
-                  <div style={{ fontSize: 12, marginTop: 4, color: '#555' }}>
-                    {node.role} · {node.status}
-                  </div>
-                  {relPos && (
-                    <div style={{ fontSize: 11, marginTop: 4, color: '#777', fontFamily: 'monospace' }}>
-                      N {relPos.nM.toFixed(1)}m · E {relPos.eM.toFixed(1)}m · Alt {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(1)}m
+                {selectable ? (
+                  /* Authenticated — full details */
+                  <div style={{ minWidth: 140 }}>
+                    <strong>{node.hostname}</strong>
+                    <div style={{ fontSize: 12, marginTop: 4, color: '#555' }}>
+                      {displayStatus(node.status)}{[node.isOrigin && 'POS REF', node.role === 'BROKER' && 'BROKER'].filter(Boolean).map(l => ` · ${l}`)}
                     </div>
-                  )}
-                  <div style={{ fontSize: 11, marginTop: 4, color: '#777' }}>
-                    {node.ipAddress}
+                    {relPos && (
+                      <div style={{ fontSize: 11, marginTop: 4, color: '#777', fontFamily: 'monospace' }}>
+                        N {relPos.nM.toFixed(1)}m · E {relPos.eM.toFixed(1)}m · Alt {relPos.altM > 0 ? '+' : ''}{relPos.altM.toFixed(1)}m
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, marginTop: 4, color: '#777' }}>
+                      {node.ipAddress}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  /* Unauthenticated — minimal tooltip, no sensitive fields */
+                  <div style={{ minWidth: 110 }}>
+                    <strong>{node.hostname}</strong>
+                    <div style={{ fontSize: 12, marginTop: 4, color: '#555' }}>
+                      {displayStatus(node.status)}
+                    </div>
+                  </div>
+                )}
               </Popup>
             </CircleMarker>
           )
@@ -105,14 +125,13 @@ export default function MapView({ nodes, selectedId, onSelect }) {
         <div style={{
           position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(210,153,34,0.15)',
-          border: '1px solid var(--yellow)',
-          color: 'var(--yellow)',
-          padding: '6px 12px', borderRadius: 6,
-          fontSize: 12, zIndex: 1000,
-          backdropFilter: 'blur(4px)',
+          border: '1px solid rgba(210,153,34,0.4)',
+          borderRadius: 6, padding: '6px 14px',
+          fontSize: 12, color: '#d29922',
           pointerEvents: 'none',
+          whiteSpace: 'nowrap',
         }}>
-          {nodes.filter(n => !n.positionKnown).map(n => n.hostname).join(', ')} — position unknown · TOF calibration required
+          {nodes.filter(n => !n.positionKnown).length} node{nodes.filter(n => !n.positionKnown).length !== 1 ? 's' : ''} not yet positioned
         </div>
       )}
     </div>

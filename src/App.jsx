@@ -12,15 +12,17 @@ const API_BASE = 'http://localhost:8000/api'
 const POLL_INTERVAL_MS = 5000
 
 export default function App() {
-  // 'login' | 'setup' | 'authenticated'
-  const [authState, setAuthState] = useState('login')
+  // 'login' | 'setup' | 'unauthenticated' | 'authenticated'
+  const [authState, setAuthState] = useState('unauthenticated')
   const [user, setUser] = useState(null)   // { username, role }
 
-  const [tab, setTab] = useState('nodes')
-  const [nodes, setNodes] = useState([])
+  const [tab, setTab] = useState('map')
+  const [nodes, setNodes] = useState([])             // full node list — authenticated only
+  const [publicNodes, setPublicNodes] = useState([]) // slim node list — unauthenticated
   const [selectedId, setSelectedId] = useState(null)
   const [error, setError] = useState(null)
-  const [loaded, setLoaded] = useState(false)
+
+  const isAdmin = user?.role === 'admin'
 
   // Wire up the 401 callback so any apiFetch can flip us back to login.
   useEffect(() => {
@@ -39,7 +41,7 @@ export default function App() {
         const res = await fetch(`${API_BASE}/auth/status`)
         const body = await res.json()
         if (body.setup_required) setAuthState('setup')
-        // else leave as 'login' — already correct
+        // else leave as 'unauthenticated' — user browses map and signs in on demand
       } catch {
         // Backend unreachable — leave as 'login', error will surface on submit.
       }
@@ -56,6 +58,7 @@ export default function App() {
   function handleLogout() {
     clearToken()
     setUser(null)
+    setNodes([])
     setAuthState('login')
   }
 
@@ -63,18 +66,16 @@ export default function App() {
   // Data fetching
   // -------------------------------------------------------------------------
 
+  // Authenticated polling — full node details
   const refresh = useCallback(async () => {
     try {
       const res = await apiFetch('/nodes')
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-      const data = await res.json()
-      setNodes(data)
+      setNodes(await res.json())
       setError(null)
     } catch (err) {
-      if (err instanceof AuthError) return   // overlay handles it
+      if (err instanceof AuthError) return
       setError(err.message ?? String(err))
-    } finally {
-      setLoaded(true)
     }
   }, [])
 
@@ -84,6 +85,24 @@ export default function App() {
     const interval = setInterval(refresh, POLL_INTERVAL_MS)
     return () => clearInterval(interval)
   }, [authState, refresh])
+
+  // Unauthenticated polling — slim public nodes for map display
+  const refreshPublic = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/public/nodes`)
+      if (!res.ok) return
+      setPublicNodes(await res.json())
+    } catch {
+      // Silently ignore — map just shows no nodes
+    }
+  }, [])
+
+  useEffect(() => {
+    if (authState !== 'unauthenticated') return
+    refreshPublic()
+    const interval = setInterval(refreshPublic, POLL_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [authState, refreshPublic])
 
   // -------------------------------------------------------------------------
   // Node actions
@@ -161,9 +180,14 @@ export default function App() {
   // Render
   // -------------------------------------------------------------------------
 
-  const selectedNode = nodes.find(n => n.id === selectedId) ?? null
   const approvedNodes = nodes.filter(n => n.approvalStatus === 'approved')
   const onlineCount = approvedNodes.filter(n => n.status === 'online').length
+  const selectedNode = nodes.find(n => n.id === selectedId) ?? null
+
+  // Nodes shown on the map depend on auth state
+  const mapNodes = authState === 'authenticated' ? approvedNodes : publicNodes
+
+  const showOverlay = authState === 'setup' || authState === 'login'
 
   const tabStyle = (t) => ({
     padding: '4px 16px',
@@ -181,14 +205,18 @@ export default function App() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
 
       {/* Auth overlay — setup or login */}
-      {(authState === 'setup' || authState === 'login') && (
-        <AuthOverlay mode={authState} onSuccess={handleAuthSuccess} />
+      {showOverlay && (
+        <AuthOverlay
+          mode={authState}
+          onSuccess={handleAuthSuccess}
+          onBrowse={() => setAuthState('unauthenticated')}
+        />
       )}
 
       <TopBar
-        totalNodes={approvedNodes.length}
-        onlineCount={onlineCount}
-        nodes={approvedNodes}
+        totalNodes={authState === 'authenticated' ? approvedNodes.length : publicNodes.length}
+        onlineCount={authState === 'authenticated' ? onlineCount : publicNodes.filter(n => n.status === 'online').length}
+        nodes={authState === 'authenticated' ? approvedNodes : []}
         user={user}
         onLogout={handleLogout}
         onSignIn={() => setAuthState('login')}
@@ -202,9 +230,10 @@ export default function App() {
         paddingLeft: 8,
         flexShrink: 0,
       }}>
-        <button style={tabStyle('nodes')}      onClick={() => setTab('nodes')}>Nodes</button>
+        <button style={tabStyle('map')}        onClick={() => setTab('map')}>Map</button>
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
-        {user?.role === 'admin' && (
+
+        {isAdmin && (
           <button style={tabStyle('users')} onClick={() => setTab('users')}>Users</button>
         )}
       </div>
@@ -221,30 +250,52 @@ export default function App() {
         </div>
       )}
 
-      {tab === 'nodes' && (
-        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-          <NodeSidebar
-            nodes={nodes}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onApprove={approveNode}
-            onReject={rejectNode}
+      {tab === 'map' && (
+        <div style={{ flex: 1, position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <MapView
+            nodes={mapNodes}
+            selectedId={authState === 'authenticated' ? selectedId : null}
+            onSelectNode={authState === 'authenticated' ? setSelectedId : null}
+            selectable={authState === 'authenticated'}
           />
-          <MapView nodes={approvedNodes} onSelectNode={setSelectedId} />
-          {selectedNode && (
-            <NodeDetail
-              node={selectedNode}
-              onClose={() => setSelectedId(null)}
-              onRemove={removeNode}
-              onConfigure={configureNode}
-              onSetPosition={setNodePosition}
-            />
+          {authState === 'authenticated' && (
+            <div style={{
+              position: 'absolute', top: 0, right: 0, bottom: 0,
+              width: 300, zIndex: 400,
+              display: 'flex', flexDirection: 'column',
+              background: 'var(--bg-panel)',
+              borderLeft: '1px solid var(--border)',
+              boxShadow: '-4px 0 16px rgba(0,0,0,0.3)',
+              overflow: 'hidden',
+            }}>
+              {selectedNode ? (
+                <NodeDetail
+                  node={selectedNode}
+                  onClose={() => setSelectedId(null)}
+                  onApprove={approveNode}
+                  onReject={rejectNode}
+                  onRemove={removeNode}
+                  onConfigure={configureNode}
+                  onSetPosition={setNodePosition}
+                  isAdmin={isAdmin}
+                />
+              ) : (
+                <NodeSidebar
+                  nodes={nodes}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  onApprove={approveNode}
+                  onReject={rejectNode}
+                  isAdmin={isAdmin}
+                />
+              )}
+            </div>
           )}
         </div>
       )}
 
       {tab === 'detections' && <DetectionsTab />}
-      {tab === 'users'      && <UsersTab user={user} />}
+      {tab === 'users' && isAdmin && <UsersTab user={user} />}
     </div>
   )
 }
