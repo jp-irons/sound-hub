@@ -199,3 +199,127 @@ script for full usage options (e.g. `--list-devices`, `--geo`, `--threshold`).
 
 The tools venv is git-ignored; recreate it any time by re-running the
 installer or the manual steps above.
+
+---
+
+## Production deployment (WSL2 on Windows)
+
+The `deploy/` folder contains scripts that install Sound Hub as a persistent
+service on a Windows machine running WSL2 — the intended setup for the NUC
+base station.  The result is nginx on port 80 serving the built SPA and
+proxying `/api/` to uvicorn, with both managed by systemd inside WSL2.
+
+### Prerequisites
+
+- Windows 11 (22H2 or later) on the target machine
+- The repo cloned on the Windows machine (for `windows-setup.ps1`)
+- An always-on Windows user account (the service runs in that user's WSL session)
+
+### Step 1 — Windows host setup
+
+Open PowerShell **as Administrator** and run:
+
+```powershell
+cd C:\path\to\sound-hub
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser   # once only
+.\deploy\windows-setup.ps1
+```
+
+This script:
+- Installs WSL2 + Ubuntu if not already present (triggers a reboot — re-run the script after rebooting)
+- Adds `networkingMode=mirrored` to `~/.wslconfig` so WSL2 ports appear directly on the Windows LAN interface
+- Creates a Task Scheduler task that keeps the WSL2 instance running after the user logs on
+- Opens Windows Firewall for TCP 80 (SPA + API) and TCP 8000 (node audio push)
+
+After the script completes, apply the networking change:
+
+```powershell
+wsl --shutdown
+```
+
+Then reopen Ubuntu from the Start menu.
+
+### Step 2 — WSL2 first-run
+
+The first time Ubuntu opens it will ask for a Linux username and password.
+Accept the suggested username or choose your own — either works.  The account
+is automatically added to `sudoers`, which `setup.sh` requires.
+
+### Step 3 — Clone and run setup
+
+Inside Ubuntu:
+
+```bash
+git clone <repo-url> ~/sound-hub
+bash ~/sound-hub/deploy/setup.sh
+```
+
+`setup.sh` is idempotent — safe to re-run after failures or updates.  It:
+1. Installs system packages (`nginx`, `python3-venv`, `nodejs`, `npm`)
+2. Creates a Python venv and installs `server/requirements.txt`
+3. Builds the React SPA (`npm ci && npm run build`)
+4. Creates `config/soundhub.conf` from the example (if not already present)
+5. Installs and starts a systemd unit (`soundhub.service`) running uvicorn on `127.0.0.1:8000`
+6. Installs and starts nginx, configured to serve the SPA and proxy `/api/`
+
+### Step 4 — Configure
+
+```bash
+nano ~/sound-hub/config/soundhub.conf
+```
+
+Set `BASE_STATION_IP` to the NUC's LAN IP address and ensure `NODE_LAN_SUBNET`
+matches your network (see the [Configuration](#5-configuration) section above).
+
+Apply the change:
+
+```bash
+sudo systemctl restart soundhub
+```
+
+### Step 5 — Verify
+
+From another device on the LAN, open `http://<NUC-IP>`.  The Sound Hub login
+page should appear.  On first run, follow the admin account setup flow.
+
+To check service status inside WSL2:
+
+```bash
+sudo systemctl status soundhub
+sudo systemctl status nginx
+```
+
+Logs:
+
+```bash
+journalctl -u soundhub -f
+```
+
+### Updating after code changes
+
+Pull the changes, rebuild the SPA, and restart the backend:
+
+```bash
+cd ~/sound-hub
+git pull
+npm ci && npm run build
+venv/bin/pip install -r server/requirements.txt   # if dependencies changed
+sudo systemctl restart soundhub
+```
+
+nginx does not need restarting for frontend-only changes (it serves static
+files directly from `dist/`).
+
+### Internet exposure
+
+The LAN deployment uses plain HTTP on port 80.  To expose Sound Hub on the
+internet with HTTPS, see `config/nginx.conf.example` — it is pre-configured
+for certbot / Let's Encrypt.  Run certbot inside WSL2:
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d yourdomain.example.com
+```
+
+Certbot will patch the nginx config with TLS certificates and set up
+automatic renewal.

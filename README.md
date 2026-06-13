@@ -84,3 +84,11 @@ docs/
 | `auth_secret.key` | JWT signing key — auto-generated, never commit |
 | `venv/` | Python virtual environment — create with `python -m venv venv` |
 | `audio/` | Received WAV files from nodes |
+
+## Deployment
+
+For production deployment on a Windows NUC (WSL2 + nginx + systemd), see the
+[Production deployment](docs/setup.md#production-deployment-wsl2-on-windows)
+section of the setup guide.  The `deploy/` folder contains the scripts
+(`windows-setup.ps1`, `setup.sh`) and config templates (`soundhub.service`,
+`nginx-lan.conf`) referenced there.
