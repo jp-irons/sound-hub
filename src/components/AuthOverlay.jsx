@@ -221,4 +221,10 @@ const styles = {
   browseLink: {
     marginTop: 16,
     background: 'none', border: 'none',
-    co
+    color: 'var(--text-muted, #888)',
+    fontSize: 12, cursor: 'pointer',
+    textDecoration: 'underline',
+    padding: 0,
+    display: 'block', width: '100%', textAlign: 'center',
+  },
+}

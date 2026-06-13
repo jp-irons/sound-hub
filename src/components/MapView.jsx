@@ -126,4 +126,15 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
           position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(210,153,34,0.15)',
           border: '1px solid rgba(210,153,34,0.4)',
-          borderRadius: 6, padding: '6px 14
+          borderRadius: 6, padding: '6px 14px',
+          fontSize: 12, zIndex: 1000,
+          backdropFilter: 'blur(4px)',
+          pointerEvents: 'none',
+          color: 'rgba(210,153,34,0.9)',
+        }}>
+          {nodes.filter(n => !n.positionKnown).map(n => n.hostname).join(', ')} — position unknown · calibration required
+        </div>
+      )}
+    </div>
+  )
+}

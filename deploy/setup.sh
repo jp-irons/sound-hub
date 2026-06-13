@@ -23,12 +23,22 @@ echo ""
 echo "▶ Installing system packages..."
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends \
-    nginx python3-pip python3-venv nodejs npm curl ffmpeg
+    nginx nodejs npm curl ffmpeg software-properties-common
+
+# Python 3.12 via deadsnakes — Ubuntu ships 3.14 which is incompatible with
+# birdnetlib / tensorflow-cpu.
+if ! command -v python3.12 &>/dev/null; then
+    echo "▶ Adding deadsnakes PPA for Python 3.12..."
+    sudo add-apt-repository -y ppa:deadsnakes/ppa
+    sudo apt-get update -qq
+fi
+sudo apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3.12-dev
 
 # ── 2. Python venv ────────────────────────────────────────────────────────────
-echo "▶ Setting up Python venv..."
+echo "▶ Setting up Python 3.12 venv..."
 cd "$REPO_DIR"
-python3 -m venv venv
+python3.12 -m venv venv
 venv/bin/pip install --upgrade pip --quiet
 
 venv/bin/pip install --quiet -r server/requirements.txt

@@ -43,4 +43,8 @@ export async function apiFetch(path, options = {}) {
   if (res.status === 401) {
     clearToken()
     _onUnauthenticated?.()
- 
+    throw new AuthError()
+  }
+
+  return res
+}
