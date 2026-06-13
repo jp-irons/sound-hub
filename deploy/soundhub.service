@@ -1,0 +1,27 @@
+# Sound Hub — systemd unit for the FastAPI backend
+#
+# setup.sh substitutes __REPO_DIR__ and __USER__ before installing this to
+# /etc/systemd/system/soundhub.service.  Do not edit the installed copy;
+# edit this template and re-run setup.sh (or re-run the sed+systemctl steps).
+
+[Unit]
+Description=Sound Hub FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/venv/bin/uvicorn server.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Give the BirdNET model time to load before marking healthy
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
