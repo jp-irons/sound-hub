@@ -5,7 +5,7 @@
  * cleared when the tab closes.  Never written to localStorage.
  */
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = '/api'
 
 let _token = null
 let _onUnauthenticated = null   // callback set by App to trigger re-login
@@ -43,8 +43,4 @@ export async function apiFetch(path, options = {}) {
   if (res.status === 401) {
     clearToken()
     _onUnauthenticated?.()
-    throw new AuthError()
-  }
-
-  return res
-}
+ 

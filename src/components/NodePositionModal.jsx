@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = '/api'
 
 const POSITION_STATUSES = [
   { value: 'estimated', label: 'Estimated' },
@@ -264,97 +264,4 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
               {/* GPS centroid info */}
               {centroid ? (
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  GPS centroid: {fmtLatLon(centroid.lat)}, {fmtLatLon(centroid.lon)}, {fmtM(centroid.altM)}
-                  {node.gps?.centroidN != null && (
-                    <span style={{ marginLeft: 6 }}>
-                      (n={node.gps.centroidN.toLocaleString()}
-                      {node.gps.centroidStddevM != null && `, σ ${node.gps.centroidStddevM.toFixed(2)} m`})
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>GPS centroid: not yet available</div>
-              )}
-
-              {disagreementM != null && (
-                <div style={{
-                  fontSize: 11,
-                  color: disagreementM < 2 ? 'var(--green)' : disagreementM < 5 ? 'var(--yellow)' : 'var(--red)',
-                }}>
-                  Survey disagreement: {disagreementM.toFixed(2)} m from stored position
-                </div>
-              )}
-
-              {originMessage && (
-                <div style={{ fontSize: 11, color: 'var(--green)' }}>{originMessage}</div>
-              )}
-
-              {/* Two origin buttons */}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ fontSize: 11, padding: '5px 12px' }}
-                  disabled={!canUseGpsCentroid || originSetting != null}
-                  title={canUseGpsCentroid
-                    ? 'Back-project origin from this node\'s GPS centroid + N/E/Alt offset'
-                    : 'Requires: Surveyed status, all three offsets, and an active GPS centroid'}
-                  onClick={() => handleSetOrigin('gps_centroid')}
-                >
-                  {originSetting === 'gps_centroid' ? 'Setting…' : 'Use GPS centroid'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ fontSize: 11, padding: '5px 12px' }}
-                  disabled={!canUseSurveyedCoords || originSetting != null}
-                  title={canUseSurveyedCoords
-                    ? 'Back-project origin from the surveyed lat/lon/alt above + N/E/Alt offset'
-                    : 'Requires: Surveyed status, all three offsets, and all three surveyed coordinates entered above'}
-                  onClick={() => handleSetOrigin('surveyed_coords')}
-                >
-                  {originSetting === 'surveyed_coords' ? 'Setting…' : 'Use surveyed coordinates'}
-                </button>
-              </div>
-
-              {!isSurveyed && (
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                  Position status must be set to Surveyed before setting as origin.
-                </div>
-              )}
-            </div>
-
-            {error && (
-              <div style={{
-                fontSize: 12, color: 'var(--red)',
-                background: 'var(--red-dim)', borderRadius: 4, padding: '6px 8px',
-              }}>
-                {error}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button type="button" className="btn" onClick={onClose} disabled={submitting}>
-                Cancel
-              </button>
-              <button
-                type="button" className="btn btn-primary"
-                disabled={submitting}
-                onClick={() => handleSubmit(false)}
-              >
-                {submitting ? 'Saving…' : 'Apply'}
-              </button>
-              <button
-                type="button" className="btn btn-primary"
-                disabled={submitting}
-                onClick={() => handleSubmit(true)}
-              >
-                {submitting ? 'Saving…' : 'Save & Close'}
-              </button>
-            </div>
-          </form>
-        )}
-      </div>
-    </div>
-  )
-}
+          

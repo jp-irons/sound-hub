@@ -1,7 +1,7 @@
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
 import { useEffect, useState } from 'react'
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = '/api'
 
 const displayStatus = s => s === 'online' ? 'healthy' : s
 
@@ -126,14 +126,4 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
           position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(210,153,34,0.15)',
           border: '1px solid rgba(210,153,34,0.4)',
-          borderRadius: 6, padding: '6px 14px',
-          fontSize: 12, color: '#d29922',
-          pointerEvents: 'none',
-          whiteSpace: 'nowrap',
-        }}>
-          {nodes.filter(n => !n.positionKnown).length} node{nodes.filter(n => !n.positionKnown).length !== 1 ? 's' : ''} not yet positioned
-        </div>
-      )}
-    </div>
-  )
-}
+          borderRadius: 6, padding: '6px 14

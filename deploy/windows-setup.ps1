@@ -26,7 +26,13 @@ Write-Host "================================================" -ForegroundColor W
 # -- 1. WSL2 + Ubuntu ---------------------------------------------------------
 Write-Step "Checking WSL2 installation..."
 
-$wslInstalled = (wsl --list --quiet 2>$null) -match "Ubuntu"
+# wsl --list outputs UTF-16LE which confuses PowerShell string matching;
+# probe by actually running a command inside Ubuntu instead.
+$wslInstalled = $false
+try {
+    $null = wsl -d Ubuntu --exec echo "ok" 2>$null
+    $wslInstalled = ($LASTEXITCODE -eq 0)
+} catch { }
 
 if (-not $wslInstalled) {
     Write-Warn "Ubuntu not found -- installing WSL2 + Ubuntu (requires reboot)..."

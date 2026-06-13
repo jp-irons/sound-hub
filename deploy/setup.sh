@@ -40,6 +40,12 @@ npm ci --silent
 npm run build
 echo "  SPA built → $REPO_DIR/dist"
 
+# nginx runs as www-data — ensure it can traverse the path to dist/
+chmod o+x "/home/$RUN_USER"
+chmod o+x "$REPO_DIR"
+chmod o+x "$REPO_DIR/dist"
+chmod -R o+r "$REPO_DIR/dist"
+
 # ── 4. Config file ────────────────────────────────────────────────────────────
 if [ ! -f "$REPO_DIR/config/soundhub.conf" ]; then
     cp "$REPO_DIR/config/soundhub.conf.example" "$REPO_DIR/config/soundhub.conf"

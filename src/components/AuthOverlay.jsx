@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = '/api'
 
 const MIN_PASSWORD_LENGTH = 8
 
@@ -221,11 +221,4 @@ const styles = {
   browseLink: {
     marginTop: 16,
     background: 'none', border: 'none',
-    color: 'var(--text-muted, #888)',
-    fontSize: 12, cursor: 'pointer',
-    width: '100%', textAlign: 'center',
-    padding: '4px 0',
-    textDecoration: 'underline',
-    textDecorationColor: 'var(--border, #444)',
-  },
-}
+    co

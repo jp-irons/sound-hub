@@ -8,7 +8,7 @@ import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
 import { apiFetch, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
 
-const API_BASE = 'http://localhost:8000/api'
+const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
 
 export default function App() {
