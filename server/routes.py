@@ -845,7 +845,7 @@ async def list_detections(limit: int = Query(default=200, ge=1, le=2000)):
     return [DetectionRecord(**row) for row in rows]
 
 
-@router.post("/detections/analyze", response_model=list[DetectionRecord], status_code=201)
+@router.post("/detections/analyze", response_model=list[DetectionRecord], status_code=201, dependencies=[Depends(require_admin)])
 async def analyze_wav(file: UploadFile = File(...)):
     """Upload a WAV file, run BirdNET analysis, persist and return detections.
 

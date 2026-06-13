@@ -294,7 +294,7 @@ export default function App() {
         </div>
       )}
 
-      {tab === 'detections' && <DetectionsTab />}
+      {tab === 'detections' && <DetectionsTab isAdmin={isAdmin} />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
     </div>
   )

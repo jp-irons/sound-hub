@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { apiFetch } from '../auth.js'
 
 const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
@@ -42,7 +43,7 @@ function formatTime(iso) {
   } catch { return iso }
 }
 
-export default function DetectionsTab() {
+export default function DetectionsTab({ isAdmin = false }) {
   const [detections, setDetections]   = useState([])
   const [uploading, setUploading]     = useState(false)
   const [uploadResult, setUploadResult] = useState(null) // {ok, message}
@@ -77,7 +78,7 @@ export default function DetectionsTab() {
       const form = new FormData()
       form.append('file', file)
       const params = new URLSearchParams({ geo: useGeo, min_conf: uploadConf })
-      const res = await fetch(`${API_BASE}/detections/analyze?${params}`, {
+      const res = await apiFetch(`/detections/analyze?${params}`, {
         method: 'POST',
         body: form,
       })
@@ -156,8 +157,8 @@ export default function DetectionsTab() {
 
   return (
     <div style={sty.root}>
-      {/* ── Upload ── */}
-      <div style={sty.section}>
+      {/* ── Upload — admin only ── */}
+      {isAdmin && <div style={sty.section}>
         <div style={sty.label}>ANALYSE WAV FILE</div>
         <div style={sty.row}>
           {/* Upload options */}
@@ -214,7 +215,7 @@ export default function DetectionsTab() {
             {uploadResult.message}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* ── Filter bar ── */}
       <div style={{ ...sty.row, gap: 12 }}>
