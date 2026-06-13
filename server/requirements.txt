@@ -6,6 +6,7 @@ aiosqlite
 numpy
 python-multipart
 birdnetlib
+librosa
 soundfile
 python-jose[cryptography]
 passlib[bcrypt]
