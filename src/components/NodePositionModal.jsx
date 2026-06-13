@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
-
-const API_BASE = '/api'
+import { apiFetch } from '../auth.js'
 
 const POSITION_STATUSES = [
   { value: 'estimated', label: 'Estimated' },
@@ -79,7 +78,7 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`${API_BASE}/nodes/${node.id}/position`)
+    apiFetch(`/nodes/${node.id}/position`)
       .then(async res => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
         return res.json()
@@ -127,8 +126,7 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
     setOriginMessage(null)
     setError(null)
     try {
-      const url = `${API_BASE}/origin/set-from-node/${node.id}?source=${source}`
-      const res = await fetch(url, { method: 'POST' })
+      const res = await apiFetch(`/origin/set-from-node/${node.id}?source=${source}`, { method: 'POST' })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
