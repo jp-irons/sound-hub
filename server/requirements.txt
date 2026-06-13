@@ -7,7 +7,7 @@ numpy
 python-multipart
 birdnetlib
 librosa
-tflite-runtime
+tensorflow-cpu
 soundfile
 python-jose[cryptography]
 passlib[bcrypt]
