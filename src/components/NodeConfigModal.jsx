@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react'
-
-const API_BASE = '/api'
-
+import { apiFetch } from '../auth.js'
 
 export default function NodeConfigModal({ node, onClose, onSubmit }) {
   const [loading, setLoading] = useState(true)
@@ -15,7 +13,7 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`${API_BASE}/nodes/${node.id}/config`)
+    apiFetch(`/nodes/${node.id}/config`)
       .then(async res => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
         return res.json()
