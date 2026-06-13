@@ -247,7 +247,7 @@ export default function DetectionsTab({ isAdmin = false }) {
         {detections.length === 0
           ? (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted, #888)', fontSize: 13 }}>
-              No detections yet — upload a WAV file or run the live mic script.
+              No detections yet.
             </div>
           )
           : (
