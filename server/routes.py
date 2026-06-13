@@ -598,6 +598,7 @@ async def set_origin_from_node(
         set_from=node_id,
         set_at=set_at,
     )
+    await db.set_node_as_origin(node_id)
 
     return ArrayOrigin(
         lat=origin_lat,

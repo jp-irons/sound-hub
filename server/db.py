@@ -236,6 +236,19 @@ async def clear_origin() -> None:
         await conn.commit()
 
 
+async def set_node_as_origin(node_id: str) -> None:
+    """Mark node_id as the origin node, clearing any previous marker.
+    Uses a single transaction so the one-origin invariant is never violated
+    even transiently."""
+    async with connect() as conn:
+        await conn.execute("UPDATE node_positions SET is_origin = 0")
+        await conn.execute(
+            "UPDATE node_positions SET is_origin = 1 WHERE node_id = ?",
+            (node_id,),
+        )
+        await conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # array_origin CRUD  (hub-level geographic datum, independent of any node)
 # ---------------------------------------------------------------------------
