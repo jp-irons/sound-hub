@@ -223,15 +223,15 @@ export default function App() {
             onApprove={approveNode}
             onReject={rejectNode}
           />
-          {selectedNode ? (
+          <MapView nodes={approvedNodes} onSelectNode={setSelectedId} />
+          {selectedNode && (
             <NodeDetail
               node={selectedNode}
+              onClose={() => setSelectedId(null)}
               onRemove={removeNode}
               onConfigure={configureNode}
               onSetPosition={setNodePosition}
             />
-          ) : (
-            <MapView nodes={approvedNodes} onSelectNode={setSelectedId} />
           )}
         </div>
       )}

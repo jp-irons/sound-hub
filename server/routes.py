@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 from . import birdnet_worker, config, db, registry, status_mapper
 from .auth import get_current_user, require_admin, require_node
-from .auth import get_current_user, require_admin, require_node
 from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
@@ -90,6 +89,16 @@ async def login(req: LoginRequest):
 async def me(user: dict = Depends(get_current_user)):
     """Return the current authenticated user's identity."""
     return UserInfo(username=user["username"], role=user["role"])
+
+
+@router.get("/auth/status")
+async def auth_status():
+    """Return whether first-run setup is still required.
+
+    Called by the SPA on load to decide whether to show the setup screen
+    or the login screen.  No auth required.
+    """
+    return {"setup_required": await db.count_users() == 0}
 
 
 # ---------------------------------------------------------------------------
