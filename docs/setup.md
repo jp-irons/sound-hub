@@ -197,6 +197,118 @@ if it is missing (`Run tools\install-tools.bat first`) — so they are safe to
 double-click; they will tell you if setup is needed. See the docstring in each
 script for full usage options (e.g. `--list-devices`, `--geo`, `--threshold`).
 
+## 11. Internet exposure — Option A: Cloudflare Tunnel
+
+Cloudflare Tunnel creates an outbound-only encrypted connection from the NUC
+to Cloudflare's edge. No router port-forwarding or TLS certificates are needed.
+All steps run inside WSL2 Ubuntu on the NUC.
+
+### Prerequisites
+
+- `irons.net.au` must be active on Cloudflare DNS (free plan is sufficient).
+- The Sound Hub service must already be running and reachable on `localhost:80`
+  via nginx (i.e. `deploy/setup.sh` has been run successfully).
+
+### Step 1 — Install cloudflared
+
+```bash
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    -o /tmp/cloudflared
+sudo install /tmp/cloudflared /usr/local/bin/cloudflared
+cloudflared --version
+```
+
+### Step 2 — Authenticate with Cloudflare
+
+```bash
+cloudflared tunnel login
+```
+
+This prints a URL. Open it in a browser, log into your Cloudflare account, and
+select `irons.net.au`. A certificate is saved to `~/.cloudflared/cert.pem`.
+
+### Step 3 — Create the tunnel
+
+```bash
+cloudflared tunnel create sound-hub
+```
+
+This creates the tunnel and writes a credentials file to
+`~/.cloudflared/<tunnel-id>.json`. Note the tunnel ID printed — you will need
+it in the next step.
+
+### Step 4 — Write the tunnel config
+
+Create `~/.cloudflared/config.yml` with the following content, substituting
+your tunnel ID:
+
+```yaml
+tunnel: <tunnel-id>
+credentials-file: /home/<your-username>/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: soundhub.irons.net.au
+    service: http://localhost:80
+  - service: http_status:404
+```
+
+Replace `<tunnel-id>` with the ID from Step 3 and `<your-username>` with your
+WSL2 username.
+
+The final `- service: http_status:404` catch-all is required by cloudflared.
+
+### Step 5 — Create the DNS record
+
+```bash
+cloudflared tunnel route dns sound-hub soundhub.irons.net.au
+```
+
+This automatically creates a CNAME record in Cloudflare DNS pointing
+`soundhub.irons.net.au` to the tunnel.
+
+### Step 6 — Test the tunnel manually
+
+```bash
+cloudflared tunnel run sound-hub
+```
+
+Open `https://soundhub.irons.net.au` in a browser. You should see the Sound
+Hub login page over HTTPS. Press Ctrl-C to stop once verified.
+
+### Step 7 — Install as a systemd service
+
+```bash
+RUN_USER="$(whoami)"
+REPO_DIR="$(cd ~/sound-hub && pwd)"   # adjust if repo is elsewhere
+
+sed -e "s|__USER__|$RUN_USER|g" \
+    "$REPO_DIR/config/cloudflared.service" \
+    | sudo tee /etc/systemd/system/cloudflared.service > /dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable cloudflared
+sudo systemctl start cloudflared
+sudo systemctl status cloudflared
+```
+
+### Verification
+
+```bash
+sudo systemctl status cloudflared      # should show active (running)
+sudo journalctl -u cloudflared -n 50   # inspect logs
+```
+
+Open `https://soundhub.irons.net.au` — login should work end-to-end over HTTPS.
+
+### Notes
+
+- `~/.cloudflared/config.yml` and `~/.cloudflared/<tunnel-id>.json` contain
+  secrets and are specific to this deployment. They are not tracked in git.
+- The tunnel only proxies traffic arriving via nginx on `localhost:80`. The
+  uvicorn port (8000) is never directly exposed.
+- LAN audio nodes push directly to the nginx/uvicorn stack on the LAN IP and
+  are unaffected by the tunnel.
+
 The tools venv is git-ignored; recreate it any time by re-running the
 installer or the manual steps above.
 

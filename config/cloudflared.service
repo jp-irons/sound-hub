@@ -1,0 +1,24 @@
+# Sound Hub — systemd unit for cloudflared tunnel
+#
+# setup.sh (or the manual steps in docs/setup.md) substitutes __USER__ before
+# installing this to /etc/systemd/system/cloudflared.service.
+#
+# Prerequisites: cloudflared installed, tunnel created, and
+# ~/.cloudflared/config.yml written — see docs/setup.md Option A.
+
+[Unit]
+Description=Cloudflare Tunnel (sound-hub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+ExecStart=/usr/local/bin/cloudflared tunnel run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
