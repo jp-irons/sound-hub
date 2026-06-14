@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useIsMobile } from '../hooks/useBreakpoint.js'
 
 const API_BASE = '/api'
 
@@ -20,6 +21,7 @@ export default function AuthOverlay({ mode, onSuccess, onBrowse }) {
   const [error,    setError]      = useState(null)
   const [busy,     setBusy]       = useState(false)
 
+  const isMobile = useIsMobile()
   const isSetup = mode === 'setup'
 
   function validate() {
@@ -77,9 +79,17 @@ export default function AuthOverlay({ mode, onSuccess, onBrowse }) {
     }
   }
 
+  const cardStyle = {
+    ...styles.card,
+    width: isMobile ? 'calc(100vw - 32px)' : 360,
+    padding: isMobile ? '24px 20px' : '32px 36px',
+    maxHeight: 'calc(100dvh - 32px)',
+    overflowY: 'auto',
+  }
+
   return (
     <div style={styles.backdrop}>
-      <div style={styles.card}>
+      <div style={cardStyle}>
         {/* Header */}
         <div style={styles.header}>
           <span style={{ fontSize: 22 }}>🎙</span>

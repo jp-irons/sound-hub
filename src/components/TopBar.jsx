@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useIsMobile } from '../hooks/useBreakpoint.js'
 
 function relativeTime(isoString) {
   if (!isoString) return '—'
@@ -10,6 +11,7 @@ function relativeTime(isoString) {
 
 export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout, onSignIn }) {
   const [tick, setTick] = useState(0)
+  const isMobile = useIsMobile()
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 1000)
     return () => clearInterval(t)
@@ -44,29 +46,33 @@ export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout,
         </span>
       </div>
 
-      <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
+      {!isMobile && <div style={{ width: 1, height: 20, background: 'var(--border)' }} />}
 
-      {/* Node status summary */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <StatusChip count={onlineCount} label="healthy" color="var(--green)" />
-        {degraded > 0 && <StatusChip count={degraded} label="degraded" color="var(--yellow)" />}
-        {offline  > 0 && <StatusChip count={offline}  label="offline"  color="var(--red)" />}
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-          {totalNodes} nodes
-        </span>
-      </div>
+      {/* Node status summary — hidden on mobile */}
+      {!isMobile && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <StatusChip count={onlineCount} label="healthy" color="var(--green)" />
+          {degraded > 0 && <StatusChip count={degraded} label="degraded" color="var(--yellow)" />}
+          {offline  > 0 && <StatusChip count={offline}  label="offline"  color="var(--red)" />}
+          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            {totalNodes} nodes
+          </span>
+        </div>
+      )}
 
       <div style={{ flex: 1 }} />
 
-      {/* Last trigger */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 12 }}>
-        <span>Last trigger:</span>
-        <span style={{ color: lastTrigger ? 'var(--text-primary)' : 'var(--text-muted)' }}>
-          {lastTrigger ? relativeTime(lastTrigger.toISOString()) : 'none'}
-        </span>
-      </div>
+      {/* Last trigger — hidden on mobile */}
+      {!isMobile && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 12 }}>
+          <span>Last trigger:</span>
+          <span style={{ color: lastTrigger ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+            {lastTrigger ? relativeTime(lastTrigger.toISOString()) : 'none'}
+          </span>
+        </div>
+      )}
 
-      <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
+      {!isMobile && <div style={{ width: 1, height: 20, background: 'var(--border)' }} />}
 
       {/* User identity + sign out */}
       {user ? (

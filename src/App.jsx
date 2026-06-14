@@ -7,6 +7,7 @@ import DetectionsTab from './components/DetectionsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
 import { apiFetch, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
+import { useIsMobile } from './hooks/useBreakpoint.js'
 
 const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
@@ -21,6 +22,9 @@ export default function App() {
   const [publicNodes, setPublicNodes] = useState([]) // slim node list — unauthenticated
   const [selectedId, setSelectedId] = useState(null)
   const [error, setError] = useState(null)
+
+  const isMobile = useIsMobile()
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
 
   const isAdmin = user?.role === 'admin'
 
@@ -255,11 +259,54 @@ export default function App() {
           <MapView
             nodes={mapNodes}
             selectedId={authState === 'authenticated' ? selectedId : null}
-            onSelectNode={authState === 'authenticated' ? setSelectedId : null}
+            onSelectNode={authState === 'authenticated'
+              ? (id) => { setSelectedId(id); if (isMobile) setMobileSidebarOpen(true) }
+              : null}
             selectable={authState === 'authenticated'}
           />
+
+          {/* Mobile: floating Nodes button */}
+          {authState === 'authenticated' && isMobile && !mobileSidebarOpen && (
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              style={{
+                position: 'absolute', bottom: 20, right: 16, zIndex: 500,
+                display: 'flex', alignItems: 'center', gap: 7,
+                background: 'var(--bg-panel)',
+                border: '1px solid var(--border)',
+                borderRadius: 20,
+                padding: '8px 14px',
+                color: 'var(--text-primary)',
+                fontSize: 13, fontWeight: 600,
+                boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+                cursor: 'pointer',
+              }}
+            >
+              <span style={{ fontSize: 15 }}>☰</span>
+              Nodes
+              {nodes.filter(n => n.approvalStatus === 'pending').length > 0 && (
+                <span style={{
+                  background: 'var(--yellow)',
+                  color: '#000',
+                  borderRadius: 8,
+                  fontSize: 10, fontWeight: 700,
+                  padding: '1px 5px',
+                }}>
+                  {nodes.filter(n => n.approvalStatus === 'pending').length}
+                </span>
+              )}
+            </button>
+          )}
+
           {authState === 'authenticated' && (
-            <div style={{
+            <div style={isMobile ? {
+              // Mobile: full-screen overlay, hidden when closed
+              position: 'fixed', inset: 0, zIndex: 400,
+              display: mobileSidebarOpen ? 'flex' : 'none',
+              flexDirection: 'column',
+              background: 'var(--bg-panel)',
+            } : {
+              // Desktop: right-side panel, always visible
               position: 'absolute', top: 0, right: 0, bottom: 0,
               width: 300, zIndex: 400,
               display: 'flex', flexDirection: 'column',
@@ -268,10 +315,33 @@ export default function App() {
               boxShadow: '-4px 0 16px rgba(0,0,0,0.3)',
               overflow: 'hidden',
             }}>
+
+              {/* Mobile back-to-map header */}
+              {isMobile && (
+                <div style={{
+                  display: 'flex', alignItems: 'center',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid var(--border)',
+                  flexShrink: 0,
+                }}>
+                  <button
+                    onClick={() => { setMobileSidebarOpen(false); setSelectedId(null) }}
+                    style={{
+                      background: 'none', border: 'none',
+                      color: 'var(--blue)', fontSize: 14,
+                      cursor: 'pointer', padding: '4px 0',
+                      display: 'flex', alignItems: 'center', gap: 5,
+                    }}
+                  >
+                    ← Map
+                  </button>
+                </div>
+              )}
+
               {selectedNode ? (
                 <NodeDetail
                   node={selectedNode}
-                  onClose={() => setSelectedId(null)}
+                  onClose={() => { setSelectedId(null); if (isMobile) setMobileSidebarOpen(false) }}
                   onApprove={approveNode}
                   onReject={rejectNode}
                   onRemove={removeNode}
@@ -283,7 +353,7 @@ export default function App() {
                 <NodeSidebar
                   nodes={nodes}
                   selectedId={selectedId}
-                  onSelect={setSelectedId}
+                  onSelect={(id) => { setSelectedId(id) }}
                   onApprove={approveNode}
                   onReject={rejectNode}
                   isAdmin={isAdmin}
