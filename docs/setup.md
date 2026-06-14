@@ -140,6 +140,12 @@ sudo chgrp -R sound-hub /opt/sound-hub
 
 Log out and back in for the group membership to take effect.
 
+Git will refuse to operate in a directory not owned by your user. Add a safe directory exception:
+
+```bash
+git config --global --add safe.directory /opt/sound-hub
+```
+
 ### 2. Clone
 
 ```bash
