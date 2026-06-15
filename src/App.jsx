@@ -6,7 +6,7 @@ import NodeDetail from './components/NodeDetail.jsx'
 import DetectionsTab from './components/DetectionsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
-import { apiFetch, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
+import { apiFetch, getToken, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
 import { useIsMobile } from './hooks/useBreakpoint.js'
 
 const API_BASE = '/api'
@@ -36,18 +36,32 @@ export default function App() {
     })
   }, [])
 
-  // On mount, check whether first-run setup is needed.
-  // authState starts as 'login' so the overlay is visible immediately;
-  // we only switch to 'setup' if the backend says no users exist yet.
+  // On mount: if a stored token exists, validate it against /auth/me and
+  // restore the session silently.  If that fails (expired / invalid), fall
+  // through to the normal setup/login flow.
   useEffect(() => {
     async function checkAuth() {
+      if (getToken()) {
+        try {
+          const res = await apiFetch('/auth/me')
+          if (res.ok) {
+            const body = await res.json()
+            setUser({ username: body.username, role: body.role })
+            setAuthState('authenticated')
+            return
+          }
+        } catch {
+          // Token invalid or backend unreachable — fall through
+        }
+      }
+      // No stored token (or it failed) — check for first-run setup
       try {
         const res = await fetch(`${API_BASE}/auth/status`)
         const body = await res.json()
         if (body.setup_required) setAuthState('setup')
         // else leave as 'unauthenticated' — user browses map and signs in on demand
       } catch {
-        // Backend unreachable — leave as 'login', error will surface on submit.
+        // Backend unreachable — leave as 'unauthenticated', error will surface on submit.
       }
     }
     checkAuth()
