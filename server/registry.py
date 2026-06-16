@@ -98,8 +98,34 @@ def update_live_status(node_id: str, reachable: bool, raw_status: Optional[dict]
         "reachable": reachable,
         "last_seen_at": _now_iso() if reachable else prev.get("last_seen_at"),
         "raw_status": raw_status if raw_status is not None else prev.get("raw_status"),
+        "reg_heap_free_bytes": prev.get("reg_heap_free_bytes"),
+        "reg_heap_min_free_bytes": prev.get("reg_heap_min_free_bytes"),
+        "reg_heap_at": prev.get("reg_heap_at"),
     }
 
 
+def update_registration_heap(node_id: str, heap_free_bytes: Optional[int],
+                              heap_min_free_bytes: Optional[int]) -> None:
+    """Record heap telemetry sent with a node's self-registration POST.
+
+    This arrives over plain HTTP alongside /api/nodes/register, independent
+    of whether the node's HTTPS status endpoint is currently reachable — so
+    it keeps reporting even while the node is in the "HTTPS resets, HTTP
+    still works" degraded state under investigation.
+    """
+    if heap_free_bytes is None and heap_min_free_bytes is None:
+        return
+    prev = _live_status.get(node_id, {
+        "reachable": False, "last_seen_at": None, "raw_status": None,
+    })
+    prev["reg_heap_free_bytes"] = heap_free_bytes
+    prev["reg_heap_min_free_bytes"] = heap_min_free_bytes
+    prev["reg_heap_at"] = _now_iso()
+    _live_status[node_id] = prev
+
+
 def get_live_status(node_id: str) -> dict:
-    return _live_status.get(node_id, {"reachable": False, "last_seen_at": None, "raw_status": None})
+    return _live_status.get(node_id, {
+        "reachable": False, "last_seen_at": None, "raw_status": None,
+        "reg_heap_free_bytes": None, "reg_heap_min_free_bytes": None, "reg_heap_at": None,
+    })

@@ -36,9 +36,17 @@ class ManualNodeRequest(BaseModel):
 
 
 class NodeRegisterRequest(BaseModel):
-    """Body for POST /api/nodes/register — node self-registration on boot."""
+    """Body for POST /api/nodes/register — node self-registration on boot.
+
+    heap_free_bytes/heap_min_free_bytes are optional so older firmware
+    builds that don't send them still register fine.
+    """
     hostname: str
     mac: str
+    heap_free_bytes: Optional[int] = Field(default=None, alias="heapFreeBytes")
+    heap_min_free_bytes: Optional[int] = Field(default=None, alias="heapMinFreeBytes")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +294,10 @@ class NodeView(BaseModel):
     esp_now: Optional[EspNowView] = Field(default=None, alias="espNow")
     flags: list[str] = []
     firmware_version: Optional[str] = Field(default=None, alias="firmwareVersion")
+
+    # --- Heap telemetry from the node's self-registration POST (sent over
+    # plain HTTP, independent of the HTTPS status endpoint — stays available
+    # even when /app/api/status is failing). See HubRegistrar.cpp.
+    reg_heap_free_bytes: Optional[int] = Field(default=None, alias="regHeapFreeBytes")
+    reg_heap_min_free_bytes: Optional[int] = Field(default=None, alias="regHeapMinFreeBytes")
+    reg_heap_at: Optional[str] = Field(default=None, alias="regHeapAt")

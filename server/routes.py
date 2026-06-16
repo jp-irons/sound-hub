@@ -228,6 +228,9 @@ def _build_view(node: dict, live: dict, derived: dict) -> NodeView:
         esp_now=derived["esp_now"],
         firmware_version=derived.get("firmware_version"),
         flags=derived["flags"],
+        reg_heap_free_bytes=live.get("reg_heap_free_bytes"),
+        reg_heap_min_free_bytes=live.get("reg_heap_min_free_bytes"),
+        reg_heap_at=live.get("reg_heap_at"),
     )
 
 
@@ -378,6 +381,9 @@ async def register_node(req: NodeRegisterRequest, request: Request):
     await registry.upsert_node(
         node_id=node_id, hostname=node_id,
         ip_address=ip, discovery_method="self_registered",
+    )
+    registry.update_registration_heap(
+        node_id, req.heap_free_bytes, req.heap_min_free_bytes,
     )
 
     async def _background_status():
