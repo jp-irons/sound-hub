@@ -14,8 +14,8 @@ from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
-    NodeConfigRequest, NodePosition, NodeView, TdoaRequest, TdoaResponse,
-    LatLon,
+    NodeConfigRequest, NodePosition, NodeRegisterRequest, NodeView,
+    TdoaRequest, TdoaResponse, LatLon,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -362,6 +362,41 @@ async def add_manual_node(req: ManualNodeRequest):
         if n["id"] == node_id:
             return _build_view(n, live, derived)
     raise HTTPException(status_code=500, detail="Node registered but not found in mapped set")
+
+
+@router.post("/nodes/register", response_model=NodeView, dependencies=[Depends(require_node)])
+async def register_node(req: NodeRegisterRequest, request: Request):
+    """Node self-registration on boot.  No JWT required — LAN subnet check only.
+
+    The node supplies its hostname and MAC; the hub derives the IP from the TCP
+    connection so the node never has to know its own address.  New nodes land
+    with approval_status='pending'; re-registration of an already-approved node
+    leaves its approval status untouched.
+    """
+    node_id = req.hostname
+    ip = request.client.host
+    await registry.upsert_node(
+        node_id=node_id, hostname=node_id,
+        ip_address=ip, discovery_method="self_registered",
+    )
+
+    async def _background_status():
+        try:
+            url = f"{config.NODE_SCHEME}://{ip}/app/api/status"
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.get(url, timeout=config.STATUS_TIMEOUT_S)
+                resp.raise_for_status()
+                registry.update_live_status(node_id, reachable=True, raw_status=resp.json())
+        except Exception:
+            # Node called us, so it's reachable — but status fetch failed.
+            registry.update_live_status(node_id, reachable=True, raw_status=None)
+
+    asyncio.create_task(_background_status())
+
+    for n, live, derived in await _mapped_nodes():
+        if n["id"] == node_id:
+            return _build_view(n, live, derived)
+    raise HTTPException(status_code=500, detail="Node registered but not found")
 
 
 @router.delete("/nodes/{node_id}", status_code=204, dependencies=[Depends(require_admin)])

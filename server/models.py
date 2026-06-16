@@ -35,6 +35,12 @@ class ManualNodeRequest(BaseModel):
     host: str  # hostname or bare IP; we hit http://<host>/app/api/status to validate
 
 
+class NodeRegisterRequest(BaseModel):
+    """Body for POST /api/nodes/register — node self-registration on boot."""
+    hostname: str
+    mac: str
+
+
 # ---------------------------------------------------------------------------
 # TDOA solver request / response
 # ---------------------------------------------------------------------------
