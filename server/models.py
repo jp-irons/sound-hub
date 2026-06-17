@@ -45,6 +45,8 @@ class NodeRegisterRequest(BaseModel):
     mac: str
     heap_free_bytes: Optional[int] = Field(default=None, alias="heapFreeBytes")
     heap_min_free_bytes: Optional[int] = Field(default=None, alias="heapMinFreeBytes")
+    https_active_sockets: Optional[int] = Field(default=None, alias="httpsActiveSockets")
+    https_max_sockets: Optional[int] = Field(default=None, alias="httpsMaxSockets")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -301,3 +303,8 @@ class NodeView(BaseModel):
     reg_heap_free_bytes: Optional[int] = Field(default=None, alias="regHeapFreeBytes")
     reg_heap_min_free_bytes: Optional[int] = Field(default=None, alias="regHeapMinFreeBytes")
     reg_heap_at: Optional[str] = Field(default=None, alias="regHeapAt")
+
+    # --- HTTPS socket-pool telemetry from the same self-registration POST.
+    # See EspHttpServer::activeSocketCount() / HubRegistrar.cpp.
+    reg_https_active_sockets: Optional[int] = Field(default=None, alias="regHttpsActiveSockets")
+    reg_https_max_sockets: Optional[int] = Field(default=None, alias="regHttpsMaxSockets")

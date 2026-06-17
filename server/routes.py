@@ -231,6 +231,8 @@ def _build_view(node: dict, live: dict, derived: dict) -> NodeView:
         reg_heap_free_bytes=live.get("reg_heap_free_bytes"),
         reg_heap_min_free_bytes=live.get("reg_heap_min_free_bytes"),
         reg_heap_at=live.get("reg_heap_at"),
+        reg_https_active_sockets=live.get("reg_https_active_sockets"),
+        reg_https_max_sockets=live.get("reg_https_max_sockets"),
     )
 
 
@@ -384,6 +386,9 @@ async def register_node(req: NodeRegisterRequest, request: Request):
     )
     registry.update_registration_heap(
         node_id, req.heap_free_bytes, req.heap_min_free_bytes,
+    )
+    registry.update_registration_sockets(
+        node_id, req.https_active_sockets, req.https_max_sockets,
     )
 
     async def _background_status():

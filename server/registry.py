@@ -101,6 +101,8 @@ def update_live_status(node_id: str, reachable: bool, raw_status: Optional[dict]
         "reg_heap_free_bytes": prev.get("reg_heap_free_bytes"),
         "reg_heap_min_free_bytes": prev.get("reg_heap_min_free_bytes"),
         "reg_heap_at": prev.get("reg_heap_at"),
+        "reg_https_active_sockets": prev.get("reg_https_active_sockets"),
+        "reg_https_max_sockets": prev.get("reg_https_max_sockets"),
     }
 
 
@@ -124,8 +126,29 @@ def update_registration_heap(node_id: str, heap_free_bytes: Optional[int],
     _live_status[node_id] = prev
 
 
+def update_registration_sockets(node_id: str, active_sockets: Optional[int],
+                                 max_sockets: Optional[int]) -> None:
+    """Record HTTPS socket-pool telemetry sent with a node's self-registration
+    POST — same rationale as update_registration_heap(): arrives over plain
+    HTTP, independent of whether the HTTPS status endpoint is reachable.
+
+    Used to test the theory that the .150-style TLS-handshake resets are
+    caused by the httpd_ssl_start connection-slot pool filling up with
+    stuck/half-open sockets rather than heap exhaustion.
+    """
+    if active_sockets is None and max_sockets is None:
+        return
+    prev = _live_status.get(node_id, {
+        "reachable": False, "last_seen_at": None, "raw_status": None,
+    })
+    prev["reg_https_active_sockets"] = active_sockets
+    prev["reg_https_max_sockets"] = max_sockets
+    _live_status[node_id] = prev
+
+
 def get_live_status(node_id: str) -> dict:
     return _live_status.get(node_id, {
         "reachable": False, "last_seen_at": None, "raw_status": None,
         "reg_heap_free_bytes": None, "reg_heap_min_free_bytes": None, "reg_heap_at": None,
+        "reg_https_active_sockets": None, "reg_https_max_sockets": None,
     })
