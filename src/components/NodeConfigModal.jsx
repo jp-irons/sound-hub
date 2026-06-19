@@ -63,7 +63,7 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
     >
       <div
         style={{
-          width: 340, maxHeight: '85vh', overflowY: 'auto',
+          width: 340, maxWidth: 'calc(100vw - 32px)', maxHeight: '85vh', overflowY: 'auto',
           background: 'var(--bg-panel)', border: '1px solid var(--border)',
           borderRadius: 8, padding: 18,
           display: 'flex', flexDirection: 'column', gap: 14,

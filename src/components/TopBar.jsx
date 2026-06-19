@@ -42,7 +42,7 @@ export default function TopBar({ totalNodes, onlineCount, nodes, user, onLogout,
           color: 'var(--text-muted)', textTransform: 'uppercase',
           marginLeft: 2,
         }}>
-          v0.1 — mock
+          v0.1
         </span>
       </div>
 

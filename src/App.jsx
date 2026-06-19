@@ -36,24 +36,37 @@ export default function App() {
     })
   }, [])
 
-  // On mount: if a stored token exists, validate it against /auth/me and
-  // restore the session silently.  If that fails (expired / invalid), fall
-  // through to the normal setup/login flow.
-  useEffect(() => {
-    async function checkAuth() {
-      if (getToken()) {
-        try {
-          const res = await apiFetch('/auth/me')
-          if (res.ok) {
-            const body = await res.json()
-            setUser({ username: body.username, role: body.role })
-            setAuthState('authenticated')
-            return
-          }
-        } catch {
-          // Token invalid or backend unreachable — fall through
-        }
+  // Re-validate the stored token against /auth/me. Used both on first mount
+  // and again whenever the tab regains visibility (see effect below) — iOS
+  // can throttle/abort an in-flight fetch while a tab is backgrounded, or
+  // evict and reload the tab outright, either of which can otherwise leave
+  // authState stranded at its initial value even though a valid token is
+  // sitting in localStorage. A failed check here deliberately does NOT log
+  // the user out — it just leaves the current state alone so the next
+  // visibility/pageshow event gets another chance to confirm it.
+  const checkAuth = useCallback(async () => {
+    if (!getToken()) return false
+    try {
+      const res = await apiFetch('/auth/me')
+      if (res.ok) {
+        const body = await res.json()
+        setUser({ username: body.username, role: body.role })
+        setAuthState('authenticated')
+        return true
       }
+    } catch {
+      // Backend unreachable / request aborted — leave state untouched, retry later
+    }
+    return false
+  }, [])
+
+  // On mount: if a stored token exists, validate it and restore the session
+  // silently. If that fails (expired / invalid / unreachable), fall through
+  // to the normal setup/login flow.
+  useEffect(() => {
+    async function init() {
+      const ok = await checkAuth()
+      if (ok) return
       // No stored token (or it failed) — check for first-run setup
       try {
         const res = await fetch(`${API_BASE}/auth/status`)
@@ -64,8 +77,28 @@ export default function App() {
         // Backend unreachable — leave as 'unauthenticated', error will surface on submit.
       }
     }
-    checkAuth()
-  }, [])
+    init()
+  }, [checkAuth])
+
+  // Re-check auth whenever the tab becomes visible again (app-switch resume,
+  // bfcache restore via pageshow). This is what recovers the header if the
+  // initial /auth/me call above got dropped while the tab was backgrounded.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === 'visible' && getToken() && authState !== 'authenticated') {
+        checkAuth()
+      }
+    }
+    function handlePageShow() {
+      if (getToken() && authState !== 'authenticated') checkAuth()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    window.addEventListener('pageshow', handlePageShow)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility)
+      window.removeEventListener('pageshow', handlePageShow)
+    }
+  }, [checkAuth, authState])
 
   function handleAuthSuccess(token, username, role) {
     setToken(token)

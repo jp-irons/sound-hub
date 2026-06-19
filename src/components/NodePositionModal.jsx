@@ -160,7 +160,7 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
     >
       <div
         style={{
-          width: 420, maxHeight: '90vh', overflowY: 'auto',
+          width: 420, maxWidth: 'calc(100vw - 32px)', maxHeight: '90vh', overflowY: 'auto',
           background: 'var(--bg-panel)', border: '1px solid var(--border)',
           borderRadius: 8, padding: 18,
           display: 'flex', flexDirection: 'column', gap: 14,
