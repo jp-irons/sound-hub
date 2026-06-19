@@ -100,6 +100,20 @@ export default function App() {
     }
   }, [checkAuth, authState])
 
+  // Safety net: visibilitychange/pageshow are not reliable everywhere — mobile
+  // Safari in particular can leave document.visibilityState stuck on 'hidden'
+  // after a tab is back in the foreground (observed directly: hasFocus()
+  // true, visibilityState still 'hidden'), so the listeners above never fire.
+  // If a token is sitting in storage but we haven't confirmed it yet, keep
+  // retrying on a short interval until checkAuth succeeds (or the token goes
+  // away) instead of waiting on an event that may never come.
+  useEffect(() => {
+    if (authState === 'authenticated') return
+    if (!getToken()) return
+    const id = setInterval(checkAuth, 3000)
+    return () => clearInterval(id)
+  }, [authState, checkAuth])
+
   function handleAuthSuccess(token, username, role) {
     setToken(token)
     setUser({ username, role })
