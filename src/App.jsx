@@ -94,24 +94,44 @@ export default function App() {
     }
     document.addEventListener('visibilitychange', handleVisibility)
     window.addEventListener('pageshow', handlePageShow)
+    window.addEventListener('focus', handlePageShow)
     return () => {
       document.removeEventListener('visibilitychange', handleVisibility)
       window.removeEventListener('pageshow', handlePageShow)
+      window.removeEventListener('focus', handlePageShow)
     }
   }, [checkAuth, authState])
 
-  // Safety net: visibilitychange/pageshow are not reliable everywhere — mobile
-  // Safari in particular can leave document.visibilityState stuck on 'hidden'
-  // after a tab is back in the foreground (observed directly: hasFocus()
-  // true, visibilityState still 'hidden'), so the listeners above never fire.
-  // If a token is sitting in storage but we haven't confirmed it yet, keep
-  // retrying on a short interval until checkAuth succeeds (or the token goes
-  // away) instead of waiting on an event that may never come.
+  // Safety net #1: visibilitychange/pageshow/focus are not reliable everywhere
+  // — mobile Safari in particular can leave document.visibilityState stuck on
+  // 'hidden' after a tab is back in the foreground (observed directly:
+  // hasFocus() true, visibilityState still 'hidden'). When that happens, the
+  // browser also throttles/pauses JS timers for documents it still considers
+  // hidden, so even this retry can go silent. If a token is sitting in
+  // storage but we haven't confirmed it yet, keep retrying on a short
+  // interval until checkAuth succeeds (or the token goes away) instead of
+  // waiting on an event that may never come.
   useEffect(() => {
     if (authState === 'authenticated') return
     if (!getToken()) return
     const id = setInterval(checkAuth, 3000)
     return () => clearInterval(id)
+  }, [authState, checkAuth])
+
+  // Safety net #2: a real user gesture resumes a throttled/paused JS context
+  // even when the Page Visibility API is reporting the wrong thing, so a tap
+  // or click on the (apparently logged-out) page is also a trigger to retry.
+  // Cheap — it's a no-op once authState is 'authenticated'.
+  useEffect(() => {
+    if (authState === 'authenticated') return
+    if (!getToken()) return
+    function handleInteraction() { checkAuth() }
+    document.addEventListener('touchstart', handleInteraction, { passive: true })
+    document.addEventListener('click', handleInteraction)
+    return () => {
+      document.removeEventListener('touchstart', handleInteraction)
+      document.removeEventListener('click', handleInteraction)
+    }
   }, [authState, checkAuth])
 
   function handleAuthSuccess(token, username, role) {
