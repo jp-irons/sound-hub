@@ -253,7 +253,7 @@ export default function App() {
   })
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
       {/* Auth overlay — setup or login */}
       {showOverlay && (

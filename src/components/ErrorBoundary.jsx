@@ -23,7 +23,7 @@ export default class ErrorBoundary extends Component {
     if (this.state.error) {
       return (
         <div style={{
-          height: '100vh', display: 'flex', flexDirection: 'column',
+          height: '100vh', maxHeight: '100dvh', display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', gap: 12,
           background: 'var(--bg-base)', color: 'var(--text-primary)',
           fontSize: 14, textAlign: 'center', padding: 24,
