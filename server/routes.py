@@ -1,5 +1,6 @@
 """API routes consumed by the React frontend (mounted under /api in main.py)."""
 import asyncio
+import functools
 import logging
 import os
 import tempfile
@@ -729,19 +730,43 @@ async def audio_push(
         without ever being asked. requestId is absent.
 
     The file is saved to the audio/ directory as
-    audio_{requestId or nodeId}_{srcMac}.wav.
+    audio_{requestId or nodeId}_{srcMac}.wav.  BirdNET analysis then runs
+    against it in a thread pool (model inference is blocking) and any
+    detections are persisted tagged with this node.  Analysis failures are
+    logged, not raised — a node's push is the thing being acknowledged here,
+    not the success of analysis.
     """
     data = await request.body()
     os.makedirs(_AUDIO_DIR, exist_ok=True)
     label = str(requestId) if requestId is not None else (nodeId or "untriggered")
     fname = f"audio_{label}_{srcMac.replace(':', '')}.wav"
-    with open(os.path.join(_AUDIO_DIR, fname), "wb") as fh:
+    fpath = os.path.join(_AUDIO_DIR, fname)
+    with open(fpath, "wb") as fh:
         fh.write(data)
     if requestId is not None:
         entry = _audio_requests.setdefault(requestId, {"acks": []})
         entry.update({"file": fname, "bytes": len(data), "savedAt": _now_iso(), "nodeId": nodeId})
     log.info("audio push id=%s node=%s from %s — %d bytes → %s",
               requestId, nodeId, srcMac, len(data), fname)
+
+    if not birdnet_worker.ready():
+        log.warning("audio push id=%s node=%s — BirdNET not yet loaded, skipping analysis",
+                     requestId, nodeId)
+        return
+
+    try:
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(
+            None, functools.partial(birdnet_worker.analyze_wav, fpath, use_geo=True),
+        )
+    except Exception:
+        log.exception("audio push id=%s node=%s — BirdNET analysis failed", requestId, nodeId)
+        return
+
+    if raw:
+        await db.insert_detections(fname, _now_iso(), raw, node_id=nodeId)
+        log.info("audio push id=%s node=%s — %d detection(s) registered",
+                  requestId, nodeId, len(raw))
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
