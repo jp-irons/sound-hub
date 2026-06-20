@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS detections (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     source          TEXT,            -- filename or label (e.g. "upload", node WAV name)
+    node_id         TEXT,            -- nodes.id (hostname) that captured the audio;
+                                      -- NULL for manual uploads with no node origin
     analyzed_at     TEXT NOT NULL,   -- ISO8601 UTC
     common_name     TEXT NOT NULL,
     scientific_name TEXT NOT NULL,
@@ -169,6 +171,13 @@ async def init_db() -> None:
                 await conn.execute(
                     f"ALTER TABLE node_positions ADD COLUMN {col} REAL"
                 )
+
+        # Migration: add node_id to detections if it doesn't exist yet —
+        # `CREATE TABLE IF NOT EXISTS` doesn't touch an already-existing table.
+        cursor = await conn.execute("PRAGMA table_info(detections)")
+        detection_columns = {row[1] for row in await cursor.fetchall()}
+        if "node_id" not in detection_columns:
+            await conn.execute("ALTER TABLE detections ADD COLUMN node_id TEXT")
 
         await conn.commit()
 
@@ -382,18 +391,25 @@ async def update_user_password(username: str, hashed_password: str) -> bool:
 # ---------------------------------------------------------------------------
 
 async def insert_detections(
-    source: str, analyzed_at: str, detections: list[dict]
+    source: str, analyzed_at: str, detections: list[dict],
+    node_id: str | None = None,
 ) -> None:
-    """Bulk-insert BirdNET detection rows."""
+    """Bulk-insert BirdNET detection rows.
+
+    node_id identifies which node's audio this came from (matches nodes.id,
+    i.e. hostname). None for detections with no node origin (manual WAV
+    upload via /api/detections/analyze).
+    """
     async with connect() as conn:
         await conn.executemany(
             """INSERT INTO detections
-               (source, analyzed_at, common_name, scientific_name,
+               (source, node_id, analyzed_at, common_name, scientific_name,
                 confidence, start_sec, end_sec)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     source,
+                    node_id,
                     analyzed_at,
                     d["common_name"],
                     d["scientific_name"],

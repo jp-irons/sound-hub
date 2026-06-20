@@ -184,6 +184,7 @@ class DetectionRecord(BaseModel):
     """One BirdNET detection row — returned by GET /api/detections."""
     id: int
     source: Optional[str] = None
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
     analyzed_at: str = Field(alias="analyzedAt")
     common_name: str = Field(alias="commonName")
     scientific_name: str = Field(alias="scientificName")

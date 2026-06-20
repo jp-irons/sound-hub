@@ -707,23 +707,41 @@ async def audio_ack(body: AudioAckBody):
 @router.post("/audio/push", status_code=200, dependencies=[Depends(require_node)])
 async def audio_push(
     request: Request,
-    requestId: int = Query(..., description="Matches the originating AudioRequestMsg.requestId"),
+    requestId: int | None = Query(
+        None,
+        description="Matches the originating AudioRequestMsg.requestId. "
+                     "Absent for node-initiated (untriggered-by-hub) pushes.",
+    ),
     srcMac: str    = Query(..., description="Wi-Fi STA MAC of the sending node (xx:xx:xx:xx:xx:xx)"),
+    nodeId: str | None = Query(
+        None,
+        description="Sending node's hostname — matches nodes.id. Authoritative "
+                     "identity for this push; srcMac is kept for filenames/debugging.",
+    ),
 ):
     """Receive a WAV audio segment pushed directly from a node.
 
-    The node POSTs here after receiving an AUDIO_REQUEST and successfully
-    retrieving the segment from its ring buffer.  The file is saved to the
-    audio/ directory as audio_{requestId}_{srcMac}.wav.
+    Two cases:
+      - Hub-initiated: node POSTs here after receiving an AUDIO_REQUEST and
+        successfully retrieving the segment. requestId is present and
+        matches the originating ack-tracking entry.
+      - Node-initiated (future): a node's own trigger fires and it pushes
+        without ever being asked. requestId is absent.
+
+    The file is saved to the audio/ directory as
+    audio_{requestId or nodeId}_{srcMac}.wav.
     """
     data = await request.body()
     os.makedirs(_AUDIO_DIR, exist_ok=True)
-    fname = f"audio_{requestId}_{srcMac.replace(':', '')}.wav"
+    label = str(requestId) if requestId is not None else (nodeId or "untriggered")
+    fname = f"audio_{label}_{srcMac.replace(':', '')}.wav"
     with open(os.path.join(_AUDIO_DIR, fname), "wb") as fh:
         fh.write(data)
-    entry = _audio_requests.setdefault(requestId, {"acks": []})
-    entry.update({"file": fname, "bytes": len(data), "savedAt": _now_iso()})
-    log.info("audio push id=%s from %s — %d bytes → %s", requestId, srcMac, len(data), fname)
+    if requestId is not None:
+        entry = _audio_requests.setdefault(requestId, {"acks": []})
+        entry.update({"file": fname, "bytes": len(data), "savedAt": _now_iso(), "nodeId": nodeId})
+    log.info("audio push id=%s node=%s from %s — %d bytes → %s",
+              requestId, nodeId, srcMac, len(data), fname)
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
