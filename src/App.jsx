@@ -28,6 +28,13 @@ export default function App() {
 
   const isAdmin = user?.role === 'admin'
 
+  // TEMP DEBUG — remove once the missing-header-bar bug is root-caused.
+  const [debugTick, setDebugTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setDebugTick(n => n + 1), 500)
+    return () => clearInterval(id)
+  }, [])
+
   // Wire up the 401 callback so any apiFetch can flip us back to login.
   useEffect(() => {
     onUnauthenticated(() => {
@@ -288,6 +295,17 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+
+      {/* TEMP DEBUG — remove once the missing-header-bar bug is root-caused. */}
+      <div style={{
+        position: 'fixed', top: 0, left: 0, zIndex: 999999,
+        background: '#000', color: '#0f0',
+        fontSize: 10, fontFamily: 'monospace',
+        padding: '2px 6px', whiteSpace: 'pre',
+        pointerEvents: 'none',
+      }}>
+        {`auth:${authState} user:${user?.username ?? 'null'} vis:${typeof document !== 'undefined' ? document.visibilityState : '?'} scrollY:${typeof window !== 'undefined' ? window.scrollY : '?'} h:${typeof window !== 'undefined' ? window.innerHeight : '?'} tick:${debugTick}`}
+      </div>
 
       {/* Auth overlay — setup or login */}
       {showOverlay && (
