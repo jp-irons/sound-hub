@@ -327,10 +327,26 @@ export default function App() {
         position: 'fixed', bottom: 0, left: 0, zIndex: 999999,
         background: '#000', color: '#0f0',
         fontSize: 10, fontFamily: 'monospace',
-        padding: '2px 6px', whiteSpace: 'pre',
-        pointerEvents: 'none',
+        padding: '2px 6px',
+        display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2,
       }}>
-        {`auth:${authState} user:${user?.username ?? 'null'} vis:${typeof document !== 'undefined' ? document.visibilityState : '?'} scrollY:${typeof window !== 'undefined' ? window.scrollY : '?'} h:${typeof window !== 'undefined' ? window.innerHeight : '?'} tick:${debugTick}`}
+        <div style={{ whiteSpace: 'pre' }}>
+          {`auth:${authState} user:${user?.username ?? 'null'} vis:${typeof document !== 'undefined' ? document.visibilityState : '?'} scrollY:${typeof window !== 'undefined' ? window.scrollY : '?'} h:${typeof window !== 'undefined' ? window.innerHeight : '?'} tick:${debugTick}`}
+        </div>
+        <div style={{ whiteSpace: 'pre' }}>
+          {`vvH:${window.visualViewport?.height ?? '?'} vvOffY:${window.visualViewport?.offsetTop ?? '?'} vvScale:${window.visualViewport?.scale ?? '?'} active:${document.activeElement?.tagName ?? '?'}`}
+        </div>
+        <button
+          onClick={() => {
+            window.scrollTo(0, 0)
+            document.documentElement.scrollTop = 0
+            document.body.scrollTop = 0
+            window.visualViewport?.scrollTo?.(0, 0)
+          }}
+          style={{ fontSize: 10, padding: '2px 6px', pointerEvents: 'auto' }}
+        >
+          Reset scroll
+        </button>
       </div>
 
       {/* Auth overlay — setup or login */}

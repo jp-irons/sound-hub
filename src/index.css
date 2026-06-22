@@ -25,18 +25,17 @@
   color: var(--text-primary);
 }
 
-/* iOS Safari can still let the page scroll a little even with overflow:hidden
-   (e.g. as the dynamic toolbar collapses/expands around a tap), which can
-   leave a fixed-height header scrolled out of view above the viewport while
-   the rest of the layout still looks fine below it. Pinning html/body/#root
-   with position:fixed removes any scroll position for the page to drift to. */
+/* NOTE: previously tried pinning html/body/#root with position:fixed here to
+   stop iOS Safari scroll drift — it didn't fix the missing-header-bar bug
+   (still reproduced) and the bug also survives a normal page reload, which
+   points away from a pure CSS/scroll-position cause. Reverted to the
+   simpler overflow:hidden approach while that's investigated further. */
 html, body {
-  position: fixed; inset: 0;
   background: var(--bg-base);
   height: 100vh; height: 100dvh;
   overflow: hidden;
 }
-#root { position: fixed; inset: 0; display: flex; flex-direction: column; }
+#root { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
