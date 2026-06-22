@@ -154,7 +154,17 @@ export default function AuthOverlay({ mode, onSuccess, onBrowse }) {
         {/* Cancel — returns to unauthenticated map view (login mode only) */}
         {!isSetup && onBrowse && (
           <button
-            onClick={onBrowse}
+            onClick={() => {
+              // Unmounting this overlay (and its autoFocus'd username input)
+              // while the keyboard is still open is a known iOS Safari edge
+              // case that leaves the visual viewport stuck in its
+              // "keyboard open" offset — scrollTo() can't undo it afterwards
+              // because there's nothing to actually scroll. Blur first and
+              // give the keyboard a moment to dismiss cleanly before the
+              // overlay (and the focused input) actually goes away.
+              document.activeElement?.blur()
+              setTimeout(onBrowse, 50)
+            }}
             style={styles.browseLink}
           >
             Cancel
