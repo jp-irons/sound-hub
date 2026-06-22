@@ -292,9 +292,19 @@ export default function App() {
   // whether via Cancel (browse unauthenticated) or a successful sign-in.
   useEffect(() => {
     if (showOverlay) return
-    window.scrollTo(0, 0)
-    document.documentElement.scrollTop = 0
-    document.body.scrollTop = 0
+    function resetScroll() {
+      window.scrollTo(0, 0)
+      document.documentElement.scrollTop = 0
+      document.body.scrollTop = 0
+    }
+    // The keyboard-dismiss animation runs for a couple hundred ms after the
+    // overlay (and its focused input) unmount, and iOS keeps nudging scroll
+    // position during that animation — a single reset gets overridden.
+    // Retry across the animation window so whichever scroll happens last
+    // still gets corrected.
+    resetScroll()
+    const timers = [50, 150, 350].map(ms => setTimeout(resetScroll, ms))
+    return () => timers.forEach(clearTimeout)
   }, [showOverlay])
 
   const tabStyle = (t) => ({
