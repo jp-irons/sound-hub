@@ -298,7 +298,7 @@ export default function App() {
 
       {/* TEMP DEBUG — remove once the missing-header-bar bug is root-caused. */}
       <div style={{
-        position: 'fixed', top: 0, left: 0, zIndex: 999999,
+        position: 'fixed', bottom: 0, left: 0, zIndex: 999999,
         background: '#000', color: '#0f0',
         fontSize: 10, fontFamily: 'monospace',
         padding: '2px 6px', whiteSpace: 'pre',
