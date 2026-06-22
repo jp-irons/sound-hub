@@ -114,7 +114,6 @@ export default function AuthOverlay({ mode, onSuccess, onBrowse }) {
             style={styles.input}
             type="text"
             autoComplete="username"
-            autoFocus
             value={username}
             onChange={e => setUsername(e.target.value)}
             disabled={busy}
