@@ -281,6 +281,22 @@ export default function App() {
 
   const showOverlay = authState === 'setup' || authState === 'login'
 
+  // iOS Safari scrolls the page to keep the AuthOverlay's autoFocus'd
+  // username input visible above the keyboard. position:fixed on html/body
+  // blocks normal user scrolling but does NOT stop this native
+  // keyboard-avoidance scroll, and the offset is never auto-corrected once
+  // the keyboard dismisses — leaving the page permanently scrolled down by
+  // roughly the keyboard's height and pushing TopBar/tab-bar out of the
+  // visible viewport (confirmed via debug overlay: scrollY ~131 after
+  // closing the overlay). Reset scroll back to 0 whenever the overlay closes,
+  // whether via Cancel (browse unauthenticated) or a successful sign-in.
+  useEffect(() => {
+    if (showOverlay) return
+    window.scrollTo(0, 0)
+    document.documentElement.scrollTop = 0
+    document.body.scrollTop = 0
+  }, [showOverlay])
+
   const tabStyle = (t) => ({
     padding: '4px 16px',
     fontSize: 12,
