@@ -423,14 +423,46 @@ async def insert_detections(
         await conn.commit()
 
 
-async def list_detections(limit: int = 200) -> list[dict]:
-    """Return the most recent detections ordered newest-first."""
+async def list_detections(
+    limit: int = 200,
+    min_conf: float = 0.0,
+    species: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict]:
+    """Return the most recent detections ordered newest-first.
+
+    min_conf filters on confidence >= value. species matches against either
+    common_name or scientific_name (SQLite LIKE is case-insensitive for
+    ASCII). from_ts/to_ts are inclusive bounds on analyzed_at, expected as
+    ISO8601 strings comparable lexicographically with the stored UTC values
+    (e.g. produced by JS Date.toISOString()).
+    """
+    where = ["confidence >= ?"]
+    params: list = [min_conf]
+
+    if species:
+        where.append("(common_name LIKE ? OR scientific_name LIKE ?)")
+        like = f"%{species}%"
+        params.extend([like, like])
+
+    if from_ts:
+        where.append("analyzed_at >= ?")
+        params.append(from_ts)
+
+    if to_ts:
+        where.append("analyzed_at <= ?")
+        params.append(to_ts)
+
+    params.append(limit)
+
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
-            """SELECT * FROM detections
-               ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
-            (limit,),
+            f"""SELECT * FROM detections
+                WHERE {' AND '.join(where)}
+                ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
+            params,
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]

@@ -4,6 +4,7 @@ import NodeSidebar from './components/NodeSidebar.jsx'
 import MapView from './components/MapView.jsx'
 import NodeDetail from './components/NodeDetail.jsx'
 import DetectionsTab from './components/DetectionsTab.jsx'
+import ToolsTab from './components/ToolsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
 import { apiFetch, getToken, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
@@ -319,6 +320,9 @@ export default function App() {
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
 
         {isAdmin && (
+          <button style={tabStyle('tools')} onClick={() => setTab('tools')}>Tools</button>
+        )}
+        {isAdmin && (
           <button style={tabStyle('users')} onClick={() => setTab('users')}>Users</button>
         )}
       </div>
@@ -445,7 +449,8 @@ export default function App() {
         </div>
       )}
 
-      {tab === 'detections' && <DetectionsTab isAdmin={isAdmin} />}
+      {tab === 'detections' && <DetectionsTab />}
+      {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
     </div>
   )

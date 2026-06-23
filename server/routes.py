@@ -928,9 +928,21 @@ async def solve_tdoa(req: TdoaRequest):
 # ---------------------------------------------------------------------------
 
 @router.get("/detections", response_model=list[DetectionRecord])
-async def list_detections(limit: int = Query(default=200, ge=1, le=2000)):
-    """Return the most recent BirdNET detections, newest first."""
-    rows = await db.list_detections(limit=limit)
+async def list_detections(
+    limit: int = Query(default=200, ge=1, le=2000),
+    min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+    species: str | None = Query(default=None),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+):
+    """Return the most recent BirdNET detections, newest first.
+
+    species, min_conf, from, and to are optional filters — from/to are
+    inclusive ISO8601 timestamp bounds on analyzed_at.
+    """
+    rows = await db.list_detections(
+        limit=limit, min_conf=min_conf, species=species, from_ts=from_ts, to_ts=to_ts,
+    )
     return [DetectionRecord(**row) for row in rows]
 
 
