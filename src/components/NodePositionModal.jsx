@@ -46,14 +46,6 @@ function NumberField({ label, value, onChange, step = 'any', placeholder }) {
   )
 }
 
-function fmtLatLon(v, decimals = 6) {
-  return v != null ? v.toFixed(decimals) : '—'
-}
-
-function fmtM(v) {
-  return v != null ? `${v.toFixed(1)} m` : '—'
-}
-
 export default function NodePositionModal({ node, onClose, onSubmit }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -145,7 +137,6 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
 
   const offsetFilled = posE !== '' && posN !== '' && posAlt !== ''
   const isSurveyed = posStatus === 'surveyed'
-  const canUseGpsCentroid = isSurveyed && offsetFilled && centroid != null
   const canUseSurveyedCoords = isSurveyed && offsetFilled &&
     surveyedLat !== '' && surveyedLon !== '' && surveyedAlt !== ''
 
@@ -213,14 +204,14 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
                   type="button"
                   className="btn"
                   style={{ fontSize: 10, padding: '2px 8px' }}
-                  title="Populate from this node's GPS centroid"
+                  title="Populate the fields below from this node's live GPS centroid"
                   onClick={() => {
                     setSurveyedLat(centroid.lat.toFixed(8))
                     setSurveyedLon(centroid.lon.toFixed(8))
                     setSurveyedAlt(centroid.altM != null ? String(centroid.altM) : '')
                   }}
                 >
-                  Copy GPS centroid
+                  Use GPS Centroid
                 </button>
               )}
             </div>
@@ -252,27 +243,13 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
               display: 'flex', flexDirection: 'column', gap: 8,
             }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
-                Set as position reference
+                Set hub origin from this node
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                Back-projects the array (0,0,0) datum from this node's reference coordinates minus its N/E/Alt offset.
-                All other surveyed nodes remain valid — no re-surveying required.
+                Back-projects the hub's geographic origin from this node's surveyed coordinates (above) minus its
+                N/E/Alt offset. All other surveyed nodes remain valid — no re-surveying required. The origin can
+                also be set directly, without going through a node, from the Settings tab.
               </div>
-
-              {/* GPS centroid info */}
-              {centroid ? (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  GPS centroid: {fmtLatLon(centroid.lat)}, {fmtLatLon(centroid.lon)}, {fmtM(centroid.altM)}
-                  {node.gps?.centroidN != null && (
-                    <span style={{ marginLeft: 6 }}>
-                      (n={node.gps.centroidN.toLocaleString()}
-                      {node.gps.centroidStddevM != null && `, σ ${node.gps.centroidStddevM.toFixed(2)} m`})
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>GPS centroid: not yet available</div>
-              )}
 
               {disagreementM != null && (
                 <div style={{
@@ -287,31 +264,18 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
                 <div style={{ fontSize: 11, color: 'var(--green)' }}>{originMessage}</div>
               )}
 
-              {/* Two origin buttons */}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ fontSize: 11, padding: '5px 12px' }}
-                  disabled={!canUseGpsCentroid || originSetting != null}
-                  title={canUseGpsCentroid
-                    ? 'Back-project origin from this node\'s GPS centroid + N/E/Alt offset'
-                    : 'Requires: Surveyed status, all three offsets, and an active GPS centroid'}
-                  onClick={() => handleSetOrigin('gps_centroid')}
-                >
-                  {originSetting === 'gps_centroid' ? 'Setting…' : 'Use GPS centroid'}
-                </button>
                 <button
                   type="button"
                   className="btn btn-primary"
                   style={{ fontSize: 11, padding: '5px 12px' }}
                   disabled={!canUseSurveyedCoords || originSetting != null}
                   title={canUseSurveyedCoords
-                    ? 'Back-project origin from the surveyed lat/lon/alt above + N/E/Alt offset'
+                    ? 'Back-project hub origin from the surveyed lat/lon/alt above + N/E/Alt offset'
                     : 'Requires: Surveyed status, all three offsets, and all three surveyed coordinates entered above'}
                   onClick={() => handleSetOrigin('surveyed_coords')}
                 >
-                  {originSetting === 'surveyed_coords' ? 'Setting…' : 'Use surveyed coordinates'}
+                  {originSetting === 'surveyed_coords' ? 'Setting…' : 'Set hub origin'}
                 </button>
               </div>
 

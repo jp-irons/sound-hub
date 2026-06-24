@@ -7,6 +7,7 @@ import DetectionsTab from './components/DetectionsTab.jsx'
 import ToolsTab from './components/ToolsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
+import SettingsTab from './components/SettingsTab.jsx'
 import { apiFetch, getToken, setToken, clearToken, onUnauthenticated, AuthError } from './auth.js'
 import { useIsMobile } from './hooks/useBreakpoint.js'
 
@@ -14,7 +15,7 @@ const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
 
 const TAB_KEY = 'app.activeTab'
-const TABS = ['map', 'detections', 'tools', 'users']
+const TABS = ['map', 'detections', 'tools', 'users', 'settings']
 
 function loadTab() {
   try {
@@ -50,7 +51,7 @@ export default function App() {
   // logged-in user isn't an admin — e.g. a different account on the same
   // browser, or a role change since the tab was last saved.
   useEffect(() => {
-    if ((tab === 'tools' || tab === 'users') && authState === 'authenticated' && !isAdmin) {
+    if ((tab === 'tools' || tab === 'users' || tab === 'settings') && authState === 'authenticated' && !isAdmin) {
       setTab('map')
     }
   }, [tab, authState, isAdmin])
@@ -351,6 +352,9 @@ export default function App() {
         {isAdmin && (
           <button style={tabStyle('users')} onClick={() => setTab('users')}>Users</button>
         )}
+        {isAdmin && (
+          <button style={tabStyle('settings')} onClick={() => setTab('settings')}>Settings</button>
+        )}
       </div>
 
       {error && (
@@ -478,6 +482,7 @@ export default function App() {
       {tab === 'detections' && <DetectionsTab />}
       {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
+      {tab === 'settings' && isAdmin && <SettingsTab />}
     </div>
   )
 }
