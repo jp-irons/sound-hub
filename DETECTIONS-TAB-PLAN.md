@@ -149,15 +149,18 @@ happens in SQL, not in the browser. (See the row-cap caveat above for the
 
 ---
 
-### Slice 5 — Pin and sort
+### Slice 5 — Pin and sort — **done**
 
-Pure frontend, sits on top of slice 4.
+Pure frontend, sits on top of slice 4 (`SpeciesSummaryList.jsx`).
 
-- Checkbox per species row to pin; pinned species sort to the top regardless
-  of the active sort mode.
-- Sort control: most frequent / least frequent / alphabetical / most
-  recently seen.
-- Persist pinned set in `localStorage` so it survives a reload.
+- Checkbox per species row to pin; pinned species render in their own
+  section above the rest, each section sorted by the active sort mode.
+- Sort control: most frequent / least frequent / most recently seen /
+  alphabetical (A–Z).
+- Pinned set persisted in `localStorage` (`detections.pinnedSpecies`) and
+  sort mode persisted separately (`detections.sortMode`) — both survive a
+  reload and intentionally survive filter changes too, since pinning is
+  meant to be a standing preference, not scoped to one filter combination.
 
 Acceptance: pinning a species keeps it pinned across a page refresh.
 
@@ -178,3 +181,31 @@ Acceptance: pinning a species keeps it pinned across a page refresh.
 - 2026-06-24: sun calculation uses the property-level `array_origin` lat/lon
   (`db.py:265`), not per-node GPS — confirmed by Jon. This is the same
   reference datum already used for cartesian node positioning.
+- 2026-06-24: dawn/dusk buffers set to 30 min before / 90 min after sunrise
+  (dawn) and 90 min before / 30 min after sunset (dusk) — confirmed by Jon.
+  Asymmetric because the dawn chorus builds for an hour-plus after sunrise as
+  birds disperse to forage, while the evening chorus is shorter and
+  front-loaded into the run-up to sunset.
+- 2026-06-24: the local timezone for sun-time classification must be derived
+  dynamically from the `array_origin` lat/lon (via `timezonefinder`), not
+  hardcoded to `Australia/Brisbane` as first implemented. Corrected after Jon
+  flagged that the system will also run a second hub from a van at varying
+  campsite locations, re-surveying `array_origin` at each new site — the
+  whole point is that time-of-day logic follows wherever `array_origin`
+  currently points, with no Brisbane-specific code. See `suntimes.py`'s
+  `local_tz_for()`.
+- 2026-06-24: the species-summary endpoint's `time_of_day` path is capped at
+  2000 raw rows before aggregating in Python (see slice 4) — accepted as a
+  v1 limitation rather than building the more scalable per-day SQL range
+  union now. Not yet explicitly confirmed by Jon as a long-term acceptable
+  tradeoff — revisit if detection volume makes the cap bite in practice.
+- 2026-06-24: pinned species and sort mode persist across filter changes,
+  not just reloads — pinning is a standing preference, not scoped to one
+  filter view.
+
+## Open questions
+
+- Should `array_origin` carry a hub identifier to support the Brisbane
+  property and the van running simultaneously against the same database, or
+  is each hub expected to run its own separate database/instance? Raised
+  during slice 3, not yet answered.
