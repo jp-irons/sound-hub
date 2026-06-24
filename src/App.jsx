@@ -13,12 +13,25 @@ import { useIsMobile } from './hooks/useBreakpoint.js'
 const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
 
+const TAB_KEY = 'app.activeTab'
+const TABS = ['map', 'detections', 'tools', 'users']
+
+function loadTab() {
+  try {
+    const raw = localStorage.getItem(TAB_KEY)
+    return TABS.includes(raw) ? raw : 'map'
+  } catch { return 'map' }
+}
+
 export default function App() {
   // 'login' | 'setup' | 'unauthenticated' | 'authenticated'
   const [authState, setAuthState] = useState('unauthenticated')
   const [user, setUser] = useState(null)   // { username, role }
 
-  const [tab, setTab] = useState('map')
+  // Persisted so a reload (deliberate or forced by a flaky connection, e.g.
+  // the van) lands back on the tab you were viewing instead of always
+  // resetting to the map.
+  const [tab, setTab] = useState(loadTab)
   const [nodes, setNodes] = useState([])             // full node list — authenticated only
   const [publicNodes, setPublicNodes] = useState([]) // slim node list — unauthenticated
   const [selectedId, setSelectedId] = useState(null)
@@ -28,6 +41,19 @@ export default function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
 
   const isAdmin = user?.role === 'admin'
+
+  useEffect(() => {
+    try { localStorage.setItem(TAB_KEY, tab) } catch { /* ignore */ }
+  }, [tab])
+
+  // Guard against a restored admin-only tab (tools/users) when the
+  // logged-in user isn't an admin — e.g. a different account on the same
+  // browser, or a role change since the tab was last saved.
+  useEffect(() => {
+    if ((tab === 'tools' || tab === 'users') && authState === 'authenticated' && !isAdmin) {
+      setTab('map')
+    }
+  }, [tab, authState, isAdmin])
 
   // Wire up the 401 callback so any apiFetch can flip us back to login.
   useEffect(() => {

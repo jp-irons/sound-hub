@@ -48,7 +48,7 @@ function comparatorFor(sortMode) {
   }
 }
 
-export default function SpeciesSummaryList({ minConf, species, datePreset, customFrom, customTo, timeOfDay }) {
+export default function SpeciesSummaryList({ minConf, species, datePreset, customFrom, customTo, moment }) {
   const [summary, setSummary]   = useState([])
   const [error, setError]       = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
@@ -59,7 +59,7 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
   const fetchSummary = useCallback(async () => {
     try {
       const params = buildDetectionParams({
-        minConf, species, datePreset, customFrom, customTo, timeOfDay, limit: SUMMARY_LIMIT,
+        minConf, species, datePreset, customFrom, customTo, moment, limit: SUMMARY_LIMIT,
       })
       const res = await fetch(`${API_BASE}/detections/species-summary?${params}`)
       if (!res.ok) {
@@ -71,7 +71,7 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
     } catch (err) {
       setError(err.message ?? String(err))
     }
-  }, [minConf, species, datePreset, customFrom, customTo, timeOfDay])
+  }, [minConf, species, datePreset, customFrom, customTo, moment])
 
   useEffect(() => {
     fetchSummary()
@@ -119,7 +119,7 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
       // so a row never shows another species' detections (e.g. two species
       // sharing a common-name substring).
       const params = buildDetectionParams({
-        minConf, species: commonName, datePreset, customFrom, customTo, timeOfDay, limit: DETAIL_LIMIT,
+        minConf, species: commonName, datePreset, customFrom, customTo, moment, limit: DETAIL_LIMIT,
       })
       const res = await fetch(`${API_BASE}/detections?${params}`)
       if (!res.ok) throw new Error(`${res.status}`)

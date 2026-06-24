@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { DATE_PRESETS, TIME_OF_DAY_OPTIONS } from '../utils/detectionFilters.js'
+import { DATE_PRESETS, MOMENT_OPTIONS, isQuickMoment } from '../utils/detectionFilters.js'
 import SpeciesSummaryList from './SpeciesSummaryList.jsx'
 
 export default function DetectionsTab() {
@@ -8,7 +8,21 @@ export default function DetectionsTab() {
   const [datePreset, setDatePreset]   = useState('all')
   const [customFrom, setCustomFrom]   = useState('') // yyyy-mm-dd
   const [customTo, setCustomTo]       = useState('') // yyyy-mm-dd
-  const [timeOfDay, setTimeOfDay]     = useState('') // '' | dawn | daytime | dusk | nighttime
+  const [moment, setMoment]           = useState('') // '' | last10min | last1hour | dawn | daytime | dusk | nighttime
+
+  // Quick recency windows (last10min/last1hour) and calendar date presets
+  // both ultimately drive the same from/to range, so only one should be
+  // "active" at a time — picking one clears the other rather than silently
+  // overriding it underneath.
+  function chooseDatePreset(key) {
+    setDatePreset(key)
+    if (isQuickMoment(moment)) setMoment('')
+  }
+
+  function chooseMoment(key) {
+    setMoment(key)
+    if (isQuickMoment(key)) setDatePreset('all')
+  }
 
   const sty = {
     root: {
@@ -40,7 +54,7 @@ export default function DetectionsTab() {
           <button
             key={p.key}
             style={sty.presetBtn(datePreset === p.key)}
-            onClick={() => setDatePreset(p.key)}
+            onClick={() => chooseDatePreset(p.key)}
           >
             {p.label}
           </button>
@@ -62,13 +76,14 @@ export default function DetectionsTab() {
         )}
       </div>
 
-      {/* ── Time of day (sun-relative dawn/dusk, anchored to array_origin) ── */}
+      {/* ── Moment: sun-relative time-of-day + quick recency windows, one
+          active at a time (anchored to array_origin for the sun buckets) ── */}
       <div style={{ ...sty.row, gap: 8 }}>
-        {TIME_OF_DAY_OPTIONS.map(o => (
+        {MOMENT_OPTIONS.map(o => (
           <button
             key={o.key || 'all-day'}
-            style={sty.presetBtn(timeOfDay === o.key)}
-            onClick={() => setTimeOfDay(o.key)}
+            style={sty.presetBtn(moment === o.key)}
+            onClick={() => chooseMoment(o.key)}
           >
             {o.label}
           </button>
@@ -104,7 +119,7 @@ export default function DetectionsTab() {
         datePreset={datePreset}
         customFrom={customFrom}
         customTo={customTo}
-        timeOfDay={timeOfDay}
+        moment={moment}
       />
     </div>
   )

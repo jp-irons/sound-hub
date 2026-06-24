@@ -211,9 +211,25 @@ Acceptance: pinning a species keeps it pinned across a page refresh.
 - 2026-06-24: confirmed reload is unnecessary for fresh detection data — both
   the Map tab and `SpeciesSummaryList` already poll every 5s
   (`POLL_INTERVAL_MS`). The "back to Map on refresh" symptom is just
-  `App.jsx`'s `tab` state having no persistence, so any full reload remounts
-  the app to its default tab. Not fixed — flagged to Jon as optional, not
-  done.
+  `App.jsx`'s `tab` state having no persistence. **Fixed:** `tab` now
+  persists to `localStorage` (`app.activeTab`) and is restored on mount,
+  with a guard that falls back to `map` if the restored tab is admin-only
+  and the current user isn't an admin. Jon confirmed this is worth doing
+  regardless of the polling fix, anticipating more reload-prone conditions
+  once a second hub runs from the van.
+- 2026-06-24: `last10min`/`last1hour` moved out of the date-range presets and
+  merged into a single "moment" selector together with the sun-relative
+  time-of-day buckets (all day/dawn/daytime/dusk/nighttime) — confirmed by
+  Jon. Reasoning: combining e.g. "last 10 min" with "dawn" independently is
+  almost never meaningful (it only returns results if dawn happens to be
+  right now), so the two are now mutually exclusive by construction in one
+  button group rather than needing special-case validation. Selecting a
+  quick window forces the date-range row back to "All"; selecting a
+  date-range preset clears an active quick window. `detectionFilters.js`'s
+  `buildDetectionParams`/`resolveRange` now take a single `moment` value
+  instead of `timeOfDay`, dispatching internally on each option's `kind`
+  (`'sun'` → `time_of_day` query param, `'quick'` → client-computed
+  from/to window).
 
 ## Open questions
 
