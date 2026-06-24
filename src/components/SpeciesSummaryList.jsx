@@ -31,8 +31,8 @@ function savePinned(set) {
 function loadSortMode() {
   try {
     const raw = localStorage.getItem(SORT_KEY)
-    return SORT_OPTIONS.some(o => o.key === raw) ? raw : 'count_desc'
-  } catch { return 'count_desc' }
+    return SORT_OPTIONS.some(o => o.key === raw) ? raw : 'count_asc'
+  } catch { return 'count_asc' }
 }
 
 function saveSortMode(mode) {

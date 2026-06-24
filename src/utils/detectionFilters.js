@@ -9,6 +9,8 @@ export function endOfDay(d)   { const x = new Date(d); x.setHours(23, 59, 59, 99
 
 export const DATE_PRESETS = [
   { key: 'all',       label: 'All' },
+  { key: 'last10min', label: 'Last 10 min' },
+  { key: 'last1hour', label: 'Last hour' },
   { key: 'today',     label: 'Today' },
   { key: 'yesterday', label: 'Yesterday' },
   { key: 'last7',     label: 'Last 7 days' },
@@ -29,6 +31,10 @@ export const TIME_OF_DAY_OPTIONS = [
 export function resolveRange(preset, customFrom, customTo) {
   const now = new Date()
   switch (preset) {
+    case 'last10min':
+      return { from: new Date(now.getTime() - 10 * 60 * 1000), to: now }
+    case 'last1hour':
+      return { from: new Date(now.getTime() - 60 * 60 * 1000), to: now }
     case 'today':
       return { from: startOfDay(now), to: endOfDay(now) }
     case 'yesterday': {

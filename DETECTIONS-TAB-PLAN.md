@@ -202,6 +202,18 @@ Acceptance: pinning a species keeps it pinned across a page refresh.
 - 2026-06-24: pinned species and sort mode persist across filter changes,
   not just reloads — pinning is a standing preference, not scoped to one
   filter view.
+- 2026-06-24: default sort mode changed from most-frequent to least-frequent
+  (`count_asc`) per Jon — rare/unusual species surface first instead of being
+  buried under common ones.
+- 2026-06-24: added `last10min`/`last1hour` date-range presets — rolling
+  windows computed from `Date.now()` minus a fixed offset, not
+  calendar-day-aligned like the existing presets (today/yesterday/last7).
+- 2026-06-24: confirmed reload is unnecessary for fresh detection data — both
+  the Map tab and `SpeciesSummaryList` already poll every 5s
+  (`POLL_INTERVAL_MS`). The "back to Map on refresh" symptom is just
+  `App.jsx`'s `tab` state having no persistence, so any full reload remounts
+  the app to its default tab. Not fixed — flagged to Jon as optional, not
+  done.
 
 ## Open questions
 
