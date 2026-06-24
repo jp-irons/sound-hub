@@ -65,8 +65,8 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
   const pending  = nodes.filter(n => n.approvalStatus === 'pending')
   const rejected = nodes.filter(n => n.approvalStatus === 'rejected')
 
-  const anchors = approved.filter(n => n.role === 'BROKER' || n.isOrigin)
-  const leaves  = approved.filter(n => n.role !== 'BROKER' && !n.isOrigin)
+  const anchors = approved.filter(n => n.role === 'BROKER')
+  const leaves  = approved.filter(n => n.role !== 'BROKER')
 
   return (
     <div style={{

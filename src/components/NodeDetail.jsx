@@ -96,13 +96,6 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             {node.ipAddress ?? '—'} · fw {node.firmwareVersion ?? '—'}
           </div>
         </div>
-        {node.isOrigin && (
-          <span title="Position reference node — coordinates used to set array origin" style={{
-            fontSize: 10, color: 'var(--text-primary)',
-            background: 'var(--border)', padding: '1px 6px', borderRadius: 3, fontWeight: 700,
-            letterSpacing: '0.04em',
-          }}>POS REF</span>
-        )}
         {node.role === 'BROKER' && (
           <span title="Broker — relays ESP-NOW traffic to/from WiFi" style={{
             fontSize: 10, color: 'var(--text-primary)',
@@ -168,15 +161,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                       {node.latLon.lat.toFixed(6)}, {node.latLon.lon.toFixed(6)}
                     </span>
                   </div>
-                  {node.isOrigin ? (
-                    <div style={{
-                      marginTop: 4, padding: '5px 8px',
-                      background: 'var(--green-dim)', borderRadius: 4,
-                      fontSize: 11, color: 'var(--green)',
-                    }}>
-                      GPS reference node — used to establish hub array origin
-                    </div>
-                  ) : node.flags?.includes('POSITION_DERIVED') ? (
+                  {node.flags?.includes('POSITION_DERIVED') ? (
                     <div style={{
                       marginTop: 4, padding: '5px 8px',
                       background: 'var(--blue-dim)', borderRadius: 4,

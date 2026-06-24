@@ -94,7 +94,7 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
                   <div style={{ minWidth: 140 }}>
                     <strong>{node.hostname}</strong>
                     <div style={{ fontSize: 12, marginTop: 4, color: '#555' }}>
-                      {displayStatus(node.status)}{[node.isOrigin && 'POS REF', node.role === 'BROKER' && 'BROKER'].filter(Boolean).map(l => ` · ${l}`)}
+                      {displayStatus(node.status)}{[node.role === 'BROKER' && 'BROKER'].filter(Boolean).map(l => ` · ${l}`)}
                     </div>
                     {relPos && (
                       <div style={{ fontSize: 11, marginTop: 4, color: '#777', fontFamily: 'monospace' }}>

@@ -185,16 +185,6 @@ export default function NodeCard({ node, selected, onSelect }) {
             operator-set provenance flag for this node's position.
             More actionable at a glance than POSITION_DERIVED, which is
             really about lat/lon-projection mechanics, not trust level. */}
-        {node.isOrigin && (
-          <span
-            title="Position reference node — coordinates used to set array origin"
-            style={{
-              fontSize: 10, color: 'var(--text-primary)',
-              background: 'var(--border)', padding: '1px 5px', borderRadius: 3,
-              fontWeight: 700,
-            }}
-          >POS REF</span>
-        )}
         {node.positionKnown && (
           node.positionStatus === 'surveyed' ? (
             <span

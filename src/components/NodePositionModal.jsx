@@ -64,7 +64,6 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
 
   const centroid = node.gps?.centroid ?? null
   const disagreementM = node.surveyDisagreementM
-  const isPosRef = node.isOrigin
 
   // Escape closes — backdrop click does not (a stray click while
   // refocusing the window, or a text-selection drag ending outside the
@@ -108,7 +107,6 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
       posN:        posN        === '' ? null : parseFloat(posN),
       posAlt:      posAlt      === '' ? null : parseFloat(posAlt),
       posStatus,
-      isOrigin:    isPosRef,
       surveyedLat: surveyedLat === '' ? null : parseFloat(surveyedLat),
       surveyedLon: surveyedLon === '' ? null : parseFloat(surveyedLon),
       surveyedAlt: surveyedAlt === '' ? null : parseFloat(surveyedAlt),
@@ -171,15 +169,6 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>
             Set Position — {node.hostname}
-            {isPosRef && (
-              <span style={{
-                marginLeft: 8, fontSize: 10, fontWeight: 600,
-                color: 'var(--blue)', background: 'var(--blue-dim)',
-                borderRadius: 3, padding: '2px 6px', verticalAlign: 'middle',
-              }}>
-                POS REF
-              </span>
-            )}
           </div>
           <button
             onClick={onClose}

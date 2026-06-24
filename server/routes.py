@@ -514,20 +514,15 @@ async def get_node_position(node_id: str):
 
 @router.put("/nodes/{node_id}/position", response_model=NodePosition, dependencies=[Depends(require_admin)])
 async def set_node_position(node_id: str, req: NodePosition):
-    """Set or update the hub-stored position for a node.
-
-    The unique partial index on is_origin=1 enforces the one-origin
-    invariant at the DB level — a second node trying to claim is_origin=True
-    will get an IntegrityError surfaced as a 409.
-    """
+    """Set or update the hub-stored position for a node."""
     node = await registry.get_node(node_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
 
-    # is_origin on node_positions is now an informational marker only — set
-    # automatically when POST /api/origin/set-from-node is called.  We still
-    # accept it here for backward compat but do not enforce uniqueness or
-    # call clear_origin(); that invariant is managed by set_array_origin().
+    # is_origin on node_positions is a legacy field — nothing sets it true any
+    # more (hub origin provenance lives entirely in array_origin.set_from).
+    # Still accepted here for backward compat with old request bodies, but
+    # has no effect on hub origin behavior.
     await db.upsert_node_position(
         node_id=node_id,
         pos_e=req.pos_e,
@@ -587,6 +582,11 @@ async def set_origin_from_node(
 
     Either way the math is identical — the node's N/E/Alt offset is preserved
     so all other surveyed nodes remain valid with no re-surveying required.
+
+    A node used this way is not given any ongoing "reference node" status —
+    the hub origin is a standalone setting (see PUT /origin for setting it
+    directly, with no node involved at all). Any stale is_origin marker from
+    a previous call is cleared rather than reassigned.
     """
     node = await registry.get_node(node_id)
     if node is None:
@@ -645,7 +645,10 @@ async def set_origin_from_node(
         set_from=node_id,
         set_at=set_at,
     )
-    await db.set_node_as_origin(node_id)
+    # No node is tagged as "the" origin node any more — origin provenance
+    # lives entirely in array_origin.set_from. Clear any marker left over
+    # from an older build that did still tag nodes.
+    await db.clear_origin()
 
     return ArrayOrigin(
         lat=origin_lat,
@@ -671,6 +674,9 @@ async def set_origin_manual(req: ArrayOriginManual):
         set_from=None,
         set_at=set_at,
     )
+    # Switching to a manual origin retires any node's leftover is_origin
+    # marker from a previous set-from-node call.
+    await db.clear_origin()
     return ArrayOrigin(lat=req.lat, lon=req.lon, alt_m=req.alt_m, set_from=None, set_at=set_at)
 
 
@@ -682,6 +688,7 @@ async def clear_origin():
     new origin is set.
     """
     await db.clear_array_origin()
+    await db.clear_origin()
 
 
 # ---------------------------------------------------------------------------
