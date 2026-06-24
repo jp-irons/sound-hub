@@ -106,7 +106,13 @@ export default function DetectionsTab() {
           <input
             type="number" min="0" max="1" step="0.05"
             value={minConf}
-            onChange={e => setMinConf(parseFloat(e.target.value))}
+            onChange={e => {
+              const raw = e.target.value
+              if (raw === '') { setMinConf(0); return }
+              const val = parseFloat(raw)
+              if (Number.isNaN(val)) return
+              setMinConf(Math.min(1, Math.max(0, val)))
+            }}
             style={{ ...sty.input, width: 60 }}
           />
         </label>
