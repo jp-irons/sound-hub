@@ -1,6 +1,6 @@
 # Detections Tab Redesign — Implementation Plan
 
-Status: **proposed, not yet approved for implementation**
+Status: **all 5 slices implemented**
 Last updated: 2026-06-24
 
 ## Goal
@@ -42,7 +42,7 @@ that might change once it's on screen.
 
 ---
 
-### Slice 1 — Move WAV upload to its own tab
+### Slice 1 — Move WAV upload to its own tab — **done**
 
 **Why first:** zero dependencies, immediate declutter, low risk.
 
@@ -56,7 +56,7 @@ Detections tab no longer shows it.
 
 ---
 
-### Slice 2 — Date-range filter (UI first, then real backend)
+### Slice 2 — Date-range filter (UI first, then real backend) — **done**
 
 - **UI:** add a filter bar above the (still-flat, for now) table: preset
   buttons (today / yesterday / last 7 days) + a custom range picker. Wire it
@@ -73,15 +73,17 @@ server, not just a client-side slice of the capped 200/2000-row fetch.
 
 ---
 
-### Slice 3 — Sun-relative time-of-day filter
+### Slice 3 — Sun-relative time-of-day filter — **done**
 
 This is the piece you flagged as separable — treat it as its own
 self-contained unit of work since it has no UI dependency.
 
-- **Backend:** small helper (e.g. `server/suntimes.py`) using the `astral`
+- **Backend:** small helper (`server/suntimes.py`) using the `astral`
   library, taking a date + lat/lon and returning dawn/dusk/day/night window
-  boundaries for that date, with a configurable buffer (default ~45 min)
-  around actual sunrise/sunset for the dawn/dusk windows. Lat/lon comes from
+  boundaries for that date, with a buffer around actual sunrise/sunset for
+  the dawn/dusk windows (30 min before / 90 min after sunrise; 90 min before
+  / 30 min after sunset — asymmetric to match the dawn chorus building for
+  longer than the shorter, front-loaded evening chorus). Lat/lon comes from
   the existing property-level **`array_origin`** table (`db.py:265`,
   `get_array_origin()`) — the same reference datum already used for the
   cartesian node-position math — not a per-node GPS average. One sun-time
@@ -94,28 +96,56 @@ self-contained unit of work since it has no UI dependency.
   bar from slice 2, wired directly to the new param (no client-only stage
   needed here since the UI is trivial — a button group).
 
+**Built differently from the original plan in one important way:** the local
+timezone used to resolve each detection's calendar date (and therefore which
+day's sunrise/sunset it's classified against) is derived dynamically from the
+`array_origin` lat/lon via `timezonefinder`, not hardcoded to
+`Australia/Brisbane`. This was a deliberate correction mid-slice — see
+Decisions log — because the system is intended to also run a second hub from
+a van at varying campsite locations, re-surveying `array_origin` at each new
+site. Hardcoding the timezone would have silently broken (or misclassified)
+results the moment the van hub moved to a different timezone. `classify_many`
+resolves the timezone once per request rather than once per row.
+
 Acceptance: filtering "dawn" on a winter date and a summer date returns
-detections from genuinely different clock-time windows.
+detections from genuinely different clock-time windows. Verified for both
+Brisbane and Denver, CO (opposite hemisphere/season, DST-observing) to confirm
+the dynamic-timezone path doesn't regress on the original target location.
 
 ---
 
-### Slice 4 — Per-species summary list (replaces the flat table)
+### Slice 4 — Per-species summary list (replaces the flat table) — **done**
 
-- **UI:** build the collapsed species-list component against a small
-  hardcoded mock array first (name, count, last-seen) to nail the
-  expand/collapse interaction and visual density, reusing the existing
-  checkbox/label pattern from `DetectionsTab.jsx:165-172`.
-- Expanding a species row fetches/filters that species' individual
-  detections (reuse the slice 2/3 filtered query, plus `species=`) and
-  renders them in the existing table layout, scoped to that one species.
-- **Backend:** add `GET /api/detections/species-summary` — same date-range +
-  time-of-day + min_conf filters as `/api/detections`, returning per-species
-  `{common_name, scientific_name, count, last_seen, avg_confidence}` via a
-  `GROUP BY` query in `db.py`.
-- **Wire-up:** point the species list at the real endpoint.
+- **UI:** `SpeciesSummaryList.jsx` — collapsed rows (name, count, last-seen),
+  expand fetches that species' individual detections (`species=` scoped,
+  then exact-matched client-side against `commonName` so two species
+  sharing a name substring never bleed into each other's expanded rows) and
+  renders them in a small inline table. Shared filter-building and row
+  formatting were pulled out of `DetectionsTab.jsx` into
+  `src/utils/detectionFilters.js` and `src/components/DetectionFormat.jsx` so
+  this component and the main tab build identical params/rows from one
+  source.
+- **Backend:** `GET /api/detections/species-summary` — same date-range +
+  min_conf + species filters as `/api/detections`, returning per-species
+  `{common_name, scientific_name, count, last_seen, avg_confidence}`.
+
+**Built differently from the original plan in one way:** `time_of_day` could
+not be added to the same `GROUP BY` query, because classification is
+per-row (each detection's bucket depends on its own calendar date — see
+slice 3) and can't be expressed as a SQL range. When `time_of_day` is set,
+the endpoint instead fetches up to 2000 raw rows (same ceiling
+`/api/detections` uses), classifies them, and aggregates in Python. **Known
+limitation, not yet fixed:** for a site with more than 2000 matching
+detections in the selected date range, per-species counts under a
+`time_of_day` filter could undercount. A more scalable version would compute
+each calendar day's sun windows and push them into the SQL `WHERE` as a
+union of ranges, avoiding the row cap — worth doing if/when detection volume
+makes this bite in practice.
 
 Acceptance: species list loads fast even with thousands of underlying
-detections, because aggregation happens in SQL, not in the browser.
+detections when no `time_of_day` filter is active, because aggregation
+happens in SQL, not in the browser. (See the row-cap caveat above for the
+`time_of_day` + species-summary combination.)
 
 ---
 
