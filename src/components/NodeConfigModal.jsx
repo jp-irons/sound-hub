@@ -9,6 +9,17 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
   const [isBroker, setIsBroker] = useState(false)
   const [initial, setInitial] = useState(null)
 
+  // Escape closes — backdrop click does not (a stray click while
+  // refocusing the window, or a text-selection drag ending outside the
+  // modal, must not dismiss it).
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -59,7 +70,6 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
-      onClick={onClose}
     >
       <div
         style={{
@@ -68,7 +78,6 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
           borderRadius: 8, padding: 18,
           display: 'flex', flexDirection: 'column', gap: 14,
         }}
-        onClick={e => e.stopPropagation()}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>
