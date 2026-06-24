@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { buildDetectionParams } from '../utils/detectionFilters.js'
 import { ConfBar, formatTime, formatDateTime } from './DetectionFormat.jsx'
+import { useIsMobile } from '../hooks/useBreakpoint.js'
 
 const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
@@ -55,6 +56,7 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
   const [details, setDetails]   = useState({})       // commonName -> rows | 'loading' | 'error'
   const [pinned, setPinned]     = useState(loadPinned)
   const [sortMode, setSortMode] = useState(loadSortMode)
+  const isMobile = useIsMobile()
 
   const fetchSummary = useCallback(async () => {
     try {
@@ -165,12 +167,19 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
       transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
       transition: 'transform 0.15s',
     }),
-    name: { fontWeight: 500, fontSize: 13, flex: 1, minWidth: 0 },
-    sci: { fontStyle: 'italic', color: 'var(--text-muted, #888)', fontSize: 12 },
-    count: {
-      fontSize: 12, color: 'var(--text-muted, #888)',
-      minWidth: 70, textAlign: 'right',
+    name: {
+      fontWeight: 500, fontSize: 13, flex: 1, minWidth: 0,
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
     },
+    sci: {
+      fontStyle: 'italic', color: 'var(--text-muted, #888)', fontSize: 12,
+      flex: '0 1 auto', minWidth: 0,
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    },
+    count: (mobile) => ({
+      fontSize: 12, color: 'var(--text-muted, #888)',
+      minWidth: mobile ? 24 : 70, textAlign: 'right',
+    }),
     lastSeen: {
       fontSize: 12, color: 'var(--text-muted, #888)',
       minWidth: 110, textAlign: 'right',
@@ -205,7 +214,9 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
           <span style={sty.chevron(open)}>▶</span>
           <span style={sty.name}>{s.commonName}</span>
           <span style={sty.sci}>{s.scientificName}</span>
-          <span style={sty.count}>{s.count} detection{s.count !== 1 ? 's' : ''}</span>
+          <span style={sty.count(isMobile)}>
+            {isMobile ? s.count : `${s.count} detection${s.count !== 1 ? 's' : ''}`}
+          </span>
           <span style={sty.lastSeen}>{formatDateTime(s.lastSeen)}</span>
         </div>
         {open && (
