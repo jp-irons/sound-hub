@@ -203,6 +203,19 @@ journalctl -u soundhub -f
 
 ```bash
 cd /opt/sound-hub
+bash deploy/redeploy.sh
+```
+
+This pulls latest, runs `npm ci && npm run build`, and restarts `soundhub`.
+It only runs `pip install -r server/requirements.txt` when that file actually
+changed in the pulled commits, so routine updates skip the (usually
+unnecessary) dependency install automatically. Use `--force-deps` to install
+regardless, or `--skip-deps` to never install, even if the file changed.
+
+Equivalent manual steps, if you'd rather not use the script:
+
+```bash
+cd /opt/sound-hub
 git pull
 npm ci && npm run build
 venv/bin/pip install -r server/requirements.txt   # if dependencies changed

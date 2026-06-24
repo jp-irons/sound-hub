@@ -166,6 +166,39 @@ Acceptance: pinning a species keeps it pinned across a page refresh.
 
 ---
 
+### Mobile polish (post-launch, iPhone pass) — **done**
+
+First mobile pass came out close to right; only small follow-ups needed:
+
+- **Min-confidence field accepted out-of-range values** (e.g. typing `7`),
+  which passed straight through to the server's `ge=0.0, le=1.0` validation
+  and surfaced as a raw 422 error in the UI. Fixed by clamping the value to
+  `[0, 1]` client-side as it's typed, in `DetectionsTab.jsx`, rather than
+  relying on the `<input type="number" min max>` attributes — those only
+  affect the spinner buttons, not direct keyboard entry.
+- **Common name was overwritten by the scientific name on narrow screens.**
+  Root cause: `sty.name` used `flex: 1` (flex-basis `0%`), giving it zero
+  weight in the browser's flex-shrink distribution, while `sty.sci` used
+  `flex: '0 1 auto'` (basis = full text width, nonzero weight) — so when the
+  row didn't fit, all the shrinkage landed on `sci` and none on `name`,
+  leaving `name` at its 0 basis with no `overflow`/`textOverflow` set to
+  clip it, so its text spilled visually over `sci`. Fixed in two parts:
+  ellipsis truncation added to both `name` and `sci` (`SpeciesSummaryList.jsx`)
+  as a baseline, and — since fixing the flex-basis fight cleanly for very
+  narrow widths was more fragile than it was worth — the scientific name is
+  now hidden entirely below the existing 640px `useIsMobile` breakpoint,
+  removing the conflict outright rather than tuning flex weights to share a
+  space too narrow for both.
+- **"X detections" trimmed to just the bare count on mobile** (same
+  `useIsMobile` breakpoint) — not worth a separate title row, and the word
+  added little once everything else in the row was already tight.
+- **Expanded detail view shows full common + scientific name, wrapping
+  normally (no ellipsis)** — but mobile-only; on desktop the collapsed row
+  already shows both in full, so repeating them in the expanded section was
+  pure duplication.
+
+---
+
 ### Future / out of scope for this plan
 
 - Per-species node breakdown (which node(s) detected it) — `node_id` is
