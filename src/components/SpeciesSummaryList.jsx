@@ -231,10 +231,12 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
         </div>
         {open && (
           <div style={sty.detailWrap}>
-            <div style={sty.detailHeader}>
-              <span style={sty.detailName}>{s.commonName}</span>
-              <span style={sty.detailSci}>{s.scientificName}</span>
-            </div>
+            {isMobile && (
+              <div style={sty.detailHeader}>
+                <span style={sty.detailName}>{s.commonName}</span>
+                <span style={sty.detailSci}>{s.scientificName}</span>
+              </div>
+            )}
             {detail === 'loading' && (
               <div style={{ padding: '8px 0', color: 'var(--text-muted, #888)', fontSize: 12 }}>Loading…</div>
             )}
