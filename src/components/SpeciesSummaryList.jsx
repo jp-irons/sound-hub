@@ -213,7 +213,7 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
           />
           <span style={sty.chevron(open)}>▶</span>
           <span style={sty.name}>{s.commonName}</span>
-          <span style={sty.sci}>{s.scientificName}</span>
+          {!isMobile && <span style={sty.sci}>{s.scientificName}</span>}
           <span style={sty.count(isMobile)}>
             {isMobile ? s.count : `${s.count} detection${s.count !== 1 ? 's' : ''}`}
           </span>
