@@ -230,9 +230,9 @@ def derive_relative_positions(
     centroid of the first online BROKER node — a pre-survey display aid only,
     not used for TDOA.
 
-    All nodes with a stored position_relative are projected from the datum,
-    including any node marked is_origin (it sits at its own E/N offset in the
-    array frame, which may not be 0,0).
+    All nodes with a stored position_relative are projected from the datum
+    the same way — there is no node that "is" the origin any more (the hub
+    array origin is a standalone geographic datum, not tied to a node).
     """
     if array_origin is None:
         # Pre-survey fallback: use BROKER GPS centroid as an approximate datum.
@@ -254,9 +254,9 @@ def derive_relative_positions(
             continue
         rel = m["position_relative"]
         m["lat_lon"] = _offset_to_latlon(origin_latlon, rel["eM"], rel["nM"])
-        # Mark non-origin nodes so the UI can distinguish projected vs. direct.
-        if not m.get("is_origin"):
-            m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
+        # Every node's lat/lon is projected from the hub array origin — flag
+        # it so the UI shows that provenance rather than a GPS-centroid guess.
+        m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
 
 
 def map_status(
