@@ -1,4 +1,6 @@
 fastapi
+astral
+timezonefinder
 uvicorn[standard]
 zeroconf
 httpx

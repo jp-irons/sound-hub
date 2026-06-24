@@ -54,6 +54,14 @@ const DATE_PRESETS = [
   { key: 'custom',    label: 'Custom' },
 ]
 
+const TIME_OF_DAY_OPTIONS = [
+  { key: '',          label: 'All day' },
+  { key: 'dawn',       label: 'Dawn' },
+  { key: 'daytime',    label: 'Daytime' },
+  { key: 'dusk',       label: 'Dusk' },
+  { key: 'nighttime',  label: 'Nighttime' },
+]
+
 // Resolve a preset key (or explicit custom from/to date strings) to a
 // {from, to} Date range. Returns null for 'all' (no bound) or an incomplete
 // custom range.
@@ -89,6 +97,8 @@ export default function DetectionsTab() {
   const [datePreset, setDatePreset]   = useState('all')
   const [customFrom, setCustomFrom]   = useState('') // yyyy-mm-dd
   const [customTo, setCustomTo]       = useState('') // yyyy-mm-dd
+  const [timeOfDay, setTimeOfDay]     = useState('') // '' | dawn | daytime | dusk | nighttime
+  const [fetchError, setFetchError]   = useState(null)
 
   const fetchDetections = useCallback(async () => {
     try {
@@ -97,11 +107,18 @@ export default function DetectionsTab() {
       const range = resolveRange(datePreset, customFrom, customTo)
       if (range?.from) params.set('from', range.from.toISOString())
       if (range?.to) params.set('to', range.to.toISOString())
+      if (timeOfDay) params.set('time_of_day', timeOfDay)
       const res = await fetch(`${API_BASE}/detections?${params}`)
-      if (!res.ok) throw new Error(`${res.status}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
       setDetections(await res.json())
-    } catch { /* backend may not be up yet */ }
-  }, [minConf, species, datePreset, customFrom, customTo])
+      setFetchError(null)
+    } catch (err) {
+      setFetchError(err.message ?? String(err))
+    }
+  }, [minConf, species, datePreset, customFrom, customTo, timeOfDay])
 
   useEffect(() => {
     fetchDetections()
@@ -173,6 +190,28 @@ export default function DetectionsTab() {
           </>
         )}
       </div>
+
+      {/* ── Time of day (sun-relative dawn/dusk for the property) ── */}
+      <div style={{ ...sty.row, gap: 8 }}>
+        {TIME_OF_DAY_OPTIONS.map(o => (
+          <button
+            key={o.key || 'all-day'}
+            style={sty.presetBtn(timeOfDay === o.key)}
+            onClick={() => setTimeOfDay(o.key)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+
+      {fetchError && (
+        <div style={{
+          fontSize: 12, padding: '6px 10px', borderRadius: 4,
+          background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+        }}>
+          {fetchError}
+        </div>
+      )}
 
       {/* ── Filter bar ── */}
       <div style={{ ...sty.row, gap: 12 }}>

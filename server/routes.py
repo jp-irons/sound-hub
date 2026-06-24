@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import birdnet_worker, config, db, registry, status_mapper
+from . import birdnet_worker, config, db, registry, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual,
@@ -934,15 +934,38 @@ async def list_detections(
     species: str | None = Query(default=None),
     from_ts: str | None = Query(default=None, alias="from"),
     to_ts: str | None = Query(default=None, alias="to"),
+    time_of_day: str | None = Query(default=None, pattern="^(dawn|dusk|daytime|nighttime)$"),
 ):
     """Return the most recent BirdNET detections, newest first.
 
     species, min_conf, from, and to are optional filters — from/to are
-    inclusive ISO8601 timestamp bounds on analyzed_at.
+    inclusive ISO8601 timestamp bounds on analyzed_at. time_of_day filters
+    against the property's sun-relative dawn/dusk/daytime/nighttime windows
+    (see suntimes.py) computed from the array_origin lat/lon — classification
+    happens here in Python (after the SQL-level filters) rather than as a
+    SQL range, since each row's window depends on its own calendar date.
     """
+    # time_of_day classification is per-row, so over-fetch up to the API
+    # ceiling when it's active rather than truncating to `limit` before
+    # classifying — otherwise most of a `limit`-sized page could get
+    # filtered out and we'd return far fewer rows than requested.
+    fetch_limit = 2000 if time_of_day else limit
     rows = await db.list_detections(
-        limit=limit, min_conf=min_conf, species=species, from_ts=from_ts, to_ts=to_ts,
+        limit=fetch_limit, min_conf=min_conf, species=species, from_ts=from_ts, to_ts=to_ts,
     )
+
+    if time_of_day:
+        origin = await db.get_array_origin()
+        if origin is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Array origin not set — configure the array's reference lat/lon before filtering by time of day",
+            )
+        buckets = suntimes.classify_many(
+            (datetime.fromisoformat(r["analyzed_at"]) for r in rows), origin["lat"], origin["lon"],
+        )
+        rows = [r for r, bucket in zip(rows, buckets) if bucket == time_of_day][:limit]
+
     return [DetectionRecord(**row) for row in rows]
 
 
