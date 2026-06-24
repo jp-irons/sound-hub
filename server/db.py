@@ -466,3 +466,52 @@ async def list_detections(
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def list_species_summary(
+    min_conf: float = 0.0,
+    species: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict]:
+    """Aggregate detections per species (common_name + scientific_name),
+    ordered most-frequent-first.
+
+    Same filter semantics as list_detections (species substring-matches
+    either name field; from_ts/to_ts are inclusive ISO8601 bounds). No
+    time-of-day filtering here — that classification is per-row and depends
+    on each detection's own calendar date, so it can't be expressed as a
+    SQL range; callers needing it (routes.py) fetch raw rows, classify them,
+    and aggregate in Python instead of calling this function.
+    """
+    where = ["confidence >= ?"]
+    params: list = [min_conf]
+
+    if species:
+        where.append("(common_name LIKE ? OR scientific_name LIKE ?)")
+        like = f"%{species}%"
+        params.extend([like, like])
+
+    if from_ts:
+        where.append("analyzed_at >= ?")
+        params.append(from_ts)
+
+    if to_ts:
+        where.append("analyzed_at <= ?")
+        params.append(to_ts)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            f"""SELECT common_name, scientific_name,
+                       COUNT(*) AS count,
+                       MAX(analyzed_at) AS last_seen,
+                       AVG(confidence) AS avg_confidence
+                FROM detections
+                WHERE {' AND '.join(where)}
+                GROUP BY common_name, scientific_name
+                ORDER BY count DESC""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

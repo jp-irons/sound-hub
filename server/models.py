@@ -195,6 +195,18 @@ class DetectionRecord(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SpeciesSummary(BaseModel):
+    """One species' aggregated detection stats — returned by
+    GET /api/detections/species-summary."""
+    common_name: str = Field(alias="commonName")
+    scientific_name: str = Field(alias="scientificName")
+    count: int
+    last_seen: str = Field(alias="lastSeen")
+    avg_confidence: float = Field(alias="avgConfidence")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float

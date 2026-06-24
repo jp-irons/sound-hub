@@ -1,130 +1,14 @@
-import { useState, useEffect, useCallback } from 'react'
-
-const API_BASE = '/api'
-const POLL_INTERVAL_MS = 5000
-
-const CONF_HIGH  = 0.8
-const CONF_MED   = 0.5
-
-function confidenceColour(conf) {
-  if (conf >= CONF_HIGH) return 'var(--green,  #4caf50)'
-  if (conf >= CONF_MED)  return 'var(--yellow, #ffc107)'
-  return 'var(--red, #f44336)'
-}
-
-function ConfBar({ value }) {
-  const pct = Math.round(value * 100)
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-      <div style={{
-        width: 80, height: 8, background: 'var(--surface2, #2a2a2a)',
-        borderRadius: 4, overflow: 'hidden',
-      }}>
-        <div style={{
-          width: `${pct}%`, height: '100%',
-          background: confidenceColour(value),
-          borderRadius: 4,
-          transition: 'width 0.2s',
-        }} />
-      </div>
-      <span style={{ fontSize: 11, color: 'var(--text-muted, #888)', minWidth: 32 }}>
-        {pct}%
-      </span>
-    </div>
-  )
-}
-
-function formatTime(iso) {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  } catch { return iso }
-}
-
-// Local-day boundaries (browser timezone) for the date-range presets.
-function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x }
-function endOfDay(d)   { const x = new Date(d); x.setHours(23, 59, 59, 999); return x }
-
-const DATE_PRESETS = [
-  { key: 'all',       label: 'All' },
-  { key: 'today',     label: 'Today' },
-  { key: 'yesterday', label: 'Yesterday' },
-  { key: 'last7',     label: 'Last 7 days' },
-  { key: 'custom',    label: 'Custom' },
-]
-
-const TIME_OF_DAY_OPTIONS = [
-  { key: '',          label: 'All day' },
-  { key: 'dawn',       label: 'Dawn' },
-  { key: 'daytime',    label: 'Daytime' },
-  { key: 'dusk',       label: 'Dusk' },
-  { key: 'nighttime',  label: 'Nighttime' },
-]
-
-// Resolve a preset key (or explicit custom from/to date strings) to a
-// {from, to} Date range. Returns null for 'all' (no bound) or an incomplete
-// custom range.
-function resolveRange(preset, customFrom, customTo) {
-  const now = new Date()
-  switch (preset) {
-    case 'today':
-      return { from: startOfDay(now), to: endOfDay(now) }
-    case 'yesterday': {
-      const y = new Date(now); y.setDate(y.getDate() - 1)
-      return { from: startOfDay(y), to: endOfDay(y) }
-    }
-    case 'last7': {
-      const start = new Date(now); start.setDate(start.getDate() - 6)
-      return { from: startOfDay(start), to: endOfDay(now) }
-    }
-    case 'custom': {
-      if (!customFrom && !customTo) return null
-      return {
-        from: customFrom ? startOfDay(new Date(customFrom)) : null,
-        to: customTo ? endOfDay(new Date(customTo)) : null,
-      }
-    }
-    default:
-      return null // 'all'
-  }
-}
+import { useState } from 'react'
+import { DATE_PRESETS, TIME_OF_DAY_OPTIONS } from '../utils/detectionFilters.js'
+import SpeciesSummaryList from './SpeciesSummaryList.jsx'
 
 export default function DetectionsTab() {
-  const [detections, setDetections]   = useState([])
   const [minConf, setMinConf]         = useState(0.0)
   const [species, setSpecies]         = useState('')
   const [datePreset, setDatePreset]   = useState('all')
   const [customFrom, setCustomFrom]   = useState('') // yyyy-mm-dd
   const [customTo, setCustomTo]       = useState('') // yyyy-mm-dd
   const [timeOfDay, setTimeOfDay]     = useState('') // '' | dawn | daytime | dusk | nighttime
-  const [fetchError, setFetchError]   = useState(null)
-
-  const fetchDetections = useCallback(async () => {
-    try {
-      const params = new URLSearchParams({ limit: 200, min_conf: minConf })
-      if (species.trim()) params.set('species', species.trim())
-      const range = resolveRange(datePreset, customFrom, customTo)
-      if (range?.from) params.set('from', range.from.toISOString())
-      if (range?.to) params.set('to', range.to.toISOString())
-      if (timeOfDay) params.set('time_of_day', timeOfDay)
-      const res = await fetch(`${API_BASE}/detections?${params}`)
-      if (!res.ok) {
-        const body = await res.json().catch(() => null)
-        throw new Error(body?.detail ?? `${res.status}`)
-      }
-      setDetections(await res.json())
-      setFetchError(null)
-    } catch (err) {
-      setFetchError(err.message ?? String(err))
-    }
-  }, [minConf, species, datePreset, customFrom, customTo, timeOfDay])
-
-  useEffect(() => {
-    fetchDetections()
-    const t = setInterval(fetchDetections, POLL_INTERVAL_MS)
-    return () => clearInterval(t)
-  }, [fetchDetections])
 
   const sty = {
     root: {
@@ -146,19 +30,6 @@ export default function DetectionsTab() {
       color: active ? '#fff' : 'var(--text-muted, #888)',
       cursor: 'pointer', whiteSpace: 'nowrap',
     }),
-    table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
-    th: {
-      textAlign: 'left', padding: '6px 10px',
-      borderBottom: '1px solid var(--border, #333)',
-      color: 'var(--text-muted, #888)', fontWeight: 500,
-      position: 'sticky', top: 0,
-      background: 'var(--surface1, #1e1e1e)',
-    },
-    td: {
-      padding: '6px 10px',
-      borderBottom: '1px solid var(--border-faint, #2a2a2a)',
-      color: 'var(--text, #eee)',
-    },
   }
 
   return (
@@ -191,7 +62,7 @@ export default function DetectionsTab() {
         )}
       </div>
 
-      {/* ── Time of day (sun-relative dawn/dusk for the property) ── */}
+      {/* ── Time of day (sun-relative dawn/dusk, anchored to array_origin) ── */}
       <div style={{ ...sty.row, gap: 8 }}>
         {TIME_OF_DAY_OPTIONS.map(o => (
           <button
@@ -204,19 +75,10 @@ export default function DetectionsTab() {
         ))}
       </div>
 
-      {fetchError && (
-        <div style={{
-          fontSize: 12, padding: '6px 10px', borderRadius: 4,
-          background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
-        }}>
-          {fetchError}
-        </div>
-      )}
-
       {/* ── Filter bar ── */}
       <div style={{ ...sty.row, gap: 12 }}>
         <label style={{ fontSize: 12, color: 'var(--text-muted, #888)', display: 'flex', alignItems: 'center', gap: 6 }}>
-          Species filter
+          Species search
           <input
             type="text" placeholder="e.g. Kookaburra"
             value={species}
@@ -233,49 +95,17 @@ export default function DetectionsTab() {
             style={{ ...sty.input, width: 60 }}
           />
         </label>
-        <span style={{ fontSize: 11, color: 'var(--text-muted, #888)' }}>
-          {detections.length} record{detections.length !== 1 ? 's' : ''}
-        </span>
       </div>
 
-      {/* ── Table ── */}
-      <div style={{ flex: 1, overflow: 'auto', background: 'var(--surface1, #1e1e1e)', borderRadius: 8, border: '1px solid var(--border, #333)' }}>
-        {detections.length === 0
-          ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted, #888)', fontSize: 13 }}>
-              No detections yet.
-            </div>
-          )
-          : (
-            <table style={sty.table}>
-              <thead>
-                <tr>
-                  <th style={sty.th}>Time</th>
-                  <th style={sty.th}>Common name</th>
-                  <th style={sty.th}>Scientific name</th>
-                  <th style={sty.th}>Confidence</th>
-                  <th style={sty.th}>Source</th>
-                  <th style={sty.th}>Offset</th>
-                </tr>
-              </thead>
-              <tbody>
-                {detections.map(d => (
-                  <tr key={d.id} style={{ cursor: 'default' }}>
-                    <td style={sty.td}>{formatTime(d.analyzedAt)}</td>
-                    <td style={{ ...sty.td, fontWeight: 500 }}>{d.commonName}</td>
-                    <td style={{ ...sty.td, fontStyle: 'italic', color: 'var(--text-muted, #888)' }}>{d.scientificName}</td>
-                    <td style={sty.td}><ConfBar value={d.confidence} /></td>
-                    <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>{d.source ?? '—'}</td>
-                    <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
-                      {d.startSec != null ? `${d.startSec}–${d.endSec}s` : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )
-        }
-      </div>
+      {/* ── Species list ── */}
+      <SpeciesSummaryList
+        minConf={minConf}
+        species={species}
+        datePreset={datePreset}
+        customFrom={customFrom}
+        customTo={customTo}
+        timeOfDay={timeOfDay}
+      />
     </div>
   )
 }

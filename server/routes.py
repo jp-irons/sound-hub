@@ -16,7 +16,7 @@ from .models import (
     ArrayOrigin, ArrayOriginManual,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeConfigRequest, NodePosition, NodeRegisterRequest, NodeView,
-    TdoaRequest, TdoaResponse, LatLon,
+    SpeciesSummary, TdoaRequest, TdoaResponse, LatLon,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -967,6 +967,79 @@ async def list_detections(
         rows = [r for r, bucket in zip(rows, buckets) if bucket == time_of_day][:limit]
 
     return [DetectionRecord(**row) for row in rows]
+
+
+@router.get("/detections/species-summary", response_model=list[SpeciesSummary])
+async def species_summary(
+    min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+    species: str | None = Query(default=None),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+    time_of_day: str | None = Query(default=None, pattern="^(dawn|dusk|daytime|nighttime)$"),
+):
+    """Return per-species detection counts (count, last-seen, avg confidence),
+    most-frequent-first — feeds the collapsible species list in the
+    Detections tab.
+
+    species/min_conf/from/to filter the same way as GET /detections.
+    time_of_day is handled differently from the SQL GROUP BY path: since
+    classification depends on each row's own calendar date, applying it
+    requires fetching raw rows first and aggregating in Python. That fetch
+    is capped at 2000 rows (the same ceiling GET /detections uses) — for a
+    site with more than 2000 matching detections in the selected date range,
+    per-species counts under a time_of_day filter could undercount. This is
+    an acceptable v1 limitation; a more scalable version would compute each
+    calendar day's sun windows and push them into the SQL WHERE clause as a
+    union of ranges, avoiding the row cap entirely.
+    """
+    if not time_of_day:
+        rows = await db.list_species_summary(
+            min_conf=min_conf, species=species, from_ts=from_ts, to_ts=to_ts,
+        )
+        return [SpeciesSummary(**row) for row in rows]
+
+    origin = await db.get_array_origin()
+    if origin is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Array origin not set — configure the array's reference lat/lon before filtering by time of day",
+        )
+
+    raw = await db.list_detections(
+        limit=2000, min_conf=min_conf, species=species, from_ts=from_ts, to_ts=to_ts,
+    )
+    buckets = suntimes.classify_many(
+        (datetime.fromisoformat(r["analyzed_at"]) for r in raw), origin["lat"], origin["lon"],
+    )
+    matched = [r for r, bucket in zip(raw, buckets) if bucket == time_of_day]
+
+    agg: dict[tuple[str, str], dict] = {}
+    for r in matched:
+        key = (r["common_name"], r["scientific_name"])
+        entry = agg.setdefault(key, {
+            "common_name": r["common_name"],
+            "scientific_name": r["scientific_name"],
+            "count": 0,
+            "last_seen": r["analyzed_at"],
+            "_conf_sum": 0.0,
+        })
+        entry["count"] += 1
+        entry["_conf_sum"] += r["confidence"]
+        if r["analyzed_at"] > entry["last_seen"]:
+            entry["last_seen"] = r["analyzed_at"]
+
+    summaries = [
+        SpeciesSummary(
+            common_name=v["common_name"],
+            scientific_name=v["scientific_name"],
+            count=v["count"],
+            last_seen=v["last_seen"],
+            avg_confidence=v["_conf_sum"] / v["count"],
+        )
+        for v in agg.values()
+    ]
+    summaries.sort(key=lambda s: s.count, reverse=True)
+    return summaries
 
 
 @router.post("/detections/analyze", response_model=list[DetectionRecord], status_code=201, dependencies=[Depends(require_admin)])
