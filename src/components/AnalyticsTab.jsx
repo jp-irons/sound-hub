@@ -61,18 +61,7 @@ export default function AnalyticsTab() {
 
   const sty = {
     root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1 },
-    cards: { display: 'flex', flexWrap: 'wrap', gap: 12 },
-    card: {
-      flex: '1 1 220px', minWidth: 200,
-      background: 'var(--surface1, #1e1e1e)', border: '1px solid var(--border, #333)',
-      borderRadius: 8, padding: '12px 14px',
-    },
-    cardNode: { fontWeight: 600, fontSize: 13, marginBottom: 8 },
-    statRow: {
-      display: 'flex', justifyContent: 'space-between', fontSize: 12,
-      padding: '3px 0', color: 'var(--text-muted, #888)',
-    },
-    statVal: { color: 'var(--text, #eee)', fontWeight: 500 },
+    nodeCol: { fontWeight: 600, color: 'var(--text, #eee)' },
     toolbar: {
       display: 'flex', alignItems: 'center', gap: 8,
     },
@@ -126,27 +115,40 @@ export default function AnalyticsTab() {
         {summary.length === 0 ? (
           <div style={sty.empty}>No audio pushes recorded yet.</div>
         ) : (
-          <div style={sty.cards}>
-            {summary.map(s => {
-              const zeroPct = s.totalPushes ? Math.round((s.pushesZeroDetections / s.totalPushes) * 100) : 0
-              return (
-                <div key={s.nodeId ?? 'unknown'} style={sty.card}>
-                  <div style={sty.cardNode}>{s.nodeId ?? '(unknown node)'}</div>
-                  <div style={sty.statRow}><span>Total pushes</span><span style={sty.statVal}>{s.totalPushes}</span></div>
-                  <div style={sty.statRow}><span>Self-triggered</span><span style={sty.statVal}>{s.triggeredPushes}</span></div>
-                  <div style={sty.statRow}><span>With detection</span><span style={sty.statVal}>{s.pushesWithDetections}</span></div>
-                  <div style={sty.statRow}><span>Zero detections</span><span style={sty.statVal}>{s.pushesZeroDetections} ({zeroPct}%)</span></div>
-                  <div style={sty.statRow}>
-                    <span>Avg near-miss conf.</span>
-                    <span style={sty.statVal}>
-                      {s.avgNearMissConfidence != null ? `${Math.round(s.avgNearMissConfidence * 100)}%` : '—'}
-                    </span>
-                  </div>
-                  <div style={sty.statRow}><span>Last push</span><span style={sty.statVal}>{relativeTime(s.lastPushAt)}</span></div>
-                  <div style={sty.statRow}><span>Last self-trigger</span><span style={sty.statVal}>{relativeTime(s.lastTriggerAt)}</span></div>
-                </div>
-              )
-            })}
+          <div style={sty.tableWrap}>
+            <table style={sty.table}>
+              <thead>
+                <tr>
+                  <th style={sty.th}>Node</th>
+                  <th style={sty.th}>Total pushes</th>
+                  <th style={sty.th}>Self-triggered</th>
+                  <th style={sty.th}>With detection</th>
+                  <th style={sty.th}>Zero detections</th>
+                  <th style={sty.th}>Avg near-miss conf.</th>
+                  <th style={sty.th}>Last push</th>
+                  <th style={sty.th}>Last self-trigger</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.map(s => {
+                  const zeroPct = s.totalPushes ? Math.round((s.pushesZeroDetections / s.totalPushes) * 100) : 0
+                  return (
+                    <tr key={s.nodeId ?? 'unknown'}>
+                      <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
+                      <td style={sty.td}>{s.totalPushes}</td>
+                      <td style={sty.td}>{s.triggeredPushes}</td>
+                      <td style={sty.td}>{s.pushesWithDetections}</td>
+                      <td style={sty.td}>{s.pushesZeroDetections} ({zeroPct}%)</td>
+                      <td style={sty.td}>
+                        {s.avgNearMissConfidence != null ? `${Math.round(s.avgNearMissConfidence * 100)}%` : '—'}
+                      </td>
+                      <td style={sty.td}>{relativeTime(s.lastPushAt)}</td>
+                      <td style={sty.td}>{relativeTime(s.lastTriggerAt)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
