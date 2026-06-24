@@ -185,6 +185,16 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
       minWidth: 110, textAlign: 'right',
     },
     detailWrap: { padding: '0 12px 10px 34px' },
+    detailHeader: { marginBottom: 8 },
+    detailName: {
+      display: 'block', fontWeight: 600, fontSize: 13,
+      whiteSpace: 'normal', overflowWrap: 'break-word',
+    },
+    detailSci: {
+      display: 'block', fontStyle: 'italic', fontSize: 12,
+      color: 'var(--text-muted, #888)',
+      whiteSpace: 'normal', overflowWrap: 'break-word',
+    },
     table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
     th: {
       textAlign: 'left', padding: '4px 8px',
@@ -221,6 +231,10 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
         </div>
         {open && (
           <div style={sty.detailWrap}>
+            <div style={sty.detailHeader}>
+              <span style={sty.detailName}>{s.commonName}</span>
+              <span style={sty.detailSci}>{s.scientificName}</span>
+            </div>
             {detail === 'loading' && (
               <div style={{ padding: '8px 0', color: 'var(--text-muted, #888)', fontSize: 12 }}>Loading…</div>
             )}
