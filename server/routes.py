@@ -13,10 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import birdnet_worker, config, db, registry, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
-    ArrayOrigin, ArrayOriginManual,
+    ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
-    NodeConfigRequest, NodePosition, NodeRegisterRequest, NodeView,
-    SpeciesSummary, TdoaRequest, TdoaResponse, LatLon,
+    NodeAudioSummary, NodeConfigRequest, NodePosition, NodeRegisterRequest,
+    NodeView, SpeciesSummary, TdoaRequest, TdoaResponse, LatLon,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -756,24 +756,48 @@ async def audio_push(
     log.info("audio push id=%s node=%s from %s — %d bytes → %s",
               requestId, nodeId, srcMac, len(data), fname)
 
+    triggered = requestId is None
+
     if not birdnet_worker.ready():
         log.warning("audio push id=%s node=%s — BirdNET not yet loaded, skipping analysis",
                      requestId, nodeId)
+        await db.insert_audio_event(
+            node_id=nodeId, triggered=triggered, received_at=_now_iso(),
+            bytes_=len(data), analysis_status="skipped_not_ready",
+        )
         return
 
     try:
         loop = asyncio.get_event_loop()
+        # analyze_wav_full runs at min_conf=0.0 so we can see the best
+        # candidate even if it falls below the persisted-detection
+        # threshold — see audio_events.top_confidence/top_species.
         raw = await loop.run_in_executor(
-            None, functools.partial(birdnet_worker.analyze_wav, fpath, use_geo=True),
+            None, functools.partial(birdnet_worker.analyze_wav_full, fpath, use_geo=True),
         )
     except Exception:
         log.exception("audio push id=%s node=%s — BirdNET analysis failed", requestId, nodeId)
+        await db.insert_audio_event(
+            node_id=nodeId, triggered=triggered, received_at=_now_iso(),
+            bytes_=len(data), analysis_status="error",
+        )
         return
 
-    if raw:
-        await db.insert_detections(fname, _now_iso(), raw, node_id=nodeId)
+    persisted = [d for d in raw if d.get("confidence", 0.0) >= birdnet_worker.DEFAULT_MIN_CONF]
+    top = max(raw, key=lambda d: d.get("confidence", 0.0)) if raw else None
+
+    if persisted:
+        await db.insert_detections(fname, _now_iso(), persisted, node_id=nodeId)
         log.info("audio push id=%s node=%s — %d detection(s) registered",
-                  requestId, nodeId, len(raw))
+                  requestId, nodeId, len(persisted))
+
+    await db.insert_audio_event(
+        node_id=nodeId, triggered=triggered, received_at=_now_iso(),
+        bytes_=len(data), analysis_status="analyzed",
+        detection_count=len(persisted),
+        top_confidence=top.get("confidence") if top else None,
+        top_species=top.get("common_name") if top else None,
+    )
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
@@ -860,6 +884,60 @@ async def request_sample(node_id: str, req: AudioSampleRequest):
     log.info("audio pull relayed -- id=%s node=%s mac=%s [%s ... %s]",
              request_id, node_id, target_mac, req.t_start_us, req.t_end_us)
     return {"requestId": request_id, "status": "relayed"}
+
+
+# ---------------------------------------------------------------------------
+# Audio analytics — diagnostic visibility into the trigger/BirdNET pipeline
+# ---------------------------------------------------------------------------
+
+@router.get("/analytics/audio", response_model=AudioAnalytics, dependencies=[Depends(require_viewer)])
+async def audio_analytics(
+    limit: int = Query(default=200, ge=1, le=2000),
+    node_id: str | None = Query(default=None, alias="nodeId"),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+):
+    """Return audio-push event history + per-node summary stats.
+
+    Every push to POST /api/audio/push is recorded in audio_events
+    regardless of BirdNET outcome — this is the only place that shows
+    pushes which never produced a persisted detection (BirdNET ran but
+    scored everything below threshold, or hadn't loaded yet, or errored).
+    Pairs with GET /api/detections, which only ever shows the hits.
+
+    `summary` is one row per node_id (per-node stat cards); `events` is the
+    raw push history (recent-events table), both filtered the same way by
+    node_id/from/to.
+    """
+    raw_events = await db.list_audio_events(limit=limit, node_id=node_id, from_ts=from_ts, to_ts=to_ts)
+    raw_summary = await db.audio_event_summary(from_ts=from_ts, to_ts=to_ts)
+    if node_id:
+        raw_summary = [r for r in raw_summary if r["node_id"] == node_id]
+
+    summary = [
+        NodeAudioSummary(
+            node_id=r["node_id"],
+            total_pushes=r["total_pushes"],
+            triggered_pushes=r["triggered_pushes"] or 0,
+            pushes_with_detections=r["pushes_with_detections"] or 0,
+            pushes_zero_detections=r["pushes_zero_detections"] or 0,
+            detection_rate=(r["pushes_with_detections"] or 0) / r["total_pushes"] if r["total_pushes"] else 0.0,
+            last_push_at=r["last_push_at"],
+            last_trigger_at=r["last_trigger_at"],
+            avg_near_miss_confidence=r["avg_near_miss_confidence"],
+        )
+        for r in raw_summary
+    ]
+    events = [
+        AudioEventRecord(
+            id=r["id"], node_id=r["node_id"], triggered=bool(r["triggered"]),
+            received_at=r["received_at"], bytes=r["bytes"],
+            analysis_status=r["analysis_status"], detection_count=r["detection_count"],
+            top_confidence=r["top_confidence"], top_species=r["top_species"],
+        )
+        for r in raw_events
+    ]
+    return AudioAnalytics(summary=summary, events=events)
 
 
 # ---------------------------------------------------------------------------

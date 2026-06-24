@@ -207,6 +207,51 @@ class SpeciesSummary(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AudioEventRecord(BaseModel):
+    """One audio push event — returned by GET /api/analytics/audio.
+
+    Recorded for every push to POST /api/audio/push regardless of BirdNET
+    outcome, unlike `detections` rows which only exist for pushes that
+    cleared the persisted-detection confidence threshold.
+    """
+    id: int
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    triggered: bool
+    received_at: str = Field(alias="receivedAt")
+    bytes: int
+    analysis_status: str = Field(alias="analysisStatus")
+    detection_count: int = Field(alias="detectionCount")
+    top_confidence: Optional[float] = Field(default=None, alias="topConfidence")
+    top_species: Optional[str] = Field(default=None, alias="topSpecies")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NodeAudioSummary(BaseModel):
+    """Per-node aggregate of audio_events — feeds the Analytics tab's stat
+    cards. detection_rate is computed here (not in SQL) as
+    pushes_with_detections / total_pushes."""
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    total_pushes: int = Field(alias="totalPushes")
+    triggered_pushes: int = Field(alias="triggeredPushes")
+    pushes_with_detections: int = Field(alias="pushesWithDetections")
+    pushes_zero_detections: int = Field(alias="pushesZeroDetections")
+    detection_rate: float = Field(alias="detectionRate")
+    last_push_at: Optional[str] = Field(default=None, alias="lastPushAt")
+    last_trigger_at: Optional[str] = Field(default=None, alias="lastTriggerAt")
+    avg_near_miss_confidence: Optional[float] = Field(default=None, alias="avgNearMissConfidence")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AudioAnalytics(BaseModel):
+    """Response for GET /api/analytics/audio."""
+    summary: list[NodeAudioSummary]
+    events: list[AudioEventRecord]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float

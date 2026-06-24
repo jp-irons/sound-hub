@@ -93,6 +93,27 @@ CREATE TABLE IF NOT EXISTS array_origin (
     set_from TEXT,    -- node_id whose GPS centroid was used (audit trail)
     set_at   TEXT NOT NULL
 );
+
+-- One row per audio push received at POST /api/audio/push, regardless of
+-- BirdNET outcome.  This is the diagnostic record that list_detections()
+-- can't provide: detections are only written when BirdNET clears the
+-- persisted-detection confidence threshold, so a node that pushes audio but
+-- never gets a hit (trigger too strict, threshold too strict, etc.) leaves
+-- no trace anywhere else.  top_confidence/top_species capture BirdNET's
+-- single best candidate for the chunk even when it falls below threshold —
+-- the "near miss" signal needed to tell trigger-sensitivity problems apart
+-- from BirdNET-threshold problems.
+CREATE TABLE IF NOT EXISTS audio_events (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id          TEXT,            -- nodes.id (hostname); NULL if srcMac didn't map to a known node
+    triggered        INTEGER NOT NULL, -- 1 = self-triggered push (no requestId), 0 = hub-requested pull
+    received_at      TEXT NOT NULL,   -- ISO8601 UTC, when the push hit the hub
+    bytes            INTEGER NOT NULL,
+    analysis_status  TEXT NOT NULL,   -- 'analyzed' | 'skipped_not_ready' | 'error'
+    detection_count   INTEGER DEFAULT 0,  -- rows actually persisted to `detections` (>= threshold)
+    top_confidence    REAL,               -- best raw candidate confidence, any threshold (NULL if no candidates at all)
+    top_species       TEXT                -- common_name of the top candidate, NULL if none
+);
 """
 
 # Values for `approval_status`. New nodes land as PENDING — discovery alone
@@ -462,6 +483,114 @@ async def list_detections(
             f"""SELECT * FROM detections
                 WHERE {' AND '.join(where)}
                 ORDER BY analyzed_at DESC, id DESC LIMIT ?""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def insert_audio_event(
+    *,
+    node_id: str | None,
+    triggered: bool,
+    received_at: str,
+    bytes_: int,
+    analysis_status: str,
+    detection_count: int = 0,
+    top_confidence: float | None = None,
+    top_species: str | None = None,
+) -> None:
+    """Record one push received at POST /api/audio/push, regardless of outcome.
+
+    analysis_status is one of 'analyzed' | 'skipped_not_ready' | 'error'.
+    """
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT INTO audio_events
+               (node_id, triggered, received_at, bytes, analysis_status,
+                detection_count, top_confidence, top_species)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (node_id, 1 if triggered else 0, received_at, bytes_, analysis_status,
+             detection_count, top_confidence, top_species),
+        )
+        await conn.commit()
+
+
+async def list_audio_events(
+    limit: int = 200,
+    node_id: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict]:
+    """Return the most recent audio push events, newest first.
+
+    Same from_ts/to_ts semantics as list_detections (inclusive ISO8601
+    bounds on received_at).
+    """
+    where = ["1=1"]
+    params: list = []
+
+    if node_id:
+        where.append("node_id = ?")
+        params.append(node_id)
+    if from_ts:
+        where.append("received_at >= ?")
+        params.append(from_ts)
+    if to_ts:
+        where.append("received_at <= ?")
+        params.append(to_ts)
+
+    params.append(limit)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            f"""SELECT * FROM audio_events
+                WHERE {' AND '.join(where)}
+                ORDER BY received_at DESC, id DESC LIMIT ?""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def audio_event_summary(
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> list[dict]:
+    """Aggregate audio_events per node — feeds the Analytics tab's stat cards.
+
+    Returns one row per node_id with: total pushes, triggered-push count,
+    pushes with >=1 detection, pushes with zero detections, last push time,
+    last trigger time (triggered=1 only), and the average top_confidence
+    among zero-detection pushes (the "how close were the misses" signal —
+    NULL if there are no zero-detection pushes in range).
+    """
+    where = ["1=1"]
+    params: list = []
+    if from_ts:
+        where.append("received_at >= ?")
+        params.append(from_ts)
+    if to_ts:
+        where.append("received_at <= ?")
+        params.append(to_ts)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            f"""SELECT
+                    node_id,
+                    COUNT(*) AS total_pushes,
+                    SUM(triggered) AS triggered_pushes,
+                    SUM(CASE WHEN detection_count > 0 THEN 1 ELSE 0 END) AS pushes_with_detections,
+                    SUM(CASE WHEN detection_count = 0 THEN 1 ELSE 0 END) AS pushes_zero_detections,
+                    MAX(received_at) AS last_push_at,
+                    MAX(CASE WHEN triggered = 1 THEN received_at ELSE NULL END) AS last_trigger_at,
+                    AVG(CASE WHEN detection_count = 0 THEN top_confidence ELSE NULL END) AS avg_near_miss_confidence
+                FROM audio_events
+                WHERE {' AND '.join(where)}
+                GROUP BY node_id
+                ORDER BY total_pushes DESC""",
             params,
         )
         rows = await cursor.fetchall()

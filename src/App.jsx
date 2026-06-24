@@ -4,6 +4,7 @@ import NodeSidebar from './components/NodeSidebar.jsx'
 import MapView from './components/MapView.jsx'
 import NodeDetail from './components/NodeDetail.jsx'
 import DetectionsTab from './components/DetectionsTab.jsx'
+import AnalyticsTab from './components/AnalyticsTab.jsx'
 import ToolsTab from './components/ToolsTab.jsx'
 import AuthOverlay from './components/AuthOverlay.jsx'
 import UsersTab from './components/UsersTab.jsx'
@@ -15,7 +16,7 @@ const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
 
 const TAB_KEY = 'app.activeTab'
-const TABS = ['map', 'detections', 'tools', 'users', 'settings']
+const TABS = ['map', 'detections', 'analytics', 'tools', 'users', 'settings']
 
 function loadTab() {
   try {
@@ -345,6 +346,7 @@ export default function App() {
       }}>
         <button style={tabStyle('map')}        onClick={() => setTab('map')}>Map</button>
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
+        <button style={tabStyle('analytics')}  onClick={() => setTab('analytics')}>Analytics</button>
 
         {isAdmin && (
           <button style={tabStyle('tools')} onClick={() => setTab('tools')}>Tools</button>
@@ -480,6 +482,7 @@ export default function App() {
       )}
 
       {tab === 'detections' && <DetectionsTab />}
+      {tab === 'analytics' && <AnalyticsTab />}
       {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
       {tab === 'settings' && isAdmin && <SettingsTab />}

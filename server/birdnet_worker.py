@@ -31,19 +31,11 @@ def ready() -> bool:
     return _analyzer is not None
 
 
-def analyze_wav(
-    path: str,
-    *,
-    use_geo: bool = False,
-    min_conf: float = 0.5,
-) -> list[dict]:
-    """Analyse a WAV file and return a list of detection dicts.
+DEFAULT_MIN_CONF = 0.5
 
-    Each dict contains:
-        common_name, scientific_name, start_time, end_time, confidence
 
-    Raises RuntimeError if called before init().
-    """
+def _analyze(path: str, *, use_geo: bool, min_conf: float) -> list[dict]:
+    """Shared implementation — analyse a WAV at the given min_conf cutoff."""
     if _analyzer is None:
         raise RuntimeError("BirdNET worker not initialised — call init() first")
 
@@ -60,3 +52,34 @@ def analyze_wav(
             recording.analyze()
 
     return recording.detections or []
+
+
+def analyze_wav(
+    path: str,
+    *,
+    use_geo: bool = False,
+    min_conf: float = DEFAULT_MIN_CONF,
+) -> list[dict]:
+    """Analyse a WAV file and return a list of detection dicts.
+
+    Each dict contains:
+        common_name, scientific_name, start_time, end_time, confidence
+
+    Raises RuntimeError if called before init().
+    """
+    return _analyze(path, use_geo=use_geo, min_conf=min_conf)
+
+
+def analyze_wav_full(path: str, *, use_geo: bool = False) -> list[dict]:
+    """Analyse a WAV file and return EVERY candidate BirdNET considered,
+    regardless of confidence — i.e. min_conf=0.0.
+
+    Used for diagnostics (audio_events.top_confidence/top_species): lets a
+    caller see the best candidate even when it falls below
+    DEFAULT_MIN_CONF and would otherwise never be persisted anywhere.
+    Callers still apply their own threshold before persisting to the
+    `detections` table — this function does not replace that filtering.
+
+    Raises RuntimeError if called before init().
+    """
+    return _analyze(path, use_geo=use_geo, min_conf=0.0)
