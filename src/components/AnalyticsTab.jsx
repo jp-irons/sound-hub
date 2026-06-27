@@ -19,6 +19,20 @@ function relativeTime(isoString) {
   return `${Math.floor(diff / 86400000)}d ago`
 }
 
+// trigger_events timestamps are node-clock microseconds (t_us), not ISO
+// strings — convert once at the call site so the shared formatTime /
+// formatDateTime / relativeTime helpers (which all expect ISO) still work.
+function tUsToIso(tUs) {
+  if (tUs == null) return null
+  return new Date(tUs / 1000).toISOString()
+}
+
+function ratioColour(ratio) {
+  if (ratio >= 6.0) return 'var(--green, #4caf50)'
+  if (ratio >= 3.0) return 'var(--yellow, #ffc107)'
+  return 'var(--text-muted, #888)'
+}
+
 const STATUS_LABEL = {
   analyzed: 'Analyzed',
   skipped_not_ready: 'Skipped (BirdNET not ready)',
@@ -35,6 +49,8 @@ export default function AnalyticsTab() {
   const [data, setData]   = useState(null)
   const [error, setError] = useState(null)
   const [nodeFilter, setNodeFilter] = useState('')
+  const [triggerData, setTriggerData]   = useState(null)
+  const [triggerError, setTriggerError] = useState(null)
   const isMobile = useIsMobile()
 
   const fetchAnalytics = useCallback(async () => {
@@ -53,11 +69,37 @@ export default function AnalyticsTab() {
     }
   }, [nodeFilter])
 
+  // Trigger-diagnostics: per-block dual-gate ratios pulled from each node's
+  // /app/api/trigger-diag ring buffer (only near-misses + fires are ever
+  // recorded on the node side — see TriggerDiagnostics.hpp). Built to
+  // diagnose why the v2 AND-gate trigger stopped firing for some species.
+  const fetchTriggerDiag = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: String(EVENTS_LIMIT) })
+      if (nodeFilter) params.set('nodeId', nodeFilter)
+      const res = await apiFetch(`/analytics/trigger-diag?${params}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      setTriggerData(await res.json())
+      setTriggerError(null)
+    } catch (err) {
+      setTriggerError(err.message ?? String(err))
+    }
+  }, [nodeFilter])
+
   useEffect(() => {
     fetchAnalytics()
     const t = setInterval(fetchAnalytics, POLL_INTERVAL_MS)
     return () => clearInterval(t)
   }, [fetchAnalytics])
+
+  useEffect(() => {
+    fetchTriggerDiag()
+    const t = setInterval(fetchTriggerDiag, POLL_INTERVAL_MS)
+    return () => clearInterval(t)
+  }, [fetchTriggerDiag])
 
   const sty = {
     root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1 },
@@ -200,6 +242,86 @@ export default function AnalyticsTab() {
           </table>
         )}
       </div>
+
+      <div>
+        <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Trigger diagnostics (v2 dual-gate)</div>
+        {triggerError ? (
+          <div style={{
+            fontSize: 12, padding: '6px 10px', borderRadius: 4,
+            background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+          }}>
+            {triggerError}
+          </div>
+        ) : !triggerData ? (
+          <div style={sty.empty}>Loading…</div>
+        ) : triggerData.summary.length === 0 ? (
+          <div style={sty.empty}>No trigger-diagnostic rows recorded yet.</div>
+        ) : (
+          <div style={sty.tableWrap}>
+            <table style={sty.table}>
+              <thead>
+                <tr>
+                  <th style={sty.th}>Node</th>
+                  <th style={sty.th}>Rows (recent)</th>
+                  <th style={sty.th}>Fired</th>
+                  <th style={sty.th}>Near-misses</th>
+                  <th style={sty.th}>Avg energy ratio</th>
+                  <th style={sty.th}>Avg flux ratio</th>
+                  <th style={sty.th}>Last row</th>
+                </tr>
+              </thead>
+              <tbody>
+                {triggerData.summary.map(s => (
+                  <tr key={s.nodeId ?? 'unknown'}>
+                    <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
+                    <td style={sty.td}>{s.totalRows}</td>
+                    <td style={sty.td}>{s.firedRows}</td>
+                    <td style={sty.td}>{s.nearMissRows}</td>
+                    <td style={sty.td}>{s.avgEnergyRatio != null ? s.avgEnergyRatio.toFixed(2) : '—'}</td>
+                    <td style={sty.td}>{s.avgFluxRatio != null ? s.avgFluxRatio.toFixed(2) : '—'}</td>
+                    <td style={sty.td}>{relativeTime(tUsToIso(s.lastTUs))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {triggerData && (
+        <div style={sty.tableWrap}>
+          {triggerData.events.length === 0 ? (
+            <div style={sty.empty}>No trigger-diagnostic blocks match the current filter.</div>
+          ) : (
+            <table style={sty.table}>
+              <thead>
+                <tr>
+                  <th style={sty.th}>{isMobile ? 'Time' : 'Block time'}</th>
+                  <th style={sty.th}>Node</th>
+                  <th style={sty.th}>Energy ratio</th>
+                  <th style={sty.th}>Flux ratio</th>
+                  <th style={sty.th}>Fired</th>
+                </tr>
+              </thead>
+              <tbody>
+                {triggerData.events.map(e => (
+                  <tr key={e.id}>
+                    <td style={sty.td}>
+                      {isMobile ? formatTime(tUsToIso(e.tUs)) : formatDateTime(tUsToIso(e.tUs))}
+                    </td>
+                    <td style={sty.td}>{e.nodeId ?? '—'}</td>
+                    <td style={{ ...sty.td, color: ratioColour(e.energyRatio) }}>{e.energyRatio.toFixed(2)}</td>
+                    <td style={{ ...sty.td, color: ratioColour(e.fluxRatio) }}>{e.fluxRatio.toFixed(2)}</td>
+                    <td style={{ ...sty.td, color: e.fired ? 'var(--green, #4caf50)' : sty.td.color }}>
+                      {e.fired ? 'Fired' : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   )
 }

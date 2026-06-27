@@ -2,3 +2,6 @@ birdnet-analyzer
 birdnetlib
 sounddevice
 soundfile
+numpy
+scipy
+requests

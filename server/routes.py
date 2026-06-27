@@ -16,7 +16,8 @@ from .models import (
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeAudioSummary, NodeConfigRequest, NodePosition, NodeRegisterRequest,
-    NodeView, SpeciesSummary, TdoaRequest, TdoaResponse, LatLon,
+    NodeTriggerSummary, NodeView, SpeciesSummary, TdoaRequest, TdoaResponse,
+    LatLon, TriggerDiagAnalytics, TriggerEventRecord,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
 
@@ -938,6 +939,51 @@ async def audio_analytics(
         for r in raw_events
     ]
     return AudioAnalytics(summary=summary, events=events)
+
+
+@router.get("/analytics/trigger-diag", response_model=TriggerDiagAnalytics, dependencies=[Depends(require_viewer)])
+async def trigger_diag_analytics(
+    limit: int = Query(default=500, ge=1, le=5000),
+    node_id: str | None = Query(default=None, alias="nodeId"),
+    fired_only: bool = Query(default=False, alias="firedOnly"),
+):
+    """Return trigger-diagnostic event history + per-node summary stats.
+
+    Pulled from each node's GET /app/api/trigger-diag by the poller and
+    persisted to trigger_events — see TriggerDiagnostics.hpp on the node
+    side. Built to diagnose the v2 dual-gate trigger (band energy + spectral
+    flux): a node only ever records "interesting" blocks (a gate ratio
+    >= 1.5, or an actual fire), so this view answers "how close did a near-
+    miss get, and on which gate" — the data the field-report species
+    collapse (pied butcherbird / lorikeet / cockatoo no longer firing) needs
+    before any threshold gets retuned.
+    """
+    raw_events = await db.list_trigger_events(limit=limit, node_id=node_id, fired_only=fired_only)
+    raw_summary = await db.trigger_event_summary()
+    if node_id:
+        raw_summary = [r for r in raw_summary if r["node_id"] == node_id]
+
+    summary = [
+        NodeTriggerSummary(
+            node_id=r["node_id"],
+            total_rows=r["total_rows"],
+            fired_rows=r["fired_rows"] or 0,
+            near_miss_rows=r["near_miss_rows"] or 0,
+            avg_energy_ratio=r["avg_energy_ratio"],
+            avg_flux_ratio=r["avg_flux_ratio"],
+            last_t_us=r["last_t_us"],
+        )
+        for r in raw_summary
+    ]
+    events = [
+        TriggerEventRecord(
+            id=r["id"], node_id=r["node_id"], t_us=r["t_us"],
+            energy_ratio=r["energy_ratio"], flux_ratio=r["flux_ratio"],
+            fired=bool(r["fired"]),
+        )
+        for r in raw_events
+    ]
+    return TriggerDiagAnalytics(summary=summary, events=events)
 
 
 # ---------------------------------------------------------------------------

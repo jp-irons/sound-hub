@@ -11,6 +11,8 @@ POST /api/origin/set-from-node/{node_id} (computed by back-projecting a
 node's GPS centroid through its surveyed array offset) or via a manual
 PUT /api/origin override.  Once set it survives all node restarts/removals.
 """
+from datetime import datetime, timezone
+
 import aiosqlite
 
 from . import config
@@ -113,6 +115,26 @@ CREATE TABLE IF NOT EXISTS audio_events (
     detection_count   INTEGER DEFAULT 0,  -- rows actually persisted to `detections` (>= threshold)
     top_confidence    REAL,               -- best raw candidate confidence, any threshold (NULL if no candidates at all)
     top_species       TEXT                -- common_name of the top candidate, NULL if none
+);
+
+-- Per-block AudioTrigger dual-gate ratios pulled from a node's
+-- GET /app/api/trigger-diag (see TriggerDiagnostics.hpp on the node side).
+-- Only "interesting" blocks are ever recorded by the node (either gate
+-- ratio >= 1.5, or the trigger fired) — this is not a continuous log of
+-- every audio block, just the near-misses and confirmed fires needed to
+-- diagnose why the v2 dual-gate trigger (band energy + spectral flux) does
+-- or doesn't fire for a given call. UNIQUE(node_id, t_us) + INSERT OR IGNORE
+-- on the poller side de-duplicates rows seen across overlapping poll cycles
+-- (the node's ring buffer can still hold a block from the previous poll).
+CREATE TABLE IF NOT EXISTS trigger_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id      TEXT,            -- nodes.id (hostname)
+    t_us         INTEGER NOT NULL, -- node-clock UTC microseconds for this block
+    energy_ratio REAL NOT NULL,
+    flux_ratio   REAL NOT NULL,
+    fired        INTEGER NOT NULL, -- 1 if this block was a debounced trigger fire
+    inserted_at  TEXT NOT NULL,    -- ISO8601 UTC, when the hub ingested this row
+    UNIQUE(node_id, t_us)
 );
 """
 
@@ -592,6 +614,90 @@ async def audio_event_summary(
                 GROUP BY node_id
                 ORDER BY total_pushes DESC""",
             params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def insert_trigger_events(node_id: str | None, rows: list[dict]) -> int:
+    """Bulk-insert trigger-diagnostic rows pulled from one node's poll.
+
+    Each row is {"t_us": int, "energy_ratio": float, "flux_ratio": float,
+    "fired": bool} — see TriggerDiagHandler's CSV format on the node side.
+    INSERT OR IGNORE on (node_id, t_us) silently drops rows already seen on
+    a previous poll (the node's ring buffer overlaps poll cycles by design,
+    so the hub will usually see most rows more than once).
+
+    Returns the number of rows actually inserted (new rows only).
+    """
+    if not rows:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        cursor = await conn.executemany(
+            """INSERT OR IGNORE INTO trigger_events
+               (node_id, t_us, energy_ratio, flux_ratio, fired, inserted_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [
+                (node_id, r["t_us"], r["energy_ratio"], r["flux_ratio"],
+                 1 if r["fired"] else 0, now_iso)
+                for r in rows
+            ],
+        )
+        await conn.commit()
+        return cursor.rowcount if cursor.rowcount is not None and cursor.rowcount > 0 else 0
+
+
+async def list_trigger_events(
+    limit: int = 500,
+    node_id: str | None = None,
+    fired_only: bool = False,
+) -> list[dict]:
+    """Return the most recent trigger-diagnostic rows, newest (by t_us) first."""
+    where = ["1=1"]
+    params: list = []
+
+    if node_id:
+        where.append("node_id = ?")
+        params.append(node_id)
+    if fired_only:
+        where.append("fired = 1")
+
+    params.append(limit)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            f"""SELECT * FROM trigger_events
+                WHERE {' AND '.join(where)}
+                ORDER BY t_us DESC, id DESC LIMIT ?""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def trigger_event_summary() -> list[dict]:
+    """Aggregate trigger_events per node — counts of near-misses vs. fires.
+
+    "Near miss" here means a row was recorded (so at least one gate reached
+    the node's interesting-ratio threshold) but fired = 0.
+    """
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT
+                   node_id,
+                   COUNT(*) AS total_rows,
+                   SUM(fired) AS fired_rows,
+                   SUM(CASE WHEN fired = 0 THEN 1 ELSE 0 END) AS near_miss_rows,
+                   AVG(energy_ratio) AS avg_energy_ratio,
+                   AVG(flux_ratio) AS avg_flux_ratio,
+                   MAX(t_us) AS last_t_us
+               FROM trigger_events
+               GROUP BY node_id
+               ORDER BY total_rows DESC"""
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]

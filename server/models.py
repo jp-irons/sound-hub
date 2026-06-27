@@ -252,6 +252,45 @@ class AudioAnalytics(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class TriggerEventRecord(BaseModel):
+    """One AudioTrigger dual-gate block — returned by GET /api/analytics/trigger-diag.
+
+    Pulled from a node's GET /app/api/trigger-diag ring buffer (see
+    TriggerDiagnostics.hpp on the node side). Only "interesting" blocks are
+    ever recorded by the node — either gate ratio >= 1.5, or the trigger
+    fired — so this is near-miss + fire data, not a continuous log.
+    """
+    id: int
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    t_us: int = Field(alias="tUs")
+    energy_ratio: float = Field(alias="energyRatio")
+    flux_ratio: float = Field(alias="fluxRatio")
+    fired: bool
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NodeTriggerSummary(BaseModel):
+    """Per-node aggregate of trigger_events — near-miss vs. fire counts."""
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    total_rows: int = Field(alias="totalRows")
+    fired_rows: int = Field(alias="firedRows")
+    near_miss_rows: int = Field(alias="nearMissRows")
+    avg_energy_ratio: Optional[float] = Field(default=None, alias="avgEnergyRatio")
+    avg_flux_ratio: Optional[float] = Field(default=None, alias="avgFluxRatio")
+    last_t_us: Optional[int] = Field(default=None, alias="lastTUs")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TriggerDiagAnalytics(BaseModel):
+    """Response for GET /api/analytics/trigger-diag."""
+    summary: list[NodeTriggerSummary]
+    events: list[TriggerEventRecord]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float
