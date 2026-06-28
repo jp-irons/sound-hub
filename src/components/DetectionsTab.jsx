@@ -21,7 +21,6 @@ export default function DetectionsTab() {
 
   function chooseMoment(key) {
     setMoment(key)
-    if (isQuickMoment(key)) setDatePreset('all')
   }
 
   const sty = {
