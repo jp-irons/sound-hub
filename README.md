@@ -87,8 +87,9 @@ docs/
 
 ## Deployment
 
-For production deployment on a Windows NUC (WSL2 + nginx + systemd), see the
-[Production deployment](docs/setup.md#production-deployment-wsl2-on-windows)
-section of the setup guide.  The `deploy/` folder contains the scripts
-(`windows-setup.ps1`, `setup.sh`) and config templates (`soundhub.service`,
-`nginx-lan.conf`) referenced there.
+Production runs in an Ubuntu VM (Hyper-V, hostname `sound-hub`) hosted on a
+Windows 11 NUC — not WSL2, which was tried and dropped in favour of a clean
+VM. See [Production install — Ubuntu](docs/setup.md#production-install-ubuntu)
+in the setup guide for the systemd + nginx install steps. The `deploy/`
+folder contains the scripts (`windows-setup.ps1`, `setup.sh`) and config
+templates (`soundhub.service`, `nginx-lan.conf`) referenced there.
