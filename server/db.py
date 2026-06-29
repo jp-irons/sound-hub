@@ -114,7 +114,9 @@ CREATE TABLE IF NOT EXISTS audio_events (
     analysis_status  TEXT NOT NULL,   -- 'analyzed' | 'skipped_not_ready' | 'error'
     detection_count   INTEGER DEFAULT 0,  -- rows actually persisted to `detections` (>= threshold)
     top_confidence    REAL,               -- best raw candidate confidence, any threshold (NULL if no candidates at all)
-    top_species       TEXT                -- common_name of the top candidate, NULL if none
+    top_species       TEXT,               -- common_name of the top candidate, NULL if none
+    t_start_us        INTEGER,            -- capture-window start, node-clock Unix epoch us (NULL for hub-requested pulls predating this column, or if a node hasn't sent it)
+    t_end_us          INTEGER             -- capture-window end, node-clock Unix epoch us
 );
 
 -- Per-block AudioTrigger dual-gate ratios pulled from a node's
@@ -221,6 +223,16 @@ async def init_db() -> None:
         detection_columns = {row[1] for row in await cursor.fetchall()}
         if "node_id" not in detection_columns:
             await conn.execute("ALTER TABLE detections ADD COLUMN node_id TEXT")
+
+        # Migration: add t_start_us/t_end_us to audio_events if they don't
+        # exist yet — needed to anchor a triggered push's capture window
+        # precisely (received_at is only hub-arrival wall-clock).
+        cursor = await conn.execute("PRAGMA table_info(audio_events)")
+        audio_event_columns = {row[1] for row in await cursor.fetchall()}
+        if "t_start_us" not in audio_event_columns:
+            await conn.execute("ALTER TABLE audio_events ADD COLUMN t_start_us INTEGER")
+        if "t_end_us" not in audio_event_columns:
+            await conn.execute("ALTER TABLE audio_events ADD COLUMN t_end_us INTEGER")
 
         await conn.commit()
 
@@ -521,19 +533,24 @@ async def insert_audio_event(
     detection_count: int = 0,
     top_confidence: float | None = None,
     top_species: str | None = None,
+    t_start_us: int | None = None,
+    t_end_us: int | None = None,
 ) -> None:
     """Record one push received at POST /api/audio/push, regardless of outcome.
 
     analysis_status is one of 'analyzed' | 'skipped_not_ready' | 'error'.
+    t_start_us/t_end_us are the node-clock capture window — present for
+    triggered (node-initiated) pushes, NULL for hub-requested pulls (the hub
+    already has those from its own request).
     """
     async with connect() as conn:
         await conn.execute(
             """INSERT INTO audio_events
                (node_id, triggered, received_at, bytes, analysis_status,
-                detection_count, top_confidence, top_species)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                detection_count, top_confidence, top_species, t_start_us, t_end_us)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (node_id, 1 if triggered else 0, received_at, bytes_, analysis_status,
-             detection_count, top_confidence, top_species),
+             detection_count, top_confidence, top_species, t_start_us, t_end_us),
         )
         await conn.commit()
 

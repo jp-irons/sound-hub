@@ -223,6 +223,8 @@ class AudioEventRecord(BaseModel):
     detection_count: int = Field(alias="detectionCount")
     top_confidence: Optional[float] = Field(default=None, alias="topConfidence")
     top_species: Optional[str] = Field(default=None, alias="topSpecies")
+    t_start_us: Optional[int] = Field(default=None, alias="tStartUs")
+    t_end_us: Optional[int] = Field(default=None, alias="tEndUs")
 
     model_config = ConfigDict(populate_by_name=True)
 

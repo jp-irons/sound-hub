@@ -727,6 +727,20 @@ async def audio_push(
         description="Sending node's hostname — matches nodes.id. Authoritative "
                      "identity for this push; srcMac is kept for filenames/debugging.",
     ),
+    tStartUs: int | None = Query(
+        None,
+        description="Actual capture-window start, node-clock Unix epoch µs — "
+                     "AudioStore::Snapshot.actualStartUs, not the originally "
+                     "requested window. Sent by the node for both triggered "
+                     "pushes and hub-requested pulls, since either can be "
+                     "clipped to whatever audio the node actually retained. "
+                     "Optional only for backward compatibility with older "
+                     "firmware that doesn't send it.",
+    ),
+    tEndUs: int | None = Query(
+        None,
+        description="Actual capture-window end, node-clock Unix epoch µs. See tStartUs.",
+    ),
 ):
     """Receive a WAV audio segment pushed directly from a node.
 
@@ -765,6 +779,7 @@ async def audio_push(
         await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
             bytes_=len(data), analysis_status="skipped_not_ready",
+            t_start_us=tStartUs, t_end_us=tEndUs,
         )
         return
 
@@ -781,6 +796,7 @@ async def audio_push(
         await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
             bytes_=len(data), analysis_status="error",
+            t_start_us=tStartUs, t_end_us=tEndUs,
         )
         return
 
@@ -798,6 +814,7 @@ async def audio_push(
         detection_count=len(persisted),
         top_confidence=top.get("confidence") if top else None,
         top_species=top.get("common_name") if top else None,
+        t_start_us=tStartUs, t_end_us=tEndUs,
     )
 
 
@@ -935,6 +952,7 @@ async def audio_analytics(
             received_at=r["received_at"], bytes=r["bytes"],
             analysis_status=r["analysis_status"], detection_count=r["detection_count"],
             top_confidence=r["top_confidence"], top_species=r["top_species"],
+            t_start_us=r["t_start_us"], t_end_us=r["t_end_us"],
         )
         for r in raw_events
     ]
