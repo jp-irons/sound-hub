@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { apiFetch } from '../auth.js'
 
 function fmtLatLon(v) {
@@ -31,6 +31,44 @@ function fieldsFromRow(row) {
     minCorroboratingNodes: String(row.minCorroboratingNodes),
     notes: row.notes ?? '',
   }
+}
+
+// Known implementations as of 2026-06-29 (see models.py field docstrings).
+// Both fields are plain strings server-side (not enums) so new methods can be
+// added without a redeploy — the "Custom…" option keeps that escape hatch
+// available in the UI instead of hard-locking the operator to this list.
+const CORRELATION_METHOD_OPTIONS = ['gcc_phat', 'onset_envelope']
+const ONSET_DETECTION_METHOD_OPTIONS = ['global_peak']
+const CUSTOM_OPTION = '__custom__'
+
+// Dropdown of known method names + a "Custom…" escape hatch that reveals a
+// free-text input. isCustom is derived from whether the current value is in
+// the known list, rather than tracked as separate UI state — picking
+// "Custom…" clears the value so the text input starts blank for typing.
+function MethodSelect({ options, value, onChange, disabled, inputStyle }) {
+  const isCustom = !options.includes(value)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <select
+        style={inputStyle}
+        disabled={disabled}
+        value={isCustom ? CUSTOM_OPTION : value}
+        onChange={e => onChange(e.target.value === CUSTOM_OPTION ? '' : e.target.value)}
+      >
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+        <option value={CUSTOM_OPTION}>Custom…</option>
+      </select>
+      {isCustom && (
+        <input
+          style={inputStyle}
+          disabled={disabled}
+          value={value}
+          placeholder="custom method name"
+          onChange={e => onChange(e.target.value)}
+        />
+      )}
+    </div>
+  )
 }
 
 const BLANK_ADD_FIELDS = {
@@ -113,6 +151,19 @@ export default function SettingsTab() {
   const [addFields, setAddFields] = useState(BLANK_ADD_FIELDS)
   const [addError, setAddError] = useState(null)
   const [addBusy, setAddBusy] = useState(false)
+  const addKeyInputRef = useRef(null)
+
+  // Pre-fills the add-species form from an existing row — e.g. species B is
+  // similar to species A but with a higher frequency band, so copy A's tuned
+  // values across and just adjust freq band + species key. Species key is
+  // deliberately left blank (copying it would just collide on submit).
+  function handleCopyToAdd(row) {
+    setAddFields(fieldsFromRow(row))
+    setAddKey('')
+    setAddError(null)
+    addKeyInputRef.current?.focus()
+    addKeyInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
 
   const loadSpeciesParams = () => {
     setSpLoading(true)
@@ -294,7 +345,6 @@ export default function SettingsTab() {
       background: 'var(--surface1, #1e1e1e)',
       border: '1px solid var(--border, #333)',
       borderRadius: 8, padding: '12px 16px',
-      maxWidth: 900,
     },
     table: { width: '100%', borderCollapse: 'collapse', fontSize: 12, marginTop: 10 },
     th: {
@@ -546,6 +596,7 @@ export default function SettingsTab() {
                         {!isEditing && (
                           <button style={sty.actionBtn} onClick={() => openEdit(row)}>Edit</button>
                         )}
+                        <button style={sty.actionBtn} onClick={() => handleCopyToAdd(row)}>Copy to new</button>
                         {!isDefault && (
                           deleteConfirmKey === row.speciesKey ? (
                             <>
@@ -583,13 +634,15 @@ export default function SettingsTab() {
                             </label>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Correlation method</span>
-                              <input style={sty.smallInput} value={editFields.correlationMethod}
-                                onChange={e => setEditField('correlationMethod', e.target.value)} />
+                              <MethodSelect options={CORRELATION_METHOD_OPTIONS} inputStyle={sty.smallInput}
+                                value={editFields.correlationMethod}
+                                onChange={v => setEditField('correlationMethod', v)} />
                             </label>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Onset detection method</span>
-                              <input style={sty.smallInput} value={editFields.onsetDetectionMethod}
-                                onChange={e => setEditField('onsetDetectionMethod', e.target.value)} />
+                              <MethodSelect options={ONSET_DETECTION_METHOD_OPTIONS} inputStyle={sty.smallInput}
+                                value={editFields.onsetDetectionMethod}
+                                onChange={v => setEditField('onsetDetectionMethod', v)} />
                             </label>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Min corroborating nodes</span>
@@ -666,19 +719,21 @@ export default function SettingsTab() {
           <form onSubmit={handleAdd} style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 10 }}>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Species key (common name)</span>
-              <input style={sty.smallInput} value={addKey} disabled={addBusy}
+              <input ref={addKeyInputRef} style={sty.smallInput} value={addKey} disabled={addBusy}
                 placeholder="e.g. Pheasant Coucal"
                 onChange={e => setAddKey(e.target.value)} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Correlation method</span>
-              <input style={sty.smallInput} value={addFields.correlationMethod} disabled={addBusy}
-                onChange={e => setAddField('correlationMethod', e.target.value)} />
+              <MethodSelect options={CORRELATION_METHOD_OPTIONS} inputStyle={sty.smallInput} disabled={addBusy}
+                value={addFields.correlationMethod}
+                onChange={v => setAddField('correlationMethod', v)} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Onset detection method</span>
-              <input style={sty.smallInput} value={addFields.onsetDetectionMethod} disabled={addBusy}
-                onChange={e => setAddField('onsetDetectionMethod', e.target.value)} />
+              <MethodSelect options={ONSET_DETECTION_METHOD_OPTIONS} inputStyle={sty.smallInput} disabled={addBusy}
+                value={addFields.onsetDetectionMethod}
+                onChange={v => setAddField('onsetDetectionMethod', v)} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Min corroborating nodes</span>
