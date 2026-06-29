@@ -254,6 +254,70 @@ class AudioAnalytics(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SpeciesTdoaParams(BaseModel):
+    """Tunable per-species TDOA orchestration parameters.
+
+    Body for PUT /api/species-tdoa-params/{species_key} (create-or-update,
+    consistent with this hub's other upsert-style PUT endpoints, e.g.
+    NodePosition). The '__default__' species_key is a protected sentinel row
+    used as the fallback when a detected species has no row of its own, or
+    its row is disabled — see db.get_effective_species_tdoa_params(). It
+    cannot be deleted or disabled (enforced in routes.py, not here).
+    """
+    enabled: bool = Field(default=True)
+    correlation_method: str = Field(
+        default="gcc_phat",
+        alias="correlationMethod",
+        description="'gcc_phat' (broadband, sharp-onset calls) or "
+                     "'onset_envelope' (periodic/narrowband calls at risk of "
+                     "cycle-slip/phase ambiguity with plain cross-correlation, "
+                     "e.g. Pheasant Coucal). Plain string rather than an enum "
+                     "so new methods can be added without a redeploy once the "
+                     "orchestration code implements them.",
+    )
+    onset_detection_method: str = Field(
+        default="global_peak",
+        alias="onsetDetectionMethod",
+        description="Matches clap_sync_check.py's detect_onset (picks the "
+                     "global energy peak, not the first sample above "
+                     "threshold). Only one implementation exists today; kept "
+                     "as a free string, not an enum, for the same "
+                     "no-redeploy-to-extend reason as correlation_method.",
+    )
+    freq_band_low_hz: Optional[float] = Field(default=None, alias="freqBandLowHz")
+    freq_band_high_hz: Optional[float] = Field(default=None, alias="freqBandHighHz")
+    pull_window_s: float = Field(
+        default=3.0, alias="pullWindowS",
+        description="Duration requested from neighbour nodes for this "
+                     "species. The orchestration layer floors this (and the "
+                     "margins below) to cover the array's max inter-node "
+                     "sound travel time regardless of this value — at 150m "
+                     "baseline, ~0.44s — so the real arrival at a far node "
+                     "is never clipped by an under-tuned species row.",
+    )
+    window_margin_pre_ms: float = Field(default=500.0, alias="windowMarginPreMs")
+    window_margin_post_ms: float = Field(default=500.0, alias="windowMarginPostMs")
+    min_corroborating_nodes: int = Field(
+        default=4, ge=4, alias="minCorroboratingNodes",
+        description="Hard gate, not advisory — the closed-form solver itself "
+                     "requires >=4 nodes (tdoa_solver.solve), so this can "
+                     "only raise the bar above the solver's own floor, never "
+                     "lower it.",
+    )
+    notes: Optional[str] = Field(default=None)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SpeciesTdoaParamsRecord(SpeciesTdoaParams):
+    """SpeciesTdoaParams plus the key and audit fields — returned by
+    GET/PUT, never accepted as a request body."""
+    species_key: str = Field(alias="speciesKey")
+    updated_at: str = Field(alias="updatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class TriggerEventRecord(BaseModel):
     """One AudioTrigger dual-gate block — returned by GET /api/analytics/trigger-diag.
 

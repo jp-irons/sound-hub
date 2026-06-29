@@ -16,7 +16,8 @@ from .models import (
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeAudioSummary, NodeConfigRequest, NodePosition, NodeRegisterRequest,
-    NodeTriggerSummary, NodeView, SpeciesSummary, TdoaRequest, TdoaResponse,
+    NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
+    SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
 )
 from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
@@ -1070,6 +1071,136 @@ async def solve_tdoa(req: TdoaRequest):
         method=result.method,
         ambiguous_root=ambiguous,
     )
+
+
+# ---------------------------------------------------------------------------
+# Species TDOA params (CRUDable — see SpeciesTdoaParams docstring for why)
+# ---------------------------------------------------------------------------
+
+def _species_tdoa_params_record_from_row(row: dict) -> SpeciesTdoaParamsRecord:
+    """Build a SpeciesTdoaParamsRecord from a species_tdoa_params DB row."""
+    return SpeciesTdoaParamsRecord(
+        species_key=row["species_key"],
+        enabled=bool(row["enabled"]),
+        correlation_method=row["correlation_method"],
+        onset_detection_method=row["onset_detection_method"],
+        freq_band_low_hz=row["freq_band_low_hz"],
+        freq_band_high_hz=row["freq_band_high_hz"],
+        pull_window_s=row["pull_window_s"],
+        window_margin_pre_ms=row["window_margin_pre_ms"],
+        window_margin_post_ms=row["window_margin_post_ms"],
+        min_corroborating_nodes=row["min_corroborating_nodes"],
+        notes=row["notes"],
+        updated_at=row["updated_at"],
+    )
+
+
+@router.get(
+    "/species-tdoa-params",
+    response_model=list[SpeciesTdoaParamsRecord],
+    dependencies=[Depends(require_viewer)],
+)
+async def list_species_tdoa_params():
+    """List all species TDOA params rows, including the __default__
+    fallback sentinel."""
+    rows = await db.list_species_tdoa_params()
+    return [_species_tdoa_params_record_from_row(r) for r in rows]
+
+
+@router.post(
+    "/species-tdoa-params/reset-default",
+    response_model=SpeciesTdoaParamsRecord,
+    dependencies=[Depends(require_admin)],
+)
+async def reset_default_species_tdoa_params():
+    """Recovery path: overwrite the __default__ row with hardcoded factory
+    values, regardless of its current state. For when an operator has tuned
+    __default__ into something broken and wants a known-good starting point
+    back, without DB surgery. A static route (not /{species_key}/reset) since
+    this only ever targets __default__ — every other species row simply has
+    no row to "reset" to, only delete."""
+    row = await db.reset_species_tdoa_params_to_factory_default()
+    return _species_tdoa_params_record_from_row(row)
+
+
+@router.get(
+    "/species-tdoa-params/{species_key}",
+    response_model=SpeciesTdoaParamsRecord,
+    dependencies=[Depends(require_viewer)],
+)
+async def get_species_tdoa_params(species_key: str):
+    """Return one species' TDOA params row. 404 if not configured — unlike
+    node positions, there's no "empty default" response here, since an
+    unconfigured species' effective params come from the __default__
+    sentinel, which callers can fetch explicitly if they want to see it."""
+    row = await db.get_species_tdoa_params(species_key)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Species has no TDOA params row")
+    return _species_tdoa_params_record_from_row(row)
+
+
+@router.put(
+    "/species-tdoa-params/{species_key}",
+    response_model=SpeciesTdoaParamsRecord,
+    dependencies=[Depends(require_admin)],
+)
+async def set_species_tdoa_params(species_key: str, req: SpeciesTdoaParams):
+    """Create or update one species' TDOA params row (upsert, consistent
+    with PUT /nodes/{id}/position).
+
+    The __default__ sentinel can be updated like any other row (e.g. to
+    retune the fallback margins) but not disabled — see the enabled check
+    below.
+    """
+    if species_key == db.DEFAULT_SPECIES_KEY and not req.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="The __default__ row cannot be disabled — it is the "
+                   "fallback used when a species has no row of its own",
+        )
+
+    await db.upsert_species_tdoa_params(
+        species_key,
+        enabled=req.enabled,
+        correlation_method=req.correlation_method,
+        onset_detection_method=req.onset_detection_method,
+        freq_band_low_hz=req.freq_band_low_hz,
+        freq_band_high_hz=req.freq_band_high_hz,
+        pull_window_s=req.pull_window_s,
+        window_margin_pre_ms=req.window_margin_pre_ms,
+        window_margin_post_ms=req.window_margin_post_ms,
+        min_corroborating_nodes=req.min_corroborating_nodes,
+        notes=req.notes,
+        updated_at=_now_iso(),
+    )
+    log.info("species_tdoa_params upserted: %s", species_key)
+
+    row = await db.get_species_tdoa_params(species_key)
+    return _species_tdoa_params_record_from_row(row)
+
+
+@router.delete(
+    "/species-tdoa-params/{species_key}",
+    status_code=204,
+    dependencies=[Depends(require_admin)],
+)
+async def delete_species_tdoa_params(species_key: str):
+    """Delete one species' TDOA params row.
+
+    404 if it doesn't exist. 409 for __default__ — it must always exist as
+    the orchestration pipeline's fallback (get_effective_species_tdoa_params
+    raises if it's missing rather than silently degrading).
+    """
+    if species_key == db.DEFAULT_SPECIES_KEY:
+        raise HTTPException(
+            status_code=409,
+            detail="The __default__ row cannot be deleted — it is the "
+                   "fallback used when a species has no row of its own",
+        )
+    deleted = await db.delete_species_tdoa_params(species_key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Species has no TDOA params row")
+    log.info("species_tdoa_params deleted: %s", species_key)
 
 
 # ---------------------------------------------------------------------------

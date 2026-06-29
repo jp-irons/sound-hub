@@ -11,11 +11,14 @@ POST /api/origin/set-from-node/{node_id} (computed by back-projecting a
 node's GPS centroid through its surveyed array offset) or via a manual
 PUT /api/origin override.  Once set it survives all node restarts/removals.
 """
+import logging
 from datetime import datetime, timezone
 
 import aiosqlite
 
 from . import config
+
+log = logging.getLogger("sound_hub.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -138,6 +141,29 @@ CREATE TABLE IF NOT EXISTS trigger_events (
     inserted_at  TEXT NOT NULL,    -- ISO8601 UTC, when the hub ingested this row
     UNIQUE(node_id, t_us)
 );
+
+-- Per-species TDOA orchestration tuning (CRUDable so parameters can be
+-- adjusted without a backend redeploy — see species-TDOA-pipeline design
+-- discussion). species_key matches detections.common_name. The
+-- '__default__' sentinel row (DEFAULT_SPECIES_KEY below) is the fallback for
+-- any species with no row of its own, or a disabled one — see
+-- get_effective_species_tdoa_params(). It is seeded by init_db() and
+-- protected from delete/disable at the route layer (server/routes.py); this
+-- module's CRUD functions have no opinion on that, to stay a dumb DB layer.
+CREATE TABLE IF NOT EXISTS species_tdoa_params (
+    species_key             TEXT PRIMARY KEY,
+    enabled                 INTEGER NOT NULL DEFAULT 1,
+    correlation_method      TEXT NOT NULL DEFAULT 'gcc_phat',
+    onset_detection_method  TEXT NOT NULL DEFAULT 'global_peak',
+    freq_band_low_hz        REAL,
+    freq_band_high_hz       REAL,
+    pull_window_s           REAL NOT NULL DEFAULT 3.0,
+    window_margin_pre_ms    REAL NOT NULL DEFAULT 500.0,
+    window_margin_post_ms   REAL NOT NULL DEFAULT 500.0,
+    min_corroborating_nodes INTEGER NOT NULL DEFAULT 4,
+    notes                   TEXT,
+    updated_at              TEXT NOT NULL
+);
 """
 
 # Values for `approval_status`. New nodes land as PENDING — discovery alone
@@ -148,6 +174,32 @@ CREATE TABLE IF NOT EXISTS trigger_events (
 PENDING = "pending"
 APPROVED = "approved"
 REJECTED = "rejected"
+
+# Sentinel species_key for the fallback row in species_tdoa_params — used
+# when a detected species has no row of its own, or its row is disabled.
+# Not seeded by init_db() — created lazily by
+# get_effective_species_tdoa_params() the first time it's needed, from
+# FACTORY_DEFAULT_SPECIES_PARAMS below. Protected from delete/disable at the
+# route layer.
+DEFAULT_SPECIES_KEY = "__default__"
+
+# Known-good values for the __default__ row, used both to lazily create it
+# (get_effective_species_tdoa_params) and to restore it on demand
+# (reset_species_tdoa_params_to_factory_default) if an operator tunes it
+# into something broken. Keys match upsert_species_tdoa_params()'s kwargs
+# (minus species_key/updated_at).
+FACTORY_DEFAULT_SPECIES_PARAMS = {
+    "enabled": True,
+    "correlation_method": "gcc_phat",
+    "onset_detection_method": "global_peak",
+    "freq_band_low_hz": None,
+    "freq_band_high_hz": None,
+    "pull_window_s": 3.0,
+    "window_margin_pre_ms": 500.0,
+    "window_margin_post_ms": 500.0,
+    "min_corroborating_nodes": 4,
+    "notes": None,
+}
 
 
 async def init_db() -> None:
@@ -767,3 +819,136 @@ async def list_species_summary(
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Species TDOA params CRUD
+# ---------------------------------------------------------------------------
+
+async def get_species_tdoa_params(species_key: str) -> dict | None:
+    """Return one species' TDOA params row, or None if not configured."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM species_tdoa_params WHERE species_key = ?",
+            (species_key,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def list_species_tdoa_params() -> list[dict]:
+    """Return all species TDOA params rows, including the __default__
+    sentinel, ordered by species_key."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM species_tdoa_params ORDER BY species_key"
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def upsert_species_tdoa_params(
+    species_key: str,
+    *,
+    enabled: bool,
+    correlation_method: str,
+    onset_detection_method: str,
+    freq_band_low_hz: float | None,
+    freq_band_high_hz: float | None,
+    pull_window_s: float,
+    window_margin_pre_ms: float,
+    window_margin_post_ms: float,
+    min_corroborating_nodes: int,
+    notes: str | None,
+    updated_at: str,
+) -> None:
+    """Insert or replace one species' TDOA params row (including the
+    __default__ sentinel — this function has no opinion on protecting it;
+    that's a route-layer concern)."""
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT OR REPLACE INTO species_tdoa_params
+               (species_key, enabled, correlation_method, onset_detection_method,
+                freq_band_low_hz, freq_band_high_hz, pull_window_s,
+                window_margin_pre_ms, window_margin_post_ms,
+                min_corroborating_nodes, notes, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (species_key, 1 if enabled else 0, correlation_method,
+             onset_detection_method, freq_band_low_hz, freq_band_high_hz,
+             pull_window_s, window_margin_pre_ms, window_margin_post_ms,
+             min_corroborating_nodes, notes, updated_at),
+        )
+        await conn.commit()
+
+
+async def delete_species_tdoa_params(species_key: str) -> bool:
+    """Delete one species' TDOA params row. Returns True if a row was deleted.
+
+    Callers must block deleting DEFAULT_SPECIES_KEY themselves (route layer)
+    — this function has no opinion on that, keeping this module a dumb CRUD
+    surface consistent with the rest of its functions.
+    """
+    async with connect() as conn:
+        cursor = await conn.execute(
+            "DELETE FROM species_tdoa_params WHERE species_key = ?",
+            (species_key,),
+        )
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
+async def get_effective_species_tdoa_params(species_key: str) -> tuple[dict, bool]:
+    """Return (params, used_default) for a detected species.
+
+    Falls back to the __default__ sentinel row if species_key has no row, or
+    its row has enabled=0. Logs a warning on fallback so an operator tailing
+    the hub log notices a species running on best-guess defaults rather than
+    deliberately-tuned params. The TDOA orchestration pipeline (not yet
+    built) should persist used_default on whatever record holds the attempt,
+    for the same reason — this function only covers the lookup half of that.
+
+    The __default__ row itself is not seeded by init_db() — it's created
+    lazily here, from FACTORY_DEFAULT_SPECIES_PARAMS, the first time any
+    species needs to fall back and finds it missing.
+    """
+    row = await get_species_tdoa_params(species_key)
+    if row is not None and row["enabled"]:
+        return row, False
+
+    default_row = await get_species_tdoa_params(DEFAULT_SPECIES_KEY)
+    if default_row is None:
+        log.warning(
+            "species_tdoa_params: '%s' sentinel row missing, creating from "
+            "factory defaults", DEFAULT_SPECIES_KEY,
+        )
+        await upsert_species_tdoa_params(
+            DEFAULT_SPECIES_KEY,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            **FACTORY_DEFAULT_SPECIES_PARAMS,
+        )
+        default_row = await get_species_tdoa_params(DEFAULT_SPECIES_KEY)
+
+    reason = "disabled" if row is not None else "unconfigured"
+    log.warning(
+        "species_tdoa_params: '%s' is %s, falling back to %s defaults",
+        species_key, reason, DEFAULT_SPECIES_KEY,
+    )
+    return default_row, True
+
+
+async def reset_species_tdoa_params_to_factory_default() -> dict:
+    """Overwrite the __default__ row with FACTORY_DEFAULT_SPECIES_PARAMS,
+    regardless of its current state. The recovery path for when __default__
+    has been tuned into something broken — unlike the lazy-create in
+    get_effective_species_tdoa_params(), this runs unconditionally, not only
+    when the row is missing.
+    """
+    await upsert_species_tdoa_params(
+        DEFAULT_SPECIES_KEY,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        **FACTORY_DEFAULT_SPECIES_PARAMS,
+    )
+    log.info("species_tdoa_params: '%s' reset to factory defaults", DEFAULT_SPECIES_KEY)
+    return await get_species_tdoa_params(DEFAULT_SPECIES_KEY)
