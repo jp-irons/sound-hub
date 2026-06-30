@@ -340,7 +340,8 @@ export default function SettingsTab() {
       fontFamily: 'monospace',
       width: '100%', minWidth: 0, boxSizing: 'border-box',
     },
-    grid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8, marginBottom: 10 },
+    grid: { display: 'flex', alignItems: 'flex-end', gap: 8, marginBottom: 10, flexWrap: 'wrap' },
+    gridField: { flex: '1 1 140px', minWidth: 0 },
     wideSection: {
       background: 'var(--surface1, #1e1e1e)',
       border: '1px solid var(--border, #333)',
@@ -474,28 +475,26 @@ export default function SettingsTab() {
             </div>
 
             <div style={sty.grid}>
-              <label style={sty.fieldLabel}>
+              <label style={{ ...sty.fieldLabel, ...sty.gridField }}>
                 <span style={sty.fieldLabelText}>Latitude</span>
                 <input type="number" step="any" value={lat} placeholder="-27.123456"
                   onChange={e => setLat(e.target.value)} style={sty.input} />
               </label>
-              <label style={sty.fieldLabel}>
+              <label style={{ ...sty.fieldLabel, ...sty.gridField }}>
                 <span style={sty.fieldLabelText}>Longitude</span>
                 <input type="number" step="any" value={lon} placeholder="153.123456"
                   onChange={e => setLon(e.target.value)} style={sty.input} />
               </label>
-              <label style={sty.fieldLabel}>
+              <label style={{ ...sty.fieldLabel, ...sty.gridField }}>
                 <span style={sty.fieldLabelText}>Alt (m)</span>
                 <input type="number" step="any" value={alt} placeholder="42.0"
                   onChange={e => setAlt(e.target.value)} style={sty.input} />
               </label>
-            </div>
 
-            <div style={{ ...sty.row, flexWrap: 'nowrap' }}>
               <button
                 type="button"
                 className="btn btn-primary"
-                style={{ fontSize: 12, padding: '6px 14px' }}
+                style={{ fontSize: 12, padding: '6px 14px', flex: '0 0 auto' }}
                 disabled={saving}
                 onClick={handleSave}
               >
@@ -507,7 +506,7 @@ export default function SettingsTab() {
                   type="button"
                   className="btn"
                   style={{
-                    fontSize: 12, padding: '6px 14px',
+                    fontSize: 12, padding: '6px 14px', flex: '0 0 auto',
                     color: clearArmed ? 'var(--red, #f44336)' : undefined,
                     borderColor: clearArmed ? 'var(--red, #f44336)' : undefined,
                   }}
