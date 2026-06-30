@@ -491,32 +491,34 @@ export default function SettingsTab() {
                   onChange={e => setAlt(e.target.value)} style={sty.input} />
               </label>
 
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ fontSize: 12, padding: '6px 14px', flex: '0 0 auto' }}
-                disabled={saving}
-                onClick={handleSave}
-              >
-                {saving ? 'Saving…' : 'Save origin'}
-              </button>
+              <div style={{ display: 'flex', gap: 8, flex: '0 0 auto', marginLeft: 'auto' }}>
+                {!notConfigured && (
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{
+                      fontSize: 12, padding: '6px 14px',
+                      color: clearArmed ? 'var(--red, #f44336)' : undefined,
+                      borderColor: clearArmed ? 'var(--red, #f44336)' : undefined,
+                    }}
+                    disabled={clearing}
+                    onClick={handleClear}
+                    onBlur={() => setClearArmed(false)}
+                  >
+                    {clearing ? 'Clearing…' : clearArmed ? 'Click again to confirm' : 'Clear origin'}
+                  </button>
+                )}
 
-              {!notConfigured && (
                 <button
                   type="button"
-                  className="btn"
-                  style={{
-                    fontSize: 12, padding: '6px 14px', flex: '0 0 auto',
-                    color: clearArmed ? 'var(--red, #f44336)' : undefined,
-                    borderColor: clearArmed ? 'var(--red, #f44336)' : undefined,
-                  }}
-                  disabled={clearing}
-                  onClick={handleClear}
-                  onBlur={() => setClearArmed(false)}
+                  className="btn btn-primary"
+                  style={{ fontSize: 12, padding: '6px 14px' }}
+                  disabled={saving}
+                  onClick={handleSave}
                 >
-                  {clearing ? 'Clearing…' : clearArmed ? 'Click again to confirm' : 'Clear origin'}
+                  {saving ? 'Saving…' : 'Save origin'}
                 </button>
-              )}
+              </div>
             </div>
 
             {saveMessage && (
