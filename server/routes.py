@@ -782,6 +782,12 @@ async def _plan_tdoa_attempt(
     candidates = await _approved_positioned_nodes()
     travel_time_floor_s = _max_pairwise_distance_m(candidates) / DEFAULT_SPEED_OF_SOUND
     planned_node_ids = [nid for nid in candidates if nid != origin_node_id]
+    min_corroborating_nodes = params["min_corroborating_nodes"]
+    # origin_node_id is excluded from planned_node_ids (it's the node that
+    # already has the original detection, not a pull target) but it still
+    # counts toward the corroborating total *if* it's itself approved +
+    # positioned — otherwise its own arrival can't be used in the solve.
+    origin_counts = 1 if origin_node_id in candidates else 0
 
     margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
     margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
@@ -809,6 +815,27 @@ async def _plan_tdoa_attempt(
         planned_node_ids, pull_t_start_us, pull_t_end_us, travel_time_floor_s,
     )
 
+    # If the array doesn't have enough approved+positioned nodes to ever
+    # satisfy min_corroborating_nodes, issuing pulls would just leave the
+    # attempt stuck at 'pulling' forever (the solver can never run). Fail
+    # fast instead of wasting pulls on neighbours that can't help.
+    total_possible = len(planned_node_ids) + origin_counts
+    if total_possible < min_corroborating_nodes:
+        await db.update_tdoa_attempt_status(
+            attempt_id, "failed",
+            failure_reason=(
+                f"only {total_possible} approved+positioned node(s) available "
+                f"(incl. origin), need >= {min_corroborating_nodes} — "
+                f"skipping pulls"
+            ),
+        )
+        log.info(
+            "tdoa attempt id=%s — failed before pulling: %d available, "
+            "need >= %d",
+            attempt_id, total_possible, min_corroborating_nodes,
+        )
+        return
+
     issued = 0
     for nid in planned_node_ids:
         try:
@@ -830,13 +857,23 @@ async def _plan_tdoa_attempt(
         )
         issued += 1
 
-    if issued > 0:
+    # Per-node pull failures (caught above) can shrink the final
+    # corroborating count below min_corroborating_nodes even though the
+    # pre-flight check passed — re-check against the actual issued count,
+    # not just "issued > 0", before deciding 'pulling' vs 'failed'.
+    final_count = issued + origin_counts
+    if final_count >= min_corroborating_nodes:
         await db.update_tdoa_attempt_status(attempt_id, "pulling")
     else:
         await db.update_tdoa_attempt_status(
             attempt_id, "failed",
-            failure_reason="no neighbour pulls could be issued" if planned_node_ids
-                           else "no neighbour nodes available",
+            failure_reason=(
+                "no neighbour nodes available" if not planned_node_ids
+                else (
+                    f"only {final_count} node(s) succeeded (incl. origin), "
+                    f"need >= {min_corroborating_nodes}"
+                )
+            ),
         )
     log.info(
         "tdoa attempt id=%s — pulls issued to %d/%d neighbours",
