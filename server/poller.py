@@ -29,7 +29,19 @@ async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
         resp.raise_for_status()
         registry.update_live_status(node_id, reachable=True, raw_status=resp.json())
     except (httpx.HTTPError, ValueError) as exc:
-        log.debug("Poll failed for %s @ %s: %s", node_id, ip_address, exc)
+        # Distinguish failure classes in the log — previously every cause
+        # (timeout, connection refused, TLS error, non-2xx status, bad JSON)
+        # was folded into the same debug-only line, which made it impossible
+        # to tell why a node got marked unreachable after the fact.
+        if isinstance(exc, httpx.HTTPStatusError):
+            detail = f"HTTP {exc.response.status_code}"
+        elif isinstance(exc, httpx.TimeoutException):
+            detail = "timeout"
+        elif isinstance(exc, httpx.ConnectError):
+            detail = "connection error"
+        else:
+            detail = type(exc).__name__
+        log.warning("Poll failed for %s @ %s: %s (%s)", node_id, ip_address, detail, exc)
         registry.update_live_status(node_id, reachable=False, raw_status=None)
 
 

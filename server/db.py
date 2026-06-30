@@ -164,6 +164,63 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
     notes                   TEXT,
     updated_at              TEXT NOT NULL
 );
+
+-- TDOA orchestration attempts — one row per persisted top-species detection
+-- in audio_push() that triggers planning (see species_tdoa_pipeline design,
+-- sound-hub/DESIGN.md "Milestones"). Milestone 1 only ever writes
+-- status='planned' rows recording the plan (pull window, candidate
+-- neighbours) without issuing any pull. Later milestones (2-4) advance
+-- status and will likely need new columns (per-node requestId/ack/arrival
+-- timestamp, solve result) added via ALTER TABLE migrations below, same
+-- pattern as the rest of this file — not designed yet, deliberately deferred
+-- until the milestone that needs them.
+--
+-- correlation_method/onset_detection_method/min_corroborating_nodes are
+-- copied from species_tdoa_params at plan time rather than joined live, so
+-- a later edit to that table doesn't retroactively change what an
+-- already-planned attempt says it used.
+--
+-- planned_node_ids is a JSON array of candidate neighbour node_ids — the
+-- plan as it stood at planning time. Per-node *execution* state (requestId,
+-- ack/pull outcome) lives in tdoa_attempt_nodes below (added milestone 2)
+-- rather than mutating this column, so the original plan stays a stable
+-- historical record even if a pull is retried or partially fails.
+CREATE TABLE IF NOT EXISTS tdoa_attempts (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    audio_event_id          INTEGER REFERENCES audio_events(id) ON DELETE CASCADE,
+    origin_node_id          TEXT,
+    species_key             TEXT NOT NULL,
+    used_default            INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT NOT NULL DEFAULT 'planned',
+    t_start_us              INTEGER NOT NULL,
+    t_end_us                INTEGER NOT NULL,
+    planned_node_ids        TEXT NOT NULL,
+    min_corroborating_nodes INTEGER NOT NULL,
+    correlation_method      TEXT NOT NULL,
+    onset_detection_method  TEXT NOT NULL,
+    travel_time_floor_s     REAL NOT NULL,
+    failure_reason          TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+-- Per-neighbour pull execution state for a tdoa_attempts row (milestone 2).
+-- One row per node that planning selected. request_id is NULL when the pull
+-- could not even be issued (e.g. node unreachable, broker down) — status
+-- distinguishes 'requested' (relay accepted it; the WAV is awaited via the
+-- normal audio_push()/requestId mechanism) from 'request_failed' (error
+-- holds why). Milestone 3 will update status further as WAVs land and
+-- arrival timestamps are derived; not done by this table yet.
+CREATE TABLE IF NOT EXISTS tdoa_attempt_nodes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id  INTEGER NOT NULL REFERENCES tdoa_attempts(id) ON DELETE CASCADE,
+    node_id     TEXT NOT NULL,
+    request_id  INTEGER,
+    status      TEXT NOT NULL,
+    error       TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 # Values for `approval_status`. New nodes land as PENDING — discovery alone
@@ -587,16 +644,20 @@ async def insert_audio_event(
     top_species: str | None = None,
     t_start_us: int | None = None,
     t_end_us: int | None = None,
-) -> None:
+) -> int:
     """Record one push received at POST /api/audio/push, regardless of outcome.
 
     analysis_status is one of 'analyzed' | 'skipped_not_ready' | 'error'.
     t_start_us/t_end_us are the node-clock capture window — present for
     triggered (node-initiated) pushes, NULL for hub-requested pulls (the hub
     already has those from its own request).
+
+    Returns the inserted row's id — used by the TDOA orchestration hook in
+    routes.py to link a tdoa_attempts row back to the audio_event that
+    triggered it.
     """
     async with connect() as conn:
-        await conn.execute(
+        cursor = await conn.execute(
             """INSERT INTO audio_events
                (node_id, triggered, received_at, bytes, analysis_status,
                 detection_count, top_confidence, top_species, t_start_us, t_end_us)
@@ -605,6 +666,7 @@ async def insert_audio_event(
              detection_count, top_confidence, top_species, t_start_us, t_end_us),
         )
         await conn.commit()
+        return cursor.lastrowid
 
 
 async def list_audio_events(
@@ -952,3 +1014,126 @@ async def reset_species_tdoa_params_to_factory_default() -> dict:
     )
     log.info("species_tdoa_params: '%s' reset to factory defaults", DEFAULT_SPECIES_KEY)
     return await get_species_tdoa_params(DEFAULT_SPECIES_KEY)
+
+
+# ---------------------------------------------------------------------------
+# TDOA attempts CRUD
+# ---------------------------------------------------------------------------
+
+async def insert_tdoa_attempt(
+    *,
+    audio_event_id: int,
+    origin_node_id: str | None,
+    species_key: str,
+    used_default: bool,
+    status: str,
+    t_start_us: int,
+    t_end_us: int,
+    planned_node_ids: str,
+    min_corroborating_nodes: int,
+    correlation_method: str,
+    onset_detection_method: str,
+    travel_time_floor_s: float,
+    failure_reason: str | None = None,
+) -> int:
+    """Insert one TDOA orchestration attempt. Always called with status=
+    'planned' at insert time (the row's status is advanced afterwards via
+    update_tdoa_attempt_status once milestone 2's pulls have been issued).
+    Returns the inserted row's id.
+
+    planned_node_ids is a pre-serialized JSON array string — this module
+    stays a dumb DB layer and has no opinion on its contents, matching the
+    rest of this file's style.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        cursor = await conn.execute(
+            """INSERT INTO tdoa_attempts
+               (audio_event_id, origin_node_id, species_key, used_default,
+                status, t_start_us, t_end_us, planned_node_ids,
+                min_corroborating_nodes, correlation_method,
+                onset_detection_method, travel_time_floor_s, failure_reason,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (audio_event_id, origin_node_id, species_key, 1 if used_default else 0,
+             status, t_start_us, t_end_us, planned_node_ids,
+             min_corroborating_nodes, correlation_method, onset_detection_method,
+             travel_time_floor_s, failure_reason, now, now),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def list_tdoa_attempts(limit: int = 200) -> list[dict]:
+    """Return the most recent TDOA attempts, newest first. No API route
+    exposes this yet (milestone 1 is DB-inspectable only) — kept for
+    symmetry with this file's other tables and for use by later milestones."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM tdoa_attempts ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def update_tdoa_attempt_status(
+    attempt_id: int, status: str, failure_reason: str | None = None
+) -> None:
+    """Advance a tdoa_attempts row's status (milestone 2: 'planned' ->
+    'pulling' once at least one neighbour pull is issued, or -> 'failed' if
+    none could be). failure_reason is left untouched (not overwritten with
+    NULL) when not given, so a later successful status update doesn't erase
+    a previously recorded reason."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        if failure_reason is not None:
+            await conn.execute(
+                "UPDATE tdoa_attempts SET status = ?, failure_reason = ?, "
+                "updated_at = ? WHERE id = ?",
+                (status, failure_reason, now, attempt_id),
+            )
+        else:
+            await conn.execute(
+                "UPDATE tdoa_attempts SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, attempt_id),
+            )
+        await conn.commit()
+
+
+async def insert_tdoa_attempt_node(
+    *,
+    attempt_id: int,
+    node_id: str,
+    request_id: int | None,
+    status: str,
+    error: str | None = None,
+) -> int:
+    """Insert one per-neighbour pull execution record against a tdoa_attempts
+    row (milestone 2). Returns the inserted row's id. request_id is None when
+    the pull could never be issued (error holds why)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        cursor = await conn.execute(
+            """INSERT INTO tdoa_attempt_nodes
+               (attempt_id, node_id, request_id, status, error,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (attempt_id, node_id, request_id, status, error, now, now),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def list_tdoa_attempt_nodes(attempt_id: int) -> list[dict]:
+    """Return all per-neighbour pull records for one TDOA attempt. No API
+    route exposes this yet — DB-inspectable only, same as tdoa_attempts
+    itself at this milestone."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM tdoa_attempt_nodes WHERE attempt_id = ? ORDER BY id",
+            (attempt_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

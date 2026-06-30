@@ -6,6 +6,7 @@ within one polling interval of startup, so keeping it in-memory only
 keeps this simple and avoids a write-heavy DB.
 """
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,8 +14,24 @@ import aiosqlite
 
 from . import db
 
+log = logging.getLogger("sound_hub.registry")
+
 _write_lock = asyncio.Lock()
 _live_status: dict[str, dict] = {}
+
+# Consecutive poll-only failures required before a previously-reachable node
+# is actually flipped to "offline". Added 2026-06-30 after node 170 showed
+# offline overnight while its self-registration POSTs (a separate, plain-HTTP
+# reachability signal — see register_node() in routes.py) succeeded the
+# entire time: the periodic HTTPS poller flipped `reachable` on a single
+# failed poll with no debounce, racing/clobbering the register-confirmed
+# state. A successful call into update_live_status(reachable=True) — from
+# either the poller or registration — resets this counter immediately, so a
+# genuinely offline node (no register calls arriving either) still gets
+# marked offline after this many consecutive poll failures.
+_OFFLINE_FAILURE_THRESHOLD = 3
+
+_consec_failures: dict[str, int] = {}
 
 
 def _now_iso() -> str:
@@ -80,6 +97,7 @@ async def remove_node(node_id: str) -> None:
             await conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
             await conn.commit()
     _live_status.pop(node_id, None)
+    _consec_failures.pop(node_id, None)
 
 
 async def set_configured(node_id: str, configured: bool = True) -> None:
@@ -94,9 +112,27 @@ async def set_configured(node_id: str, configured: bool = True) -> None:
 
 def update_live_status(node_id: str, reachable: bool, raw_status: Optional[dict]) -> None:
     prev = _live_status.get(node_id, {})
+
+    if reachable:
+        _consec_failures[node_id] = 0
+        effective_reachable = True
+    else:
+        failures = _consec_failures.get(node_id, 0) + 1
+        _consec_failures[node_id] = failures
+        was_reachable = prev.get("reachable", False)
+        if was_reachable and failures < _OFFLINE_FAILURE_THRESHOLD:
+            log.info(
+                "Node %s: poll failure %d/%d while previously reachable — "
+                "holding 'online' (debounced)",
+                node_id, failures, _OFFLINE_FAILURE_THRESHOLD,
+            )
+            effective_reachable = True
+        else:
+            effective_reachable = False
+
     _live_status[node_id] = {
-        "reachable": reachable,
-        "last_seen_at": _now_iso() if reachable else prev.get("last_seen_at"),
+        "reachable": effective_reachable,
+        "last_seen_at": _now_iso() if effective_reachable else prev.get("last_seen_at"),
         "raw_status": raw_status if raw_status is not None else prev.get("raw_status"),
         "reg_heap_free_bytes": prev.get("reg_heap_free_bytes"),
         "reg_heap_min_free_bytes": prev.get("reg_heap_min_free_bytes"),

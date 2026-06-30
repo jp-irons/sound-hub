@@ -1,7 +1,9 @@
 """API routes consumed by the React frontend (mounted under /api in main.py)."""
 import asyncio
 import functools
+import json
 import logging
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -20,7 +22,7 @@ from .models import (
     SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
 )
-from .tdoa_solver import Node as TdoaNode, solve as tdoa_solve
+from .tdoa_solver import DEFAULT_SPEED_OF_SOUND, Node as TdoaNode, solve as tdoa_solve
 
 # Directory for saved audio files (created on first push).
 _AUDIO_DIR = os.path.join(os.path.dirname(__file__), "..", "audio")
@@ -714,6 +716,134 @@ async def audio_ack(body: AudioAckBody):
     log.info("audio ack id=%s status=%s from %s", body.request_id, body.status, body.src_mac)
 
 
+async def _approved_positioned_nodes() -> dict[str, tuple[float, float, float]]:
+    """Return {node_id: (pos_e, pos_n, pos_alt)} for every approved node with
+    a fully-known position. This is the candidate set for TDOA orchestration
+    — neighbour-selection ("initially: all") and the array-wide travel-time
+    floor both start from this set. See species_tdoa_pipeline design notes
+    (sound-hub/DESIGN.md) — "no neighbour-selection logic" gap.
+    """
+    nodes = await registry.list_nodes()
+    positions = await db.list_node_positions()
+    out: dict[str, tuple[float, float, float]] = {}
+    for node in nodes:
+        if node["approval_status"] != db.APPROVED:
+            continue
+        pos = positions.get(node["id"])
+        if pos is None:
+            continue
+        e, n, alt = pos.get("pos_e"), pos.get("pos_n"), pos.get("pos_alt")
+        if e is None or n is None or alt is None:
+            continue
+        out[node["id"]] = (e, n, alt)
+    return out
+
+
+def _max_pairwise_distance_m(positions: dict[str, tuple[float, float, float]]) -> float:
+    """Max Euclidean distance (metres) between any two of the given
+    positions. Returns 0.0 if fewer than 2 positions are available — callers
+    treat that as "no floor can be computed yet", not "array is a point"."""
+    coords = list(positions.values())
+    if len(coords) < 2:
+        return 0.0
+    best = 0.0
+    for i in range(len(coords)):
+        xi, yi, zi = coords[i]
+        for j in range(i + 1, len(coords)):
+            xj, yj, zj = coords[j]
+            dist = math.sqrt((xi - xj) ** 2 + (yi - yj) ** 2 + (zi - zj) ** 2)
+            if dist > best:
+                best = dist
+    return best
+
+
+async def _plan_tdoa_attempt(
+    *,
+    audio_event_id: int,
+    origin_node_id: str | None,
+    species_key: str,
+    t_start_us: int,
+    t_end_us: int,
+) -> None:
+    """TDOA orchestration milestones 1+2: on a persisted top-species
+    detection, look up the species' params, compute the (travel-time-floored)
+    pull window, pick candidate neighbour nodes, record the plan as a
+    tdoa_attempts row, then issue the actual pull to each candidate neighbour
+    and record per-node outcomes (milestone 2). Correlating the resulting
+    WAVs back to this attempt is milestone 3 — not done here.
+
+    Called from audio_push() inside its own try/except so a bug here never
+    breaks the push/analysis path that's the actual thing being acknowledged.
+    A per-node pull failure (one neighbour unreachable) is caught individually
+    below and does not abort pulls to the remaining neighbours.
+    """
+    params, used_default = await db.get_effective_species_tdoa_params(species_key)
+
+    candidates = await _approved_positioned_nodes()
+    travel_time_floor_s = _max_pairwise_distance_m(candidates) / DEFAULT_SPEED_OF_SOUND
+    planned_node_ids = [nid for nid in candidates if nid != origin_node_id]
+
+    margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
+    margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
+    pull_t_start_us = t_start_us - int(margin_pre_s * 1e6)
+    pull_t_end_us = t_end_us + int(margin_post_s * 1e6)
+
+    attempt_id = await db.insert_tdoa_attempt(
+        audio_event_id=audio_event_id,
+        origin_node_id=origin_node_id,
+        species_key=species_key,
+        used_default=used_default,
+        status="planned",
+        t_start_us=pull_t_start_us,
+        t_end_us=pull_t_end_us,
+        planned_node_ids=json.dumps(planned_node_ids),
+        min_corroborating_nodes=params["min_corroborating_nodes"],
+        correlation_method=params["correlation_method"],
+        onset_detection_method=params["onset_detection_method"],
+        travel_time_floor_s=travel_time_floor_s,
+    )
+    log.info(
+        "tdoa attempt id=%s planned: species=%s origin=%s used_default=%s "
+        "neighbours=%s window=[%d,%d]us floor=%.3fs",
+        attempt_id, species_key, origin_node_id, used_default,
+        planned_node_ids, pull_t_start_us, pull_t_end_us, travel_time_floor_s,
+    )
+
+    issued = 0
+    for nid in planned_node_ids:
+        try:
+            request_id = await _issue_sample_pull(nid, pull_t_start_us, pull_t_end_us)
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            await db.insert_tdoa_attempt_node(
+                attempt_id=attempt_id, node_id=nid, request_id=None,
+                status="request_failed", error=str(detail),
+            )
+            log.warning(
+                "tdoa attempt id=%s — pull to node=%s failed: %s",
+                attempt_id, nid, detail,
+            )
+            continue
+        await db.insert_tdoa_attempt_node(
+            attempt_id=attempt_id, node_id=nid, request_id=request_id,
+            status="requested",
+        )
+        issued += 1
+
+    if issued > 0:
+        await db.update_tdoa_attempt_status(attempt_id, "pulling")
+    else:
+        await db.update_tdoa_attempt_status(
+            attempt_id, "failed",
+            failure_reason="no neighbour pulls could be issued" if planned_node_ids
+                           else "no neighbour nodes available",
+        )
+    log.info(
+        "tdoa attempt id=%s — pulls issued to %d/%d neighbours",
+        attempt_id, issued, len(planned_node_ids),
+    )
+
+
 @router.post("/audio/push", status_code=200, dependencies=[Depends(require_node)])
 async def audio_push(
     request: Request,
@@ -809,7 +939,7 @@ async def audio_push(
         log.info("audio push id=%s node=%s — %d detection(s) registered",
                   requestId, nodeId, len(persisted))
 
-    await db.insert_audio_event(
+    audio_event_id = await db.insert_audio_event(
         node_id=nodeId, triggered=triggered, received_at=_now_iso(),
         bytes_=len(data), analysis_status="analyzed",
         detection_count=len(persisted),
@@ -817,6 +947,26 @@ async def audio_push(
         top_species=top.get("common_name") if top else None,
         t_start_us=tStartUs, t_end_us=tEndUs,
     )
+
+    # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
+    # sound-hub/DESIGN.md): a persisted top-species detection with a known
+    # capture window triggers planning. tStartUs/tEndUs absent means older
+    # firmware that doesn't send the actual capture window yet — nothing to
+    # anchor a pull window on, so planning is skipped for this push.
+    if persisted and tStartUs is not None and tEndUs is not None:
+        try:
+            await _plan_tdoa_attempt(
+                audio_event_id=audio_event_id,
+                origin_node_id=nodeId,
+                species_key=top["common_name"],
+                t_start_us=tStartUs,
+                t_end_us=tEndUs,
+            )
+        except Exception:
+            log.exception(
+                "audio push id=%s node=%s — TDOA attempt planning failed",
+                requestId, nodeId,
+            )
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
@@ -832,18 +982,21 @@ async def get_audio_request(request_id: int):
     return {"requestId": request_id, **entry}
 
 
-@router.post("/nodes/{node_id}/sample", status_code=202, dependencies=[Depends(require_admin)])
-async def request_sample(node_id: str, req: AudioSampleRequest):
+async def _issue_sample_pull(node_id: str, t_start_us: int, t_end_us: int) -> int:
     """Trigger an audio pull from a node for a specific UTC time range.
+    Shared by the POST /nodes/{id}/sample route and the TDOA orchestration
+    hook (_plan_tdoa_attempt) — extracted so both go through identical
+    mac/broker resolution and _audio_requests bookkeeping rather than two
+    copies of the same relay logic.
 
     Flow:
       1. Resolves the target node's wifiMac from its last polled status.
       2. Finds the currently reachable broker node.
       3. POSTs the AudioRequestMsg JSON to the broker's /espnow/relay endpoint.
-      4. Returns {requestId, status: "relayed"} immediately — poll
+      4. Returns the new requestId immediately — poll
          GET /audio/requests/{requestId} for ack and push progress.
 
-    Errors:
+    Raises HTTPException:
       404 — node not found in registry
       422 — node wifiMac not yet known (wait for next status poll)
       503 — no reachable broker, or broker IP unknown
@@ -885,8 +1038,8 @@ async def request_sample(node_id: str, req: AudioSampleRequest):
     payload = {
         "requestId": request_id,
         "targetMac": target_mac,
-        "tStartUs":  req.t_start_us,
-        "tEndUs":    req.t_end_us,
+        "tStartUs":  t_start_us,
+        "tEndUs":    t_end_us,
         "hubIp":     config.BASE_STATION_IP,
         "hubPort":   config.BASE_STATION_PORT,
     }
@@ -901,7 +1054,17 @@ async def request_sample(node_id: str, req: AudioSampleRequest):
         )
 
     log.info("audio pull relayed -- id=%s node=%s mac=%s [%s ... %s]",
-             request_id, node_id, target_mac, req.t_start_us, req.t_end_us)
+             request_id, node_id, target_mac, t_start_us, t_end_us)
+    return request_id
+
+
+@router.post("/nodes/{node_id}/sample", status_code=202, dependencies=[Depends(require_admin)])
+async def request_sample(node_id: str, req: AudioSampleRequest):
+    """Trigger an audio pull from a node for a specific UTC time range.
+    See _issue_sample_pull for the actual mechanics; this route is a thin
+    wrapper shaping its result into the documented response body.
+    """
+    request_id = await _issue_sample_pull(node_id, req.t_start_us, req.t_end_us)
     return {"requestId": request_id, "status": "relayed"}
 
 
