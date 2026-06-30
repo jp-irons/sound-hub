@@ -444,7 +444,7 @@ export default function SettingsTab() {
 
   return (
     <div style={sty.root}>
-      <div style={sty.section}>
+      <div style={sty.wideSection}>
         <div style={sty.label}>Hub Origin</div>
         <div style={{ ...sty.hint, marginBottom: 10 }}>
           The geographic datum (0,0,0) that all node array positions are measured relative to.
@@ -491,7 +491,7 @@ export default function SettingsTab() {
               </label>
             </div>
 
-            <div style={sty.row}>
+            <div style={{ ...sty.row, flexWrap: 'nowrap' }}>
               <button
                 type="button"
                 className="btn btn-primary"
