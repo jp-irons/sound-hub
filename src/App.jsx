@@ -57,6 +57,15 @@ export default function App() {
     }
   }, [tab, authState, isAdmin])
 
+  // Same idea for analytics: it's viewer-level (not admin-only), but still
+  // requires auth. If a session drops or the user logs out while viewing it,
+  // bounce back to the map rather than leaving a dead tab selected.
+  useEffect(() => {
+    if (tab === 'analytics' && authState !== 'authenticated') {
+      setTab('map')
+    }
+  }, [tab, authState])
+
   // Wire up the 401 callback so any apiFetch can flip us back to login.
   useEffect(() => {
     onUnauthenticated(() => {
@@ -346,7 +355,9 @@ export default function App() {
       }}>
         <button style={tabStyle('map')}        onClick={() => setTab('map')}>Map</button>
         <button style={tabStyle('detections')} onClick={() => setTab('detections')}>Detections</button>
-        <button style={tabStyle('analytics')}  onClick={() => setTab('analytics')}>Analytics</button>
+        {authState === 'authenticated' && (
+          <button style={tabStyle('analytics')} onClick={() => setTab('analytics')}>Analytics</button>
+        )}
 
         {isAdmin && (
           <button style={tabStyle('tools')} onClick={() => setTab('tools')}>Tools</button>
@@ -482,7 +493,7 @@ export default function App() {
       )}
 
       {tab === 'detections' && <DetectionsTab />}
-      {tab === 'analytics' && <AnalyticsTab />}
+      {tab === 'analytics' && authState === 'authenticated' && <AnalyticsTab />}
       {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
       {tab === 'settings' && isAdmin && <SettingsTab />}
