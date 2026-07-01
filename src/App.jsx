@@ -48,14 +48,15 @@ export default function App() {
     try { localStorage.setItem(TAB_KEY, tab) } catch { /* ignore */ }
   }, [tab])
 
-  // Guard against a restored admin-only tab (tools/users) when the
-  // logged-in user isn't an admin — e.g. a different account on the same
-  // browser, or a role change since the tab was last saved.
+  // Guard against a restored admin-only tab (tools/users/settings) when the
+  // current user isn't an admin — e.g. a different account on the same
+  // browser, a role change since the tab was last saved, or a full sign-out
+  // (isAdmin is false whenever user is null, so this covers that too).
   useEffect(() => {
-    if ((tab === 'tools' || tab === 'users' || tab === 'settings') && authState === 'authenticated' && !isAdmin) {
+    if ((tab === 'tools' || tab === 'users' || tab === 'settings') && !isAdmin) {
       setTab('map')
     }
-  }, [tab, authState, isAdmin])
+  }, [tab, isAdmin])
 
   // Same idea for analytics: it's viewer-level (not admin-only), but still
   // requires auth. If a session drops or the user logs out while viewing it,
