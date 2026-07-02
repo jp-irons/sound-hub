@@ -50,6 +50,14 @@ function tUsToIso(tUs) {
 // ratio (kTriggerRatioEnergy=6.0 / kTriggerRatioFlux=2.0 in AudioTrigger.hpp)
 // drawn as a reference line. Bars are stacked: muted = total (near-miss +
 // fired) count in that bucket, green = the fired portion of it.
+// Fired counts are routinely 1000:1 (or worse) against near-miss counts in
+// the same bucket (see project history — hundreds of fires/day against
+// 373k+ near-miss blocks) — a strictly proportional bar height renders a
+// real fire as a fraction of a pixel. MIN_FIRED_PX floors any nonzero fired
+// segment to a visible height; it never overstates the count itself, since
+// the exact count is always also printed as a label above the bar.
+const MIN_FIRED_PX = 3
+
 function HistogramChart({ histogram, threshold, label }) {
   const width = 380
   const height = 110
@@ -68,7 +76,14 @@ function HistogramChart({ histogram, threshold, label }) {
   const byBucket = new Map(buckets.map(b => [Math.round(b.bucketStart / bucketWidth), b]))
   const maxCount = Math.max(1, ...buckets.map(b => b.count))
   const barWidth = width / numBins
-  const xForThreshold = (threshold / maxRatio) * width
+  // Threshold line uses the SAME per-bucket scale as the bars (width/numBins)
+  // rather than width/maxRatio. numBins is one more than the true count of
+  // unit bins (it includes the open-ended overflow bin at the end), so those
+  // two scales disagree — and increasingly so at higher ratio values, which
+  // is why this previously looked roughly right at flux's threshold=2 but
+  // visibly off at energy's threshold=6. This keeps the line exactly on its
+  // bucket's left edge regardless of where the threshold falls.
+  const xForThreshold = (threshold / bucketWidth) * barWidth
 
   return (
     <div>
@@ -79,7 +94,8 @@ function HistogramChart({ histogram, threshold, label }) {
           const count = b?.count ?? 0
           const firedCount = b?.firedCount ?? 0
           const barHeight = (count / maxCount) * chartHeight
-          const firedHeight = (firedCount / maxCount) * chartHeight
+          const rawFiredHeight = (firedCount / maxCount) * chartHeight
+          const firedHeight = firedCount > 0 ? Math.min(barHeight, Math.max(rawFiredHeight, MIN_FIRED_PX)) : 0
           const x = i * barWidth
           return (
             <g key={i}>
@@ -89,11 +105,19 @@ function HistogramChart({ histogram, threshold, label }) {
                 fill="var(--text-muted, #888)" opacity={0.4}
               />
               {firedCount > 0 && (
-                <rect
-                  x={x + 1} y={chartHeight - firedHeight}
-                  width={Math.max(0, barWidth - 2)} height={firedHeight}
-                  fill="var(--green, #4caf50)"
-                />
+                <>
+                  <rect
+                    x={x + 1} y={chartHeight - firedHeight}
+                    width={Math.max(0, barWidth - 2)} height={firedHeight}
+                    fill="var(--green, #4caf50)"
+                  />
+                  <text
+                    x={x + barWidth / 2} y={Math.max(9, chartHeight - firedHeight - 3)}
+                    fontSize={8} fill="var(--green, #4caf50)" textAnchor="middle"
+                  >
+                    {firedCount}
+                  </text>
+                </>
               )}
             </g>
           )
@@ -500,9 +524,14 @@ export default function AnalyticsTab() {
                   <HistogramChart histogram={histogramData.energy} threshold={6.0} label="Energy ratio" />
                   <HistogramChart histogram={histogramData.flux} threshold={2.0} label="Flux ratio" />
                   <div style={{ fontSize: 11, color: 'var(--text-muted, #888)' }}>
-                    Muted bars = near-miss + fired blocks per bucket; green = the fired portion.
-                    Scoped to the raw retention window (recent hours) — older activity only
-                    survives in per-minute rollups, not shown here yet.
+                    Muted bars = near-miss + fired blocks per bucket; green = the fired portion,
+                    height floored to stay visible and labelled with the exact count (fires are
+                    routinely 1000:1 or rarer against near-misses in the same bucket). Green below
+                    the dashed threshold line is a fire attributable to the low-band gate — its
+                    ratios here are whatever the high-band gates read at that moment, not what
+                    triggered it (the node doesn't currently record which gate fired). Scoped to
+                    the raw retention window (recent hours) — older activity only survives in
+                    per-minute rollups, not shown here yet.
                   </div>
                 </div>
               )}
