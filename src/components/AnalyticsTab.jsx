@@ -10,6 +10,24 @@ import { useIsMobile } from '../hooks/useBreakpoint.js'
 const POLL_INTERVAL_MS = 5000
 const EVENTS_LIMIT = 200
 
+// Trigger-diagnostics summary fetch no longer needs the raw `events` array
+// (the per-block detail table it fed was replaced by the ratio histogram
+// below — a sustained call flooded that table with near-identical near-miss
+// rows and buried the one row that mattered, see project discussion). Ask
+// for the minimum the backend will accept rather than paying for a payload
+// nothing renders.
+const TRIGGER_SUMMARY_EVENTS_LIMIT = 1
+
+// Histogram time-range presets. Capped at 6h because /trigger-diag/histogram
+// reads raw trigger_events, which only survives TRIGGER_EVENTS_RETENTION_HOURS
+// (6h server-side) before being pruned down to per-minute rollups that can't
+// reconstruct a distribution.
+const RANGE_PRESETS = [
+  { key: '15m', label: 'Last 15 min', ms: 15 * 60 * 1000 },
+  { key: '1h', label: 'Last hour', ms: 60 * 60 * 1000 },
+  { key: '6h', label: 'Last 6h (max)', ms: 6 * 60 * 60 * 1000 },
+]
+
 function relativeTime(isoString) {
   if (!isoString) return '—'
   const diff = Date.now() - new Date(isoString).getTime()
@@ -27,10 +45,71 @@ function tUsToIso(tUs) {
   return new Date(tUs / 1000).toISOString()
 }
 
-function ratioColour(ratio) {
-  if (ratio >= 6.0) return 'var(--green, #4caf50)'
-  if (ratio >= 3.0) return 'var(--yellow, #ffc107)'
-  return 'var(--text-muted, #888)'
+// Renders one ratio histogram (energy or flux) as inline SVG — no charting
+// library needed for a couple of bar series. `threshold` is the gate's fire
+// ratio (kTriggerRatioEnergy=6.0 / kTriggerRatioFlux=2.0 in AudioTrigger.hpp)
+// drawn as a reference line. Bars are stacked: muted = total (near-miss +
+// fired) count in that bucket, green = the fired portion of it.
+function HistogramChart({ histogram, threshold, label }) {
+  const width = 380
+  const height = 110
+  const chartHeight = height - 14
+
+  if (!histogram || histogram.buckets.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--text-muted, #888)', padding: '8px 0' }}>
+        {label}: no data in this range.
+      </div>
+    )
+  }
+
+  const { bucketWidth, maxRatio, buckets } = histogram
+  const numBins = Math.round(maxRatio / bucketWidth) + 1 // + open-ended overflow bin
+  const byBucket = new Map(buckets.map(b => [Math.round(b.bucketStart / bucketWidth), b]))
+  const maxCount = Math.max(1, ...buckets.map(b => b.count))
+  const barWidth = width / numBins
+  const xForThreshold = (threshold / maxRatio) * width
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted, #888)', marginBottom: 4 }}>{label}</div>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ display: 'block' }}>
+        {Array.from({ length: numBins }, (_, i) => {
+          const b = byBucket.get(i)
+          const count = b?.count ?? 0
+          const firedCount = b?.firedCount ?? 0
+          const barHeight = (count / maxCount) * chartHeight
+          const firedHeight = (firedCount / maxCount) * chartHeight
+          const x = i * barWidth
+          return (
+            <g key={i}>
+              <rect
+                x={x + 1} y={chartHeight - barHeight}
+                width={Math.max(0, barWidth - 2)} height={barHeight}
+                fill="var(--text-muted, #888)" opacity={0.4}
+              />
+              {firedCount > 0 && (
+                <rect
+                  x={x + 1} y={chartHeight - firedHeight}
+                  width={Math.max(0, barWidth - 2)} height={firedHeight}
+                  fill="var(--green, #4caf50)"
+                />
+              )}
+            </g>
+          )
+        })}
+        <line
+          x1={xForThreshold} x2={xForThreshold} y1={0} y2={chartHeight}
+          stroke="var(--red, #f44336)" strokeWidth={1} strokeDasharray="3,2"
+        />
+        <text x={Math.min(xForThreshold + 3, width - 60)} y={10} fontSize={9} fill="var(--red, #f44336)">
+          fires ≥ {threshold}
+        </text>
+        <text x={0} y={height - 2} fontSize={9} fill="var(--text-muted, #888)">0</text>
+        <text x={width - 26} y={height - 2} fontSize={9} fill="var(--text-muted, #888)">≥{maxRatio}</text>
+      </svg>
+    </div>
+  )
 }
 
 const STATUS_LABEL = {
@@ -51,11 +130,13 @@ export default function AnalyticsTab() {
   const [nodeFilter, setNodeFilter] = useState('')
   const [triggerData, setTriggerData]   = useState(null)
   const [triggerError, setTriggerError] = useState(null)
+  const [histogramData, setHistogramData]   = useState(null)
+  const [histogramError, setHistogramError] = useState(null)
+  const [rangePreset, setRangePreset] = useState('1h')
   const isMobile = useIsMobile()
 
   const [activeSubTab, setActiveSubTab] = useState('events') // 'events' | 'trigger'
   const [eventsDetailOpen, setEventsDetailOpen] = useState(false)
-  const [triggerDetailOpen, setTriggerDetailOpen] = useState(false)
 
   const fetchAnalytics = useCallback(async () => {
     try {
@@ -79,7 +160,7 @@ export default function AnalyticsTab() {
   // diagnose why the v2 AND-gate trigger stopped firing for some species.
   const fetchTriggerDiag = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ limit: String(EVENTS_LIMIT) })
+      const params = new URLSearchParams({ limit: String(TRIGGER_SUMMARY_EVENTS_LIMIT) })
       if (nodeFilter) params.set('nodeId', nodeFilter)
       const res = await apiFetch(`/analytics/trigger-diag?${params}`)
       if (!res.ok) {
@@ -93,17 +174,49 @@ export default function AnalyticsTab() {
     }
   }, [nodeFilter])
 
+  // Ratio histogram: an explicit time-range query, not a live feed — pulling
+  // the same range every few seconds would just re-fetch an unchanged
+  // result. Refetches only when the range/node selection changes, plus the
+  // manual Refresh button below (which also re-runs fetchTriggerDiag).
+  const fetchHistogram = useCallback(async () => {
+    try {
+      const preset = RANGE_PRESETS.find(p => p.key === rangePreset) ?? RANGE_PRESETS[1]
+      const untilUs = Date.now() * 1000
+      const sinceUs = untilUs - preset.ms * 1000
+      const params = new URLSearchParams({
+        sinceUs: String(sinceUs), untilUs: String(untilUs),
+        bucketWidth: '1', maxRatio: '20',
+      })
+      if (nodeFilter) params.set('nodeId', nodeFilter)
+      const res = await apiFetch(`/analytics/trigger-diag/histogram?${params}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      setHistogramData(await res.json())
+      setHistogramError(null)
+    } catch (err) {
+      setHistogramError(err.message ?? String(err))
+    }
+  }, [nodeFilter, rangePreset])
+
   useEffect(() => {
     fetchAnalytics()
     const t = setInterval(fetchAnalytics, POLL_INTERVAL_MS)
     return () => clearInterval(t)
   }, [fetchAnalytics])
 
+  // No polling here (unlike fetchAnalytics above) — this tab is a deliberate
+  // query over a chosen node/range, not a live-updating feed. Refetches on
+  // mount and whenever fetchTriggerDiag/fetchHistogram's own dependencies
+  // (nodeFilter, rangePreset) change, plus the manual Refresh button.
   useEffect(() => {
     fetchTriggerDiag()
-    const t = setInterval(fetchTriggerDiag, POLL_INTERVAL_MS)
-    return () => clearInterval(t)
   }, [fetchTriggerDiag])
+
+  useEffect(() => {
+    fetchHistogram()
+  }, [fetchHistogram])
 
   const sty = {
     root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1 },
@@ -339,43 +452,59 @@ export default function AnalyticsTab() {
           </div>
 
           {triggerData && triggerData.summary.length > 0 && (
-            <button style={sty.disclosureBtn} onClick={() => setTriggerDetailOpen(o => !o)}>
-              <span>{triggerDetailOpen ? '▾' : '▸'}</span>
-              Diagnostic blocks ({triggerData.events.length})
-            </button>
-          )}
+            <div>
+              <div style={{ ...sty.toolbar, marginBottom: 8 }}>
+                <div style={sty.sectionLabel}>Ratio histogram</div>
+                <div style={{ flex: 1 }} />
+                <select
+                  style={sty.input}
+                  value={rangePreset}
+                  onChange={e => setRangePreset(e.target.value)}
+                >
+                  {RANGE_PRESETS.map(p => (
+                    <option key={p.key} value={p.key}>{p.label}</option>
+                  ))}
+                </select>
+                <input
+                  style={sty.input}
+                  placeholder="Filter by node id…"
+                  value={nodeFilter}
+                  onChange={e => setNodeFilter(e.target.value)}
+                />
+                <button
+                  style={{
+                    ...sty.disclosureBtn, padding: '4px 10px',
+                    border: '1px solid var(--border, #333)', borderRadius: 4,
+                  }}
+                  onClick={() => { fetchTriggerDiag(); fetchHistogram() }}
+                >
+                  Refresh
+                </button>
+              </div>
 
-          {triggerDetailOpen && triggerData && (
-            <div style={sty.detailWrap}>
-              {triggerData.events.length === 0 ? (
-                <div style={sty.empty}>No trigger-diagnostic blocks match the current filter.</div>
+              {histogramError ? (
+                <div style={{
+                  fontSize: 12, padding: '6px 10px', borderRadius: 4,
+                  background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+                }}>
+                  {histogramError}
+                </div>
+              ) : !histogramData ? (
+                <div style={sty.empty}>Loading…</div>
               ) : (
-                <table style={sty.table}>
-                  <thead>
-                    <tr>
-                      <th style={sty.th}>{isMobile ? 'Time' : 'Block time'}</th>
-                      <th style={sty.th}>Node</th>
-                      <th style={sty.th}>Energy ratio</th>
-                      <th style={sty.th}>Flux ratio</th>
-                      <th style={sty.th}>Fired</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {triggerData.events.map(e => (
-                      <tr key={e.id}>
-                        <td style={sty.td}>
-                          {isMobile ? formatTime(tUsToIso(e.tUs)) : formatDateTime(tUsToIso(e.tUs))}
-                        </td>
-                        <td style={sty.td}>{e.nodeId ?? '—'}</td>
-                        <td style={{ ...sty.td, color: ratioColour(e.energyRatio) }}>{e.energyRatio.toFixed(2)}</td>
-                        <td style={{ ...sty.td, color: ratioColour(e.fluxRatio) }}>{e.fluxRatio.toFixed(2)}</td>
-                        <td style={{ ...sty.td, color: e.fired ? 'var(--green, #4caf50)' : sty.td.color }}>
-                          {e.fired ? 'Fired' : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div style={{
+                  background: 'var(--surface1, #1e1e1e)', borderRadius: 8,
+                  border: '1px solid var(--border, #333)', padding: 12,
+                  display: 'flex', flexDirection: 'column', gap: 16,
+                }}>
+                  <HistogramChart histogram={histogramData.energy} threshold={6.0} label="Energy ratio" />
+                  <HistogramChart histogram={histogramData.flux} threshold={2.0} label="Flux ratio" />
+                  <div style={{ fontSize: 11, color: 'var(--text-muted, #888)' }}>
+                    Muted bars = near-miss + fired blocks per bucket; green = the fired portion.
+                    Scoped to the raw retention window (recent hours) — older activity only
+                    survives in per-minute rollups, not shown here yet.
+                  </div>
+                </div>
               )}
             </div>
           )}

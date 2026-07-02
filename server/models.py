@@ -357,6 +357,44 @@ class TriggerDiagAnalytics(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RatioHistogramBucket(BaseModel):
+    """One bin of a trigger_ratio_histogram() result.
+
+    bucket_start is the bin's lower edge in ratio units. The last bucket for
+    a given histogram is an open-ended "≥ max_ratio" overflow, not a true
+    fixed-width bin — see trigger_ratio_histogram()'s docstring.
+    """
+    bucket_start: float = Field(alias="bucketStart")
+    count: int
+    fired_count: int = Field(alias="firedCount")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class RatioHistogram(BaseModel):
+    bucket_width: float = Field(alias="bucketWidth")
+    max_ratio: float = Field(alias="maxRatio")
+    buckets: list[RatioHistogramBucket]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TriggerHistogramResponse(BaseModel):
+    """Response for GET /api/analytics/trigger-diag/histogram.
+
+    Distribution of near-miss/fire ratios over an explicit time range —
+    scoped to raw trigger_events, so since_us can't reach further back than
+    TRIGGER_EVENTS_RETENTION_HOURS. See trigger_ratio_histogram() in db.py.
+    """
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    since_us: int = Field(alias="sinceUs")
+    until_us: int = Field(alias="untilUs")
+    energy: RatioHistogram
+    flux: RatioHistogram
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LatLon(BaseModel):
     lat: float
     lon: float

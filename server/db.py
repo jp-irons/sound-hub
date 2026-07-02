@@ -1021,6 +1021,67 @@ async def trigger_event_summary() -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def trigger_ratio_histogram(
+    node_id: str | None, since_us: int, until_us: int,
+    bucket_width: float = 1.0, max_ratio: float = 20.0,
+) -> dict:
+    """Bucket energy_ratio and flux_ratio from trigger_events over [since_us,
+    until_us] into fixed-width bins, with a per-bucket fired-row count.
+
+    Answers "where does the near-miss distribution sit relative to the fire
+    threshold" — the question the raw per-block detail table turned out not
+    to answer well (a sustained call floods it with near-identical rows,
+    burying the shape). Necessarily scoped to raw trigger_events, so it can
+    only see back as far as TRIGGER_EVENTS_RETENTION_HOURS — unlike
+    trigger_event_rollups, which survives indefinitely but only keeps
+    min/avg/max per minute, not enough to reconstruct a distribution.
+
+    Values are clamped to max_ratio before bucketing (SQLite's multi-arg
+    MIN() is a scalar function, not the aggregate — safe to mix with the
+    aggregate COUNT/SUM in the same query) so a rare very-high-ratio fire
+    doesn't stretch the bucket range and squash the near-threshold detail
+    that actually matters for a retuning decision. That top bucket is an
+    open-ended "≥ max_ratio" overflow, not a true bin.
+
+    node_id=None combines all nodes into one histogram — a reasonable first
+    look, but per-node is more meaningful for an actual threshold decision:
+    nodes have shown real SNR/hardware-driven differences in observed ratios
+    for the same physical event (e.g. 574 vs 236 energy_ratio, see
+    project history), which a combined histogram would blur together.
+
+    Returns {"energy": [{"bucket": int, "count": int, "fired_count": int}, ...],
+             "flux": [...]}, one entry per non-empty bucket, ordered by
+    bucket index. `bucket` is a bin *index* (multiply by bucket_width at the
+    call site to get the bin's lower edge in ratio units — see
+    trigger_diag_histogram() in routes.py, which does exactly that).
+    """
+    where = ["t_us >= ?", "t_us <= ?"]
+    params: list = [since_us, until_us]
+    if node_id:
+        where.append("node_id = ?")
+        params.append(node_id)
+    where_clause = " AND ".join(where)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        result: dict = {}
+        for key, column in (("energy", "energy_ratio"), ("flux", "flux_ratio")):
+            cursor = await conn.execute(
+                f"""SELECT
+                        CAST(MIN({column}, ?) / ? AS INTEGER) AS bucket,
+                        COUNT(*) AS count,
+                        SUM(fired) AS fired_count
+                    FROM trigger_events
+                    WHERE {where_clause}
+                    GROUP BY bucket
+                    ORDER BY bucket""",
+                [max_ratio, bucket_width, *params],
+            )
+            rows = await cursor.fetchall()
+            result[key] = [dict(row) for row in rows]
+        return result
+
+
 async def list_species_summary(
     min_conf: float = 0.0,
     species: str | None = None,

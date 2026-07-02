@@ -21,6 +21,7 @@ from .models import (
     NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
     SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
+    RatioHistogram, RatioHistogramBucket, TriggerHistogramResponse,
 )
 from .tdoa_solver import DEFAULT_SPEED_OF_SOUND, Node as TdoaNode, solve as tdoa_solve
 
@@ -1203,6 +1204,57 @@ async def trigger_diag_analytics(
         for r in raw_events
     ]
     return TriggerDiagAnalytics(summary=summary, events=events)
+
+
+@router.get(
+    "/analytics/trigger-diag/histogram",
+    response_model=TriggerHistogramResponse,
+    dependencies=[Depends(require_viewer)],
+)
+async def trigger_diag_histogram(
+    since_us: int = Query(alias="sinceUs"),
+    until_us: int = Query(alias="untilUs"),
+    node_id: str | None = Query(default=None, alias="nodeId"),
+    bucket_width: float = Query(default=1.0, alias="bucketWidth", gt=0),
+    max_ratio: float = Query(default=20.0, alias="maxRatio", gt=0),
+):
+    """Distribution of trigger-diagnostic ratios over an explicit time range.
+
+    Complements /analytics/trigger-diag: that endpoint's raw block list
+    turned out to answer "did it fire recently" poorly during a sustained
+    call (near-miss floods bury the fire under identical rows sharing a
+    LIMIT with every other node). This answers "where does the near-miss
+    distribution sit relative to the fire threshold" instead — the question
+    that actually matters for a retuning decision — by bucketing ratios
+    server-side rather than shipping raw rows to the client.
+
+    Scoped to raw trigger_events, so since_us can't reach further back than
+    TRIGGER_EVENTS_RETENTION_HOURS lets rows survive. No default time range
+    is applied — the caller must reason about the retention window.
+    """
+    raw = await db.trigger_ratio_histogram(
+        node_id=node_id, since_us=since_us, until_us=until_us,
+        bucket_width=bucket_width, max_ratio=max_ratio,
+    )
+
+    def _to_histogram(rows: list[dict]) -> RatioHistogram:
+        return RatioHistogram(
+            bucket_width=bucket_width,
+            max_ratio=max_ratio,
+            buckets=[
+                RatioHistogramBucket(
+                    bucket_start=r["bucket"] * bucket_width,
+                    count=r["count"],
+                    fired_count=r["fired_count"] or 0,
+                )
+                for r in rows
+            ],
+        )
+
+    return TriggerHistogramResponse(
+        node_id=node_id, since_us=since_us, until_us=until_us,
+        energy=_to_histogram(raw["energy"]), flux=_to_histogram(raw["flux"]),
+    )
 
 
 # ---------------------------------------------------------------------------
