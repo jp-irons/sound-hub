@@ -13,7 +13,7 @@ PUT /api/origin override.  Once set it survives all node restarts/removals.
 """
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -233,6 +233,16 @@ PENDING = "pending"
 APPROVED = "approved"
 REJECTED = "rejected"
 
+# trigger_events is diagnostic (near-miss/fire) data, not the permanent
+# record — detections/audio_events are. It reached 18M+ rows / 2.3GB with no
+# retention policy at all (see idx_trigger_events_t_us migration above),
+# which was slow enough to trip upstream request timeouts. 7 days keeps a
+# window wide enough to debug a report that comes in a day or two after the
+# fact, without letting the table regrow unbounded. Adjust here if it proves
+# too short/long in practice — not read from config, deliberately, to avoid
+# a footgun where an existing deployment's soundhub.conf doesn't define it.
+TRIGGER_EVENTS_RETENTION_DAYS = 7
+
 # Sentinel species_key for the fallback row in species_tdoa_params — used
 # when a detected species has no row of its own, or its row is disabled.
 # Not seeded by init_db() — created lazily by
@@ -351,6 +361,20 @@ async def init_db() -> None:
             await conn.execute("ALTER TABLE audio_events ADD COLUMN t_start_us INTEGER")
         if "t_end_us" not in audio_event_columns:
             await conn.execute("ALTER TABLE audio_events ADD COLUMN t_end_us INTEGER")
+
+        # Migration: trigger_events only had an implicit index on
+        # (node_id, t_us) from its UNIQUE constraint, which isn't usable for
+        # ORDER BY t_us DESC across all nodes (the common case — no node_id
+        # filter). At scale (observed: 18M+ rows) that meant a full table
+        # scan plus a temp b-tree sort on every /analytics/trigger-diag call,
+        # slow enough to trip upstream 504s. IF NOT EXISTS makes this a no-op
+        # on every startup after the first; the first run against an
+        # existing large table will take noticeably longer as it builds the
+        # index — expected, not a hang.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trigger_events_t_us "
+            "ON trigger_events(t_us DESC, id DESC)"
+        )
 
         await conn.commit()
 
@@ -825,6 +849,35 @@ async def list_trigger_events(
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def prune_trigger_events(retention_days: int = TRIGGER_EVENTS_RETENTION_DAYS) -> int:
+    """Delete trigger_events rows older than retention_days. Returns the
+    number of rows deleted.
+
+    t_us is node-clock UTC microseconds (not a hub wall-clock timestamp), so
+    the cutoff is computed the same way for a correct comparison. Intended
+    to be called periodically from the poller (see poller.run()) rather than
+    on every poll tick — a day-granularity retention window doesn't need
+    sub-minute precision, and this table is large enough that a tighter
+    cadence would just be unnecessary write churn.
+
+    The very first call against an already-large, never-pruned table can
+    delete a large fraction of it in one transaction — consider running an
+    equivalent one-off `DELETE FROM trigger_events WHERE t_us < ...` via the
+    sqlite3 CLI at a quiet moment first, same as the index migration above,
+    rather than letting it happen cold on a live server.
+    """
+    cutoff_us = int(
+        (datetime.now(timezone.utc) - timedelta(days=retention_days)).timestamp()
+        * 1_000_000
+    )
+    async with connect() as conn:
+        cursor = await conn.execute(
+            "DELETE FROM trigger_events WHERE t_us < ?", (cutoff_us,)
+        )
+        await conn.commit()
+        return cursor.rowcount if cursor.rowcount is not None and cursor.rowcount > 0 else 0
 
 
 async def trigger_event_summary() -> list[dict]:

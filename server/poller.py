@@ -13,6 +13,13 @@ from . import config, db, registry
 
 log = logging.getLogger("sound_hub.poller")
 
+# How often (seconds) to run db.prune_trigger_events. A day-granularity
+# retention window doesn't need to be checked every STATUS_POLL_INTERVAL_S
+# (5s) tick — that would just be unnecessary DELETE churn against a large
+# table. Once an hour is frequent enough that steady-state prunes stay small
+# (only the rows that cross the retention boundary since the last run).
+TRIGGER_EVENTS_PRUNE_INTERVAL_S = 3600.0
+
 
 async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
     node_id = node["id"]
@@ -101,6 +108,8 @@ async def _poll_trigger_diag(client: httpx.AsyncClient, node: dict) -> None:
 
 async def run() -> None:
     log.info("Status poller started — interval %.1fs", config.STATUS_POLL_INTERVAL_S)
+    loop = asyncio.get_event_loop()
+    next_prune_at = 0.0  # 0 forces a prune check on the very first iteration
     async with httpx.AsyncClient(verify=False) as client:
         while True:
             try:
@@ -117,6 +126,14 @@ async def run() -> None:
                         *(_poll_one(client, n) for n in nodes),
                         *(_poll_trigger_diag(client, n) for n in nodes),
                     )
+
+                now = loop.time()
+                if now >= next_prune_at:
+                    deleted = await db.prune_trigger_events()
+                    if deleted:
+                        log.info("trigger_events: pruned %d rows older than %dd",
+                                  deleted, db.TRIGGER_EVENTS_RETENTION_DAYS)
+                    next_prune_at = now + TRIGGER_EVENTS_PRUNE_INTERVAL_S
             except asyncio.CancelledError:
                 raise
             except Exception:
