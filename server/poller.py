@@ -20,6 +20,12 @@ log = logging.getLogger("sound_hub.poller")
 # (only the rows that cross the retention boundary since the last run).
 TRIGGER_EVENTS_PRUNE_INTERVAL_S = 3600.0
 
+# How often (seconds) to run db.rollup_trigger_events. Every 5 minutes keeps
+# trigger_event_rollups reasonably current without adding meaningful load —
+# each run only aggregates the last interval's worth of new rows per node
+# (see rollup_trigger_events()'s per-node watermark), not the whole table.
+TRIGGER_EVENT_ROLLUP_INTERVAL_S = 300.0
+
 
 async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
     node_id = node["id"]
@@ -109,7 +115,8 @@ async def _poll_trigger_diag(client: httpx.AsyncClient, node: dict) -> None:
 async def run() -> None:
     log.info("Status poller started — interval %.1fs", config.STATUS_POLL_INTERVAL_S)
     loop = asyncio.get_event_loop()
-    next_prune_at = 0.0  # 0 forces a prune check on the very first iteration
+    next_rollup_at = 0.0  # 0 forces a rollup check on the very first iteration
+    next_prune_at = 0.0   # 0 forces a prune check on the very first iteration
     async with httpx.AsyncClient(verify=False) as client:
         while True:
             try:
@@ -128,6 +135,19 @@ async def run() -> None:
                     )
 
                 now = loop.time()
+
+                # Rollup runs before prune so raw rows are always summarized
+                # into trigger_event_rollups well before they age out — the
+                # rollup's 2-minute safety margin is trivially shorter than
+                # prune's 1-day retention, so ordering here is a formality,
+                # not a correctness requirement, but keeping it explicit
+                # avoids ever having to reason about it again.
+                if now >= next_rollup_at:
+                    rolled = await db.rollup_trigger_events()
+                    if rolled:
+                        log.debug("trigger_events: rolled up %d bucket(s)", rolled)
+                    next_rollup_at = now + TRIGGER_EVENT_ROLLUP_INTERVAL_S
+
                 if now >= next_prune_at:
                     deleted = await db.prune_trigger_events()
                     if deleted:

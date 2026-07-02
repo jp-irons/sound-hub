@@ -143,6 +143,29 @@ CREATE TABLE IF NOT EXISTS trigger_events (
     UNIQUE(node_id, t_us)
 );
 
+-- One row per (node, 1-minute bucket), aggregating trigger_events rows once
+-- they're old enough to be considered settled (see
+-- TRIGGER_EVENT_ROLLUP_SAFETY_MARGIN_US). Exists so the near-miss "shape"
+-- of the data (rate, ratio range) survives long after the raw per-block
+-- rows that produced it have been pruned — see rollup_trigger_events() for
+-- the aggregation query and prune_trigger_events() for raw-row cleanup.
+-- bucket_start_us is t_us truncated down to the minute, in the same
+-- node-clock UTC microsecond units as trigger_events.t_us.
+CREATE TABLE IF NOT EXISTS trigger_event_rollups (
+    node_id          TEXT NOT NULL,
+    bucket_start_us  INTEGER NOT NULL,
+    entry_count      INTEGER NOT NULL, -- rows in this bucket (trigger_events only ever holds "interesting" blocks, so this is near-miss+fired count, not total processed blocks)
+    fired_count      INTEGER NOT NULL,
+    energy_ratio_min REAL NOT NULL,
+    energy_ratio_avg REAL NOT NULL,
+    energy_ratio_max REAL NOT NULL,
+    flux_ratio_min   REAL NOT NULL,
+    flux_ratio_avg   REAL NOT NULL,
+    flux_ratio_max   REAL NOT NULL,
+    rolled_up_at     TEXT NOT NULL,
+    PRIMARY KEY (node_id, bucket_start_us)
+);
+
 -- Per-species TDOA orchestration tuning (CRUDable so parameters can be
 -- adjusted without a backend redeploy — see species-TDOA-pipeline design
 -- discussion). species_key matches detections.common_name. The
@@ -236,12 +259,24 @@ REJECTED = "rejected"
 # trigger_events is diagnostic (near-miss/fire) data, not the permanent
 # record — detections/audio_events are. It reached 18M+ rows / 2.3GB with no
 # retention policy at all (see idx_trigger_events_t_us migration above),
-# which was slow enough to trip upstream request timeouts. 7 days keeps a
-# window wide enough to debug a report that comes in a day or two after the
-# fact, without letting the table regrow unbounded. Adjust here if it proves
-# too short/long in practice — not read from config, deliberately, to avoid
-# a footgun where an existing deployment's soundhub.conf doesn't define it.
-TRIGGER_EVENTS_RETENTION_DAYS = 7
+# which was slow enough to trip upstream request timeouts. Now that
+# trigger_event_rollups preserves the long-term shape of this data (rate,
+# ratio range per node per minute — see rollup_trigger_events()), raw rows
+# only need to survive long enough to be useful for live/recent debugging,
+# not for historical analysis. Adjust here if it proves too short/long in
+# practice — not read from config, deliberately, to avoid a footgun where an
+# existing deployment's soundhub.conf doesn't define it.
+TRIGGER_EVENTS_RETENTION_DAYS = 1
+
+# Rollup bucket width for trigger_event_rollups — see rollup_trigger_events().
+TRIGGER_EVENT_ROLLUP_BUCKET_US = 60_000_000  # 1 minute
+
+# Only roll up buckets whose window closed at least this long ago, so a
+# bucket that's still receiving inserts from the current/recent poll cycles
+# is never finalized (and thus INSERT OR REPLACE'd as "done") prematurely.
+# Comfortably larger than STATUS_POLL_INTERVAL_S (5s) plus the ring buffer's
+# multi-poll overlap window.
+TRIGGER_EVENT_ROLLUP_SAFETY_MARGIN_US = 120_000_000  # 2 minutes
 
 # Sentinel species_key for the fallback row in species_tdoa_params — used
 # when a detected species has no row of its own, or its row is disabled.
@@ -878,6 +913,80 @@ async def prune_trigger_events(retention_days: int = TRIGGER_EVENTS_RETENTION_DA
         )
         await conn.commit()
         return cursor.rowcount if cursor.rowcount is not None and cursor.rowcount > 0 else 0
+
+
+async def rollup_trigger_events() -> int:
+    """Aggregate settled trigger_events rows into 1-minute-bucket summary
+    rows in trigger_event_rollups, one bucket per (node_id, bucket_start_us).
+    Returns the number of bucket rows written (inserted or updated).
+
+    Reads from the already-persisted raw table rather than trying to
+    deduplicate the node's live, overlapping ring-buffer dump itself —
+    trigger_events' own UNIQUE(node_id, t_us) + INSERT OR IGNORE already
+    solved that problem correctly, so this just aggregates already-
+    deduplicated rows via GROUP BY.
+
+    Per node, only rows since that node's last-rolled-up bucket are
+    re-aggregated (tracked via MAX(bucket_start_us) already in
+    trigger_event_rollups — no separate watermark table needed), so a run
+    only ever processes the last rollup interval's worth of new rows rather
+    than rescanning the whole raw retention window every time.
+
+    INSERT OR REPLACE on (node_id, bucket_start_us) makes each bucket write
+    idempotent — safe to rerun, e.g. if this is invoked more often than the
+    configured interval for any reason.
+    """
+    cutoff_bucket_us = (
+        (int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+         - TRIGGER_EVENT_ROLLUP_SAFETY_MARGIN_US)
+        // TRIGGER_EVENT_ROLLUP_BUCKET_US
+    ) * TRIGGER_EVENT_ROLLUP_BUCKET_US
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    total_buckets = 0
+    async with connect() as conn:
+        cursor = await conn.execute("SELECT DISTINCT node_id FROM trigger_events")
+        node_ids = [row[0] for row in await cursor.fetchall()]
+
+        for node_id in node_ids:
+            cursor = await conn.execute(
+                "SELECT MAX(bucket_start_us) FROM trigger_event_rollups WHERE node_id = ?",
+                (node_id,),
+            )
+            (last_bucket,) = await cursor.fetchone()
+            start_us = 0 if last_bucket is None else last_bucket + TRIGGER_EVENT_ROLLUP_BUCKET_US
+
+            cursor = await conn.execute(
+                """SELECT
+                       (t_us / ?) * ? AS bucket_start_us,
+                       COUNT(*), SUM(fired),
+                       MIN(energy_ratio), AVG(energy_ratio), MAX(energy_ratio),
+                       MIN(flux_ratio), AVG(flux_ratio), MAX(flux_ratio)
+                   FROM trigger_events
+                   WHERE node_id = ? AND t_us >= ? AND t_us < ?
+                   GROUP BY bucket_start_us""",
+                (TRIGGER_EVENT_ROLLUP_BUCKET_US, TRIGGER_EVENT_ROLLUP_BUCKET_US,
+                 node_id, start_us, cutoff_bucket_us),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                continue
+
+            await conn.executemany(
+                """INSERT OR REPLACE INTO trigger_event_rollups
+                   (node_id, bucket_start_us, entry_count, fired_count,
+                    energy_ratio_min, energy_ratio_avg, energy_ratio_max,
+                    flux_ratio_min, flux_ratio_avg, flux_ratio_max, rolled_up_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (node_id, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], now_iso)
+                    for r in rows
+                ],
+            )
+            total_buckets += len(rows)
+
+        await conn.commit()
+    return total_buckets
 
 
 async def trigger_event_summary() -> list[dict]:
