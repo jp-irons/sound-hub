@@ -56,6 +56,20 @@ function tUsToIso(tUs) {
 // real fire as a fraction of a pixel. MIN_FIRED_PX floors any nonzero fired
 // segment to a visible height; it never overstates the count itself, since
 // the exact count is always also printed as a label above the bar.
+//
+// MIN_BAR_PX floors the *total* bar the same way, for a reason that isn't
+// obvious until you hit it: a bucket can be entirely fires with a tiny total
+// count (e.g. energy ratio 0-1 — below the 1.5 interesting-ratio floor, so
+// no near-miss row can ever land there; only a low-band fire, whose
+// high-band energy_ratio can be near zero, appears here at all — see the
+// caption below the charts). Without MIN_BAR_PX, that bucket's *total* bar
+// height is itself sub-pixel (tiny count against the global max), and the
+// fired segment's `Math.min(barHeight, ...)` clamp was capping the fired
+// floor down to that sub-pixel total — defeating MIN_FIRED_PX exactly where
+// it mattered most (a 100%-fired bucket). A larger, mixed near-miss+fire
+// bucket doesn't hit this, since its own total is already comfortably above
+// both floors.
+const MIN_BAR_PX = 2
 const MIN_FIRED_PX = 1
 
 // Compact count formatting for bar labels — "1k5" = 1,500, "1M5" = 1,500,000
@@ -114,7 +128,8 @@ function HistogramChart({ histogram, threshold, label }) {
           const b = byBucket.get(i)
           const count = b?.count ?? 0
           const firedCount = b?.firedCount ?? 0
-          const barHeight = (count / maxCount) * chartHeight
+          const barHeightRaw = (count / maxCount) * chartHeight
+          const barHeight = count > 0 ? Math.max(barHeightRaw, MIN_BAR_PX) : 0
           const rawFiredHeight = (firedCount / maxCount) * chartHeight
           const firedHeight = firedCount > 0 ? Math.min(barHeight, Math.max(rawFiredHeight, MIN_FIRED_PX)) : 0
           const x = i * barWidth
