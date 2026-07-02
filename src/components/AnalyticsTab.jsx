@@ -56,7 +56,28 @@ function tUsToIso(tUs) {
 // real fire as a fraction of a pixel. MIN_FIRED_PX floors any nonzero fired
 // segment to a visible height; it never overstates the count itself, since
 // the exact count is always also printed as a label above the bar.
-const MIN_FIRED_PX = 3
+const MIN_FIRED_PX = 1
+
+// Compact count formatting for bar labels — "1k5" = 1,500, "1M5" = 1,500,000
+// (one decimal digit folded into the unit letter, per the user's requested
+// notation, rather than "1.5k"). Values under 1000 print as plain integers.
+function formatCompactCount(n) {
+  const units = [
+    { value: 1_000_000_000, suffix: 'B' },
+    { value: 1_000_000, suffix: 'M' },
+    { value: 1_000, suffix: 'k' },
+  ]
+  for (const { value, suffix } of units) {
+    if (n >= value) {
+      const scaled = n / value
+      let whole = Math.floor(scaled)
+      let decimal = Math.round((scaled - whole) * 10)
+      if (decimal === 10) { whole += 1; decimal = 0 }
+      return decimal === 0 ? `${whole}${suffix}` : `${whole}${suffix}${decimal}`
+    }
+  }
+  return String(n)
+}
 
 function HistogramChart({ histogram, threshold, label }) {
   const width = 380
@@ -115,7 +136,7 @@ function HistogramChart({ histogram, threshold, label }) {
                     x={x + barWidth / 2} y={Math.max(9, chartHeight - firedHeight - 3)}
                     fontSize={8} fill="var(--green, #4caf50)" textAnchor="middle"
                   >
-                    {firedCount}
+                    {formatCompactCount(firedCount)}
                   </text>
                 </>
               )}
