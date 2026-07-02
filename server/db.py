@@ -12,6 +12,7 @@ node's GPS centroid through its surveyed array offset) or via a manual
 PUT /api/origin override.  Once set it survives all node restarts/removals.
 """
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -261,6 +262,14 @@ FACTORY_DEFAULT_SPECIES_PARAMS = {
 
 async def init_db() -> None:
     async with aiosqlite.connect(config.DB_PATH) as conn:
+        # WAL is a persistent, on-disk setting (stored in the db file header)
+        # — setting it once here means every connection opened later via
+        # connect(), including from other processes, is already in WAL mode.
+        # This lets readers and a writer proceed concurrently instead of
+        # blocking each other, which is what caused the intermittent
+        # "database is locked" 500s on /api/nodes/register and the poller's
+        # trigger_events inserts.
+        await conn.execute("PRAGMA journal_mode=WAL")
         await conn.executescript(SCHEMA)
 
         # Migration: `CREATE TABLE IF NOT EXISTS` doesn't add columns to an
@@ -346,9 +355,18 @@ async def init_db() -> None:
         await conn.commit()
 
 
-def connect() -> aiosqlite.Connection:
-    """Returns an unopened connection — caller must `async with` or open/close."""
-    return aiosqlite.connect(config.DB_PATH)
+@asynccontextmanager
+async def connect():
+    """Async context manager yielding an aiosqlite connection.
+
+    Sets busy_timeout on every connection (per-connection setting, unlike
+    journal_mode which persists in the db file) so a writer that finds the
+    database locked by another connection waits up to 5s and retries instead
+    of immediately raising `sqlite3.OperationalError: database is locked`.
+    """
+    async with aiosqlite.connect(config.DB_PATH) as conn:
+        await conn.execute("PRAGMA busy_timeout = 5000")
+        yield conn
 
 
 # ---------------------------------------------------------------------------
