@@ -53,6 +53,10 @@ export default function AnalyticsTab() {
   const [triggerError, setTriggerError] = useState(null)
   const isMobile = useIsMobile()
 
+  const [activeSubTab, setActiveSubTab] = useState('events') // 'events' | 'trigger'
+  const [eventsDetailOpen, setEventsDetailOpen] = useState(false)
+  const [triggerDetailOpen, setTriggerDetailOpen] = useState(false)
+
   const fetchAnalytics = useCallback(async () => {
     try {
       const params = new URLSearchParams({ limit: String(EVENTS_LIMIT) })
@@ -129,6 +133,26 @@ export default function AnalyticsTab() {
     },
     sectionLabel: { fontSize: 11, color: 'var(--text-muted, #888)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: 0.5 },
     empty: { padding: 24, textAlign: 'center', color: 'var(--text-muted, #888)', fontSize: 13 },
+    subTabBar: {
+      display: 'flex', gap: 16, borderBottom: '1px solid var(--border, #333)',
+    },
+    subTabBtn: {
+      background: 'none', border: 'none', borderBottom: '2px solid transparent',
+      color: 'var(--text-muted, #888)', fontSize: 13, fontWeight: 500,
+      padding: '6px 2px', cursor: 'pointer',
+    },
+    subTabBtnActive: {
+      color: 'var(--text, #eee)', borderBottom: '2px solid var(--text, #eee)',
+    },
+    disclosureBtn: {
+      display: 'flex', alignItems: 'center', gap: 6,
+      background: 'none', border: 'none', cursor: 'pointer',
+      color: 'var(--text-muted, #888)', fontSize: 12, padding: '4px 0',
+    },
+    detailWrap: {
+      background: 'var(--surface1, #1e1e1e)', borderRadius: 8,
+      border: '1px solid var(--border, #333)', overflowY: 'auto', maxHeight: 260,
+    },
   }
 
   if (error) {
@@ -152,175 +176,210 @@ export default function AnalyticsTab() {
 
   return (
     <div style={sty.root}>
-      <div>
-        <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Per-node summary</div>
-        {summary.length === 0 ? (
-          <div style={sty.empty}>No audio pushes recorded yet.</div>
-        ) : (
-          <div style={sty.tableWrap}>
-            <table style={sty.table}>
-              <thead>
-                <tr>
-                  <th style={sty.th}>Node</th>
-                  <th style={sty.th}>Total pushes</th>
-                  <th style={sty.th}>Self-triggered</th>
-                  <th style={sty.th}>With detection</th>
-                  <th style={sty.th}>Zero detections</th>
-                  <th style={sty.th}>Avg near-miss conf.</th>
-                  <th style={sty.th}>Last push</th>
-                  <th style={sty.th}>Last self-trigger</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary.map(s => {
-                  const zeroPct = s.totalPushes ? Math.round((s.pushesZeroDetections / s.totalPushes) * 100) : 0
-                  return (
-                    <tr key={s.nodeId ?? 'unknown'}>
-                      <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
-                      <td style={sty.td}>{s.totalPushes}</td>
-                      <td style={sty.td}>{s.triggeredPushes}</td>
-                      <td style={sty.td}>{s.pushesWithDetections}</td>
-                      <td style={sty.td}>{s.pushesZeroDetections} ({zeroPct}%)</td>
-                      <td style={sty.td}>
-                        {s.avgNearMissConfidence != null ? `${Math.round(s.avgNearMissConfidence * 100)}%` : '—'}
-                      </td>
-                      <td style={sty.td}>{relativeTime(s.lastPushAt)}</td>
-                      <td style={sty.td}>{relativeTime(s.lastTriggerAt)}</td>
+      <div style={sty.subTabBar}>
+        <button
+          style={{ ...sty.subTabBtn, ...(activeSubTab === 'events' ? sty.subTabBtnActive : {}) }}
+          onClick={() => setActiveSubTab('events')}
+        >
+          Push events
+        </button>
+        <button
+          style={{ ...sty.subTabBtn, ...(activeSubTab === 'trigger' ? sty.subTabBtnActive : {}) }}
+          onClick={() => setActiveSubTab('trigger')}
+        >
+          Trigger diagnostics
+        </button>
+      </div>
+
+      {activeSubTab === 'events' && (
+        <>
+          <div>
+            <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Per-node summary</div>
+            {summary.length === 0 ? (
+              <div style={sty.empty}>No audio pushes recorded yet.</div>
+            ) : (
+              <div style={sty.tableWrap}>
+                <table style={sty.table}>
+                  <thead>
+                    <tr>
+                      <th style={sty.th}>Node</th>
+                      <th style={sty.th}>Total pushes</th>
+                      <th style={sty.th}>Self-triggered</th>
+                      <th style={sty.th}>With detection</th>
+                      <th style={sty.th}>Zero detections</th>
+                      <th style={sty.th}>Avg near-miss conf.</th>
+                      <th style={sty.th}>Last push</th>
+                      <th style={sty.th}>Last self-trigger</th>
                     </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {summary.map(s => {
+                      const zeroPct = s.totalPushes ? Math.round((s.pushesZeroDetections / s.totalPushes) * 100) : 0
+                      return (
+                        <tr key={s.nodeId ?? 'unknown'}>
+                          <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
+                          <td style={sty.td}>{s.totalPushes}</td>
+                          <td style={sty.td}>{s.triggeredPushes}</td>
+                          <td style={sty.td}>{s.pushesWithDetections}</td>
+                          <td style={sty.td}>{s.pushesZeroDetections} ({zeroPct}%)</td>
+                          <td style={sty.td}>
+                            {s.avgNearMissConfidence != null ? `${Math.round(s.avgNearMissConfidence * 100)}%` : '—'}
+                          </td>
+                          <td style={sty.td}>{relativeTime(s.lastPushAt)}</td>
+                          <td style={sty.td}>{relativeTime(s.lastTriggerAt)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      <div style={sty.toolbar}>
-        <div style={sty.sectionLabel}>Recent push events</div>
-        <div style={{ flex: 1 }} />
-        <input
-          style={sty.input}
-          placeholder="Filter by node id…"
-          value={nodeFilter}
-          onChange={e => setNodeFilter(e.target.value)}
-        />
-      </div>
-
-      <div style={sty.tableWrap}>
-        {events.length === 0 ? (
-          <div style={sty.empty}>No push events match the current filter.</div>
-        ) : (
-          <table style={sty.table}>
-            <thead>
-              <tr>
-                <th style={sty.th}>{isMobile ? 'Time' : 'Received'}</th>
-                <th style={sty.th}>Node</th>
-                <th style={sty.th}>Source</th>
-                <th style={sty.th}>Status</th>
-                <th style={sty.th}>Bytes</th>
-                <th style={sty.th}>Detections</th>
-                <th style={sty.th}>Top candidate</th>
-              </tr>
-            </thead>
-            <tbody>
-              {events.map(e => (
-                <tr key={e.id}>
-                  <td style={sty.td}>{isMobile ? formatTime(e.receivedAt) : formatDateTime(e.receivedAt)}</td>
-                  <td style={sty.td}>{e.nodeId ?? '—'}</td>
-                  <td style={sty.td}>{e.triggered ? 'Self-trigger' : 'Hub pull'}</td>
-                  <td style={{ ...sty.td, color: STATUS_COLOR[e.analysisStatus] ?? sty.td.color }}>
-                    {STATUS_LABEL[e.analysisStatus] ?? e.analysisStatus}
-                  </td>
-                  <td style={sty.td}>{e.bytes.toLocaleString()}</td>
-                  <td style={sty.td}>{e.detectionCount}</td>
-                  <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
-                    {e.topSpecies ? `${e.topSpecies} (${Math.round((e.topConfidence ?? 0) * 100)}%)` : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <div>
-        <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Trigger diagnostics (v2 dual-gate)</div>
-        {triggerError ? (
-          <div style={{
-            fontSize: 12, padding: '6px 10px', borderRadius: 4,
-            background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
-          }}>
-            {triggerError}
+          <div style={sty.toolbar}>
+            <button style={sty.disclosureBtn} onClick={() => setEventsDetailOpen(o => !o)}>
+              <span>{eventsDetailOpen ? '▾' : '▸'}</span>
+              Recent push events ({events.length})
+            </button>
+            <div style={{ flex: 1 }} />
+            <input
+              style={sty.input}
+              placeholder="Filter by node id…"
+              value={nodeFilter}
+              onChange={e => setNodeFilter(e.target.value)}
+            />
           </div>
-        ) : !triggerData ? (
-          <div style={sty.empty}>Loading…</div>
-        ) : triggerData.summary.length === 0 ? (
-          <div style={sty.empty}>No trigger-diagnostic rows recorded yet.</div>
-        ) : (
-          <div style={sty.tableWrap}>
-            <table style={sty.table}>
-              <thead>
-                <tr>
-                  <th style={sty.th}>Node</th>
-                  <th style={sty.th}>Rows (recent)</th>
-                  <th style={sty.th}>Fired</th>
-                  <th style={sty.th}>Near-misses</th>
-                  <th style={sty.th}>Avg energy ratio</th>
-                  <th style={sty.th}>Avg flux ratio</th>
-                  <th style={sty.th}>Last row</th>
-                </tr>
-              </thead>
-              <tbody>
-                {triggerData.summary.map(s => (
-                  <tr key={s.nodeId ?? 'unknown'}>
-                    <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
-                    <td style={sty.td}>{s.totalRows}</td>
-                    <td style={sty.td}>{s.firedRows}</td>
-                    <td style={sty.td}>{s.nearMissRows}</td>
-                    <td style={sty.td}>{s.avgEnergyRatio != null ? s.avgEnergyRatio.toFixed(2) : '—'}</td>
-                    <td style={sty.td}>{s.avgFluxRatio != null ? s.avgFluxRatio.toFixed(2) : '—'}</td>
-                    <td style={sty.td}>{relativeTime(tUsToIso(s.lastTUs))}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
 
-      {triggerData && (
-        <div style={sty.tableWrap}>
-          {triggerData.events.length === 0 ? (
-            <div style={sty.empty}>No trigger-diagnostic blocks match the current filter.</div>
-          ) : (
-            <table style={sty.table}>
-              <thead>
-                <tr>
-                  <th style={sty.th}>{isMobile ? 'Time' : 'Block time'}</th>
-                  <th style={sty.th}>Node</th>
-                  <th style={sty.th}>Energy ratio</th>
-                  <th style={sty.th}>Flux ratio</th>
-                  <th style={sty.th}>Fired</th>
-                </tr>
-              </thead>
-              <tbody>
-                {triggerData.events.map(e => (
-                  <tr key={e.id}>
-                    <td style={sty.td}>
-                      {isMobile ? formatTime(tUsToIso(e.tUs)) : formatDateTime(tUsToIso(e.tUs))}
-                    </td>
-                    <td style={sty.td}>{e.nodeId ?? '—'}</td>
-                    <td style={{ ...sty.td, color: ratioColour(e.energyRatio) }}>{e.energyRatio.toFixed(2)}</td>
-                    <td style={{ ...sty.td, color: ratioColour(e.fluxRatio) }}>{e.fluxRatio.toFixed(2)}</td>
-                    <td style={{ ...sty.td, color: e.fired ? 'var(--green, #4caf50)' : sty.td.color }}>
-                      {e.fired ? 'Fired' : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {eventsDetailOpen && (
+            <div style={sty.detailWrap}>
+              {events.length === 0 ? (
+                <div style={sty.empty}>No push events match the current filter.</div>
+              ) : (
+                <table style={sty.table}>
+                  <thead>
+                    <tr>
+                      <th style={sty.th}>{isMobile ? 'Time' : 'Received'}</th>
+                      <th style={sty.th}>Node</th>
+                      <th style={sty.th}>Source</th>
+                      <th style={sty.th}>Status</th>
+                      <th style={sty.th}>Bytes</th>
+                      <th style={sty.th}>Detections</th>
+                      <th style={sty.th}>Top candidate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {events.map(e => (
+                      <tr key={e.id}>
+                        <td style={sty.td}>{isMobile ? formatTime(e.receivedAt) : formatDateTime(e.receivedAt)}</td>
+                        <td style={sty.td}>{e.nodeId ?? '—'}</td>
+                        <td style={sty.td}>{e.triggered ? 'Self-trigger' : 'Hub pull'}</td>
+                        <td style={{ ...sty.td, color: STATUS_COLOR[e.analysisStatus] ?? sty.td.color }}>
+                          {STATUS_LABEL[e.analysisStatus] ?? e.analysisStatus}
+                        </td>
+                        <td style={sty.td}>{e.bytes.toLocaleString()}</td>
+                        <td style={sty.td}>{e.detectionCount}</td>
+                        <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
+                          {e.topSpecies ? `${e.topSpecies} (${Math.round((e.topConfidence ?? 0) * 100)}%)` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           )}
-        </div>
+        </>
+      )}
+
+      {activeSubTab === 'trigger' && (
+        <>
+          <div>
+            <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Trigger diagnostics summary (v2 dual-gate)</div>
+            {triggerError ? (
+              <div style={{
+                fontSize: 12, padding: '6px 10px', borderRadius: 4,
+                background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+              }}>
+                {triggerError}
+              </div>
+            ) : !triggerData ? (
+              <div style={sty.empty}>Loading…</div>
+            ) : triggerData.summary.length === 0 ? (
+              <div style={sty.empty}>No trigger-diagnostic rows recorded yet.</div>
+            ) : (
+              <div style={sty.tableWrap}>
+                <table style={sty.table}>
+                  <thead>
+                    <tr>
+                      <th style={sty.th}>Node</th>
+                      <th style={sty.th}>Rows (recent)</th>
+                      <th style={sty.th}>Fired</th>
+                      <th style={sty.th}>Near-misses</th>
+                      <th style={sty.th}>Avg energy ratio</th>
+                      <th style={sty.th}>Avg flux ratio</th>
+                      <th style={sty.th}>Last row</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {triggerData.summary.map(s => (
+                      <tr key={s.nodeId ?? 'unknown'}>
+                        <td style={{ ...sty.td, ...sty.nodeCol }}>{s.nodeId ?? '(unknown node)'}</td>
+                        <td style={sty.td}>{s.totalRows}</td>
+                        <td style={sty.td}>{s.firedRows}</td>
+                        <td style={sty.td}>{s.nearMissRows}</td>
+                        <td style={sty.td}>{s.avgEnergyRatio != null ? s.avgEnergyRatio.toFixed(2) : '—'}</td>
+                        <td style={sty.td}>{s.avgFluxRatio != null ? s.avgFluxRatio.toFixed(2) : '—'}</td>
+                        <td style={sty.td}>{relativeTime(tUsToIso(s.lastTUs))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {triggerData && triggerData.summary.length > 0 && (
+            <button style={sty.disclosureBtn} onClick={() => setTriggerDetailOpen(o => !o)}>
+              <span>{triggerDetailOpen ? '▾' : '▸'}</span>
+              Diagnostic blocks ({triggerData.events.length})
+            </button>
+          )}
+
+          {triggerDetailOpen && triggerData && (
+            <div style={sty.detailWrap}>
+              {triggerData.events.length === 0 ? (
+                <div style={sty.empty}>No trigger-diagnostic blocks match the current filter.</div>
+              ) : (
+                <table style={sty.table}>
+                  <thead>
+                    <tr>
+                      <th style={sty.th}>{isMobile ? 'Time' : 'Block time'}</th>
+                      <th style={sty.th}>Node</th>
+                      <th style={sty.th}>Energy ratio</th>
+                      <th style={sty.th}>Flux ratio</th>
+                      <th style={sty.th}>Fired</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {triggerData.events.map(e => (
+                      <tr key={e.id}>
+                        <td style={sty.td}>
+                          {isMobile ? formatTime(tUsToIso(e.tUs)) : formatDateTime(tUsToIso(e.tUs))}
+                        </td>
+                        <td style={sty.td}>{e.nodeId ?? '—'}</td>
+                        <td style={{ ...sty.td, color: ratioColour(e.energyRatio) }}>{e.energyRatio.toFixed(2)}</td>
+                        <td style={{ ...sty.td, color: ratioColour(e.fluxRatio) }}>{e.fluxRatio.toFixed(2)}</td>
+                        <td style={{ ...sty.td, color: e.fired ? 'var(--green, #4caf50)' : sty.td.color }}>
+                          {e.fired ? 'Fired' : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
