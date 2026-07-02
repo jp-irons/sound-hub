@@ -263,10 +263,17 @@ REJECTED = "rejected"
 # trigger_event_rollups preserves the long-term shape of this data (rate,
 # ratio range per node per minute — see rollup_trigger_events()), raw rows
 # only need to survive long enough to be useful for live/recent debugging,
-# not for historical analysis. Adjust here if it proves too short/long in
-# practice — not read from config, deliberately, to avoid a footgun where an
-# existing deployment's soundhub.conf doesn't define it.
-TRIGGER_EVENTS_RETENTION_DAYS = 1
+# not for historical analysis.
+#
+# Raw row count scales with (rate per node) x (node count) x (retention
+# window) — node count is the one of those three that's about to grow (at
+# least 5 nodes planned, likely more), so this is set in hours rather than
+# days specifically so the total row budget can be dialed back down as more
+# nodes come online, rather than the table quietly creeping back toward the
+# scale that caused this whole investigation. Not read from config,
+# deliberately, to avoid a footgun where an existing deployment's
+# soundhub.conf doesn't define it.
+TRIGGER_EVENTS_RETENTION_HOURS = 6
 
 # Rollup bucket width for trigger_event_rollups — see rollup_trigger_events().
 TRIGGER_EVENT_ROLLUP_BUCKET_US = 60_000_000  # 1 minute
@@ -886,14 +893,14 @@ async def list_trigger_events(
         return [dict(row) for row in rows]
 
 
-async def prune_trigger_events(retention_days: int = TRIGGER_EVENTS_RETENTION_DAYS) -> int:
-    """Delete trigger_events rows older than retention_days. Returns the
+async def prune_trigger_events(retention_hours: int = TRIGGER_EVENTS_RETENTION_HOURS) -> int:
+    """Delete trigger_events rows older than retention_hours. Returns the
     number of rows deleted.
 
     t_us is node-clock UTC microseconds (not a hub wall-clock timestamp), so
     the cutoff is computed the same way for a correct comparison. Intended
     to be called periodically from the poller (see poller.run()) rather than
-    on every poll tick — a day-granularity retention window doesn't need
+    on every poll tick — an hour-granularity retention window doesn't need
     sub-minute precision, and this table is large enough that a tighter
     cadence would just be unnecessary write churn.
 
@@ -904,7 +911,7 @@ async def prune_trigger_events(retention_days: int = TRIGGER_EVENTS_RETENTION_DA
     rather than letting it happen cold on a live server.
     """
     cutoff_us = int(
-        (datetime.now(timezone.utc) - timedelta(days=retention_days)).timestamp()
+        (datetime.now(timezone.utc) - timedelta(hours=retention_hours)).timestamp()
         * 1_000_000
     )
     async with connect() as conn:

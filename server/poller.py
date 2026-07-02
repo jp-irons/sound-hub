@@ -151,8 +151,8 @@ async def run() -> None:
                 if now >= next_prune_at:
                     deleted = await db.prune_trigger_events()
                     if deleted:
-                        log.info("trigger_events: pruned %d rows older than %dd",
-                                  deleted, db.TRIGGER_EVENTS_RETENTION_DAYS)
+                        log.info("trigger_events: pruned %d rows older than %dh",
+                                  deleted, db.TRIGGER_EVENTS_RETENTION_HOURS)
                     next_prune_at = now + TRIGGER_EVENTS_PRUNE_INTERVAL_S
             except asyncio.CancelledError:
                 raise
