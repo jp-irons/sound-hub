@@ -5,7 +5,7 @@ import SpeciesSummaryList from './SpeciesSummaryList.jsx'
 export default function DetectionsTab() {
   const [minConf, setMinConf]         = useState(0.0)
   const [species, setSpecies]         = useState('')
-  const [datePreset, setDatePreset]   = useState('all')
+  const [datePreset, setDatePreset]   = useState('today')
   const [customFrom, setCustomFrom]   = useState('') // yyyy-mm-dd
   const [customTo, setCustomTo]       = useState('') // yyyy-mm-dd
   const [moment, setMoment]           = useState('') // '' | last10min | last1hour | dawn | daytime | dusk | nighttime
