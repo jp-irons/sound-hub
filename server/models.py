@@ -392,6 +392,8 @@ class TriggerHistogramResponse(BaseModel):
     energy: RatioHistogram
     flux: RatioHistogram
 
+    model_config = ConfigDict(populate_by_name=True)
+
 
 class TriggerRollupBucket(BaseModel):
     """One row of trigger_event_rollups — a node's 1-minute activity summary."""
@@ -418,8 +420,6 @@ class TriggerRollupResponse(BaseModel):
     retention window. See list_trigger_rollups() in db.py.
     """
     buckets: list[TriggerRollupBucket]
-
-    model_config = ConfigDict(populate_by_name=True)
 
     model_config = ConfigDict(populate_by_name=True)
 
