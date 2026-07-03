@@ -22,6 +22,7 @@ from .models import (
     SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
     RatioHistogram, RatioHistogramBucket, TriggerHistogramResponse,
+    TriggerRollupBucket, TriggerRollupResponse,
 )
 from .tdoa_solver import DEFAULT_SPEED_OF_SOUND, Node as TdoaNode, solve as tdoa_solve
 
@@ -1255,6 +1256,66 @@ async def trigger_diag_histogram(
         node_id=node_id, since_us=since_us, until_us=until_us,
         energy=_to_histogram(raw["energy"]), flux=_to_histogram(raw["flux"]),
     )
+
+
+@router.get(
+    "/analytics/trigger-diag/rollups",
+    response_model=TriggerRollupResponse,
+    dependencies=[Depends(require_viewer)],
+)
+async def trigger_diag_rollups(
+    node_id: str | None = Query(default=None, alias="nodeId"),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+    time_of_day: str | None = Query(default=None, alias="timeOfDay", pattern="^(dawn|dusk|daytime|nighttime)$"),
+    limit: int = Query(default=50_000, ge=1, le=200_000),
+):
+    """Per-minute trigger activity over time, from trigger_event_rollups.
+
+    Answers a question the ratio histogram can't: does a given fire sit
+    inside a plausible burst of real activity, or isolated with nothing
+    around it? Rollups are never pruned (unlike raw trigger_events), so this
+    can look back days or weeks, not just the raw retention window.
+
+    from/to/time_of_day follow the same convention as GET /detections:
+    time_of_day is classified per-bucket against the array's sun-relative
+    dawn/dusk/daytime/nighttime windows (see suntimes.py) rather than
+    expressed as a SQL range, since each bucket's window depends on its own
+    local calendar date.
+    """
+    # datetime.fromisoformat() only accepts a trailing "Z" from Python 3.11
+    # onward — the browser's Date.toISOString() (what the frontend sends)
+    # always produces one, so normalize to a "+00:00" offset defensively
+    # rather than assuming the deployed Python version.
+    def _parse_iso_us(ts: str) -> int:
+        return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1_000_000)
+
+    from_us = _parse_iso_us(from_ts) if from_ts else None
+    to_us = _parse_iso_us(to_ts) if to_ts else None
+
+    rows = await db.list_trigger_rollups(node_id=node_id, from_us=from_us, to_us=to_us, limit=limit)
+
+    if time_of_day:
+        origin = await db.get_array_origin()
+        if origin is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Array origin not set — configure the array's reference lat/lon before filtering by time of day",
+            )
+        timestamps = (datetime.fromtimestamp(r["bucket_start_us"] / 1_000_000, tz=timezone.utc) for r in rows)
+        buckets = suntimes.classify_many(timestamps, origin["lat"], origin["lon"])
+        rows = [r for r, bucket in zip(rows, buckets) if bucket == time_of_day]
+
+    return TriggerRollupResponse(buckets=[
+        TriggerRollupBucket(
+            node_id=r["node_id"], bucket_start_us=r["bucket_start_us"],
+            entry_count=r["entry_count"], fired_count=r["fired_count"],
+            energy_ratio_min=r["energy_ratio_min"], energy_ratio_avg=r["energy_ratio_avg"],
+            energy_ratio_max=r["energy_ratio_max"], flux_ratio_min=r["flux_ratio_min"],
+            flux_ratio_avg=r["flux_ratio_avg"], flux_ratio_max=r["flux_ratio_max"],
+        )
+        for r in rows
+    ])
 
 
 # ---------------------------------------------------------------------------

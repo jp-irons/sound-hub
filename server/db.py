@@ -1082,6 +1082,50 @@ async def trigger_ratio_histogram(
         return result
 
 
+async def list_trigger_rollups(
+    node_id: str | None = None,
+    from_us: int | None = None,
+    to_us: int | None = None,
+    limit: int = 50_000,
+) -> list[dict]:
+    """Return per-minute trigger_events rollups, oldest first.
+
+    Unlike raw trigger_events (pruned after TRIGGER_EVENTS_RETENTION_HOURS),
+    rollups are never pruned — this is the only way to see trigger activity
+    (near-miss + fire rate over time) beyond the last few hours. Built to
+    answer "does this near-zero-ratio fire cluster with a plausible burst of
+    real activity, or sit isolated with nothing around it" — the histogram
+    can't answer that, since it collapses time away entirely.
+
+    limit defensively caps an unbounded (no from_us/to_us) query — at one
+    row per node per minute this is normally small, but an unbounded range
+    on a long-running multi-node deployment could still be large.
+    """
+    where = ["1=1"]
+    params: list = []
+    if node_id:
+        where.append("node_id = ?")
+        params.append(node_id)
+    if from_us is not None:
+        where.append("bucket_start_us >= ?")
+        params.append(from_us)
+    if to_us is not None:
+        where.append("bucket_start_us <= ?")
+        params.append(to_us)
+    params.append(limit)
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            f"""SELECT * FROM trigger_event_rollups
+                WHERE {' AND '.join(where)}
+                ORDER BY bucket_start_us ASC LIMIT ?""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def list_species_summary(
     min_conf: float = 0.0,
     species: str | None = None,

@@ -392,6 +392,35 @@ class TriggerHistogramResponse(BaseModel):
     energy: RatioHistogram
     flux: RatioHistogram
 
+
+class TriggerRollupBucket(BaseModel):
+    """One row of trigger_event_rollups — a node's 1-minute activity summary."""
+    node_id: Optional[str] = Field(default=None, alias="nodeId")
+    bucket_start_us: int = Field(alias="bucketStartUs")
+    entry_count: int = Field(alias="entryCount")
+    fired_count: int = Field(alias="firedCount")
+    energy_ratio_min: float = Field(alias="energyRatioMin")
+    energy_ratio_avg: float = Field(alias="energyRatioAvg")
+    energy_ratio_max: float = Field(alias="energyRatioMax")
+    flux_ratio_min: float = Field(alias="fluxRatioMin")
+    flux_ratio_avg: float = Field(alias="fluxRatioAvg")
+    flux_ratio_max: float = Field(alias="fluxRatioMax")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TriggerRollupResponse(BaseModel):
+    """Response for GET /api/analytics/trigger-diag/rollups.
+
+    Per-minute activity over time, from trigger_event_rollups — unlike the
+    histogram, this survives indefinitely (rollups aren't pruned), so it can
+    answer "when did this happen" over days/weeks, not just the raw
+    retention window. See list_trigger_rollups() in db.py.
+    """
+    buckets: list[TriggerRollupBucket]
+
+    model_config = ConfigDict(populate_by_name=True)
+
     model_config = ConfigDict(populate_by_name=True)
 
 

@@ -6,6 +6,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { apiFetch } from '../auth.js'
 import { formatTime, formatDateTime } from './DetectionFormat.jsx'
 import { useIsMobile } from '../hooks/useBreakpoint.js'
+import { DATE_PRESETS, MOMENT_OPTIONS, isQuickMoment, resolveRange } from '../utils/detectionFilters.js'
 
 const POLL_INTERVAL_MS = 5000
 const EVENTS_LIMIT = 200
@@ -18,15 +19,11 @@ const EVENTS_LIMIT = 200
 // nothing renders.
 const TRIGGER_SUMMARY_EVENTS_LIMIT = 1
 
-// Histogram time-range presets. Capped at 6h because /trigger-diag/histogram
-// reads raw trigger_events, which only survives TRIGGER_EVENTS_RETENTION_HOURS
-// (6h server-side) before being pruned down to per-minute rollups that can't
-// reconstruct a distribution.
-const RANGE_PRESETS = [
-  { key: '15m', label: 'Last 15 min', ms: 15 * 60 * 1000 },
-  { key: '1h', label: 'Last hour', ms: 60 * 60 * 1000 },
-  { key: '6h', label: 'Last 6h (max)', ms: 6 * 60 * 60 * 1000 },
-]
+// Raw trigger_events (and so the ratio histogram) only survives
+// TRIGGER_EVENTS_RETENTION_HOURS server-side before being pruned down to
+// per-minute rollups that can't reconstruct a distribution — the histogram
+// fetch clamps its lower bound to this regardless of what range is selected.
+const HISTOGRAM_MAX_LOOKBACK_MS = 6 * 60 * 60 * 1000
 
 function relativeTime(isoString) {
   if (!isoString) return '—'
@@ -172,6 +169,105 @@ function HistogramChart({ histogram, threshold, label }) {
   )
 }
 
+// Downsamples per-minute trigger_event_rollups into a fixed number of
+// display bars — a week of per-minute data is 10,000+ points, far more than
+// can render as individual bars. First collapses rows sharing the same
+// minute (multiple nodes, when no node filter is set) into one combined
+// point, so the chart reads as a single timeline rather than interleaved
+// per-node bars, then groups consecutive minutes into ROLLUP_TARGET_BARS
+// buckets, summing counts within each group.
+const ROLLUP_TARGET_BARS = 120
+
+function downsampleRollups(buckets) {
+  if (buckets.length === 0) return []
+  const byMinute = new Map()
+  for (const b of buckets) {
+    const cur = byMinute.get(b.bucketStartUs) ?? { bucketStartUs: b.bucketStartUs, entryCount: 0, firedCount: 0 }
+    cur.entryCount += b.entryCount
+    cur.firedCount += b.firedCount
+    byMinute.set(b.bucketStartUs, cur)
+  }
+  const minutes = [...byMinute.values()].sort((a, b) => a.bucketStartUs - b.bucketStartUs)
+  const groupSize = Math.max(1, Math.ceil(minutes.length / ROLLUP_TARGET_BARS))
+  const grouped = []
+  for (let i = 0; i < minutes.length; i += groupSize) {
+    const chunk = minutes.slice(i, i + groupSize)
+    grouped.push({
+      bucketStartUs: chunk[0].bucketStartUs,
+      entryCount: chunk.reduce((s, m) => s + m.entryCount, 0),
+      firedCount: chunk.reduce((s, m) => s + m.firedCount, 0),
+    })
+  }
+  return grouped
+}
+
+// Time-bucketed activity chart — answers "does this fire sit inside a
+// plausible burst of real activity, or isolated with nothing around it",
+// which the ratio histogram can't (it collapses time away entirely). Reuses
+// the histogram's MIN_BAR_PX/MIN_FIRED_PX visibility floors, but skips the
+// histogram's per-bar count labels — at up to 120 bars there's no room for
+// them without overlap — and instead prints an exact total underneath,
+// computed from the un-downsampled buckets so grouping never distorts it.
+function RollupTimeChart({ buckets }) {
+  const width = 760
+  const height = 110
+  const chartHeight = height - 14
+
+  const grouped = downsampleRollups(buckets)
+  if (grouped.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--text-muted, #888)', padding: '8px 0' }}>
+        No activity in this range.
+      </div>
+    )
+  }
+
+  const totalEntries = buckets.reduce((s, b) => s + b.entryCount, 0)
+  const totalFired = buckets.reduce((s, b) => s + b.firedCount, 0)
+  const maxCount = Math.max(1, ...grouped.map(g => g.entryCount))
+  const barWidth = width / grouped.length
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ display: 'block' }}>
+        {grouped.map((g, i) => {
+          const barHeightRaw = (g.entryCount / maxCount) * chartHeight
+          const barHeight = g.entryCount > 0 ? Math.max(barHeightRaw, MIN_BAR_PX) : 0
+          const rawFiredHeight = (g.firedCount / maxCount) * chartHeight
+          const firedHeight = g.firedCount > 0 ? Math.min(barHeight, Math.max(rawFiredHeight, MIN_FIRED_PX)) : 0
+          const x = i * barWidth
+          return (
+            <g key={g.bucketStartUs}>
+              <rect
+                x={x + 1} y={chartHeight - barHeight}
+                width={Math.max(0, barWidth - 1)} height={barHeight}
+                fill="var(--text-muted, #888)" opacity={0.4}
+              />
+              {g.firedCount > 0 && (
+                <rect
+                  x={x + 1} y={chartHeight - firedHeight}
+                  width={Math.max(0, barWidth - 1)} height={firedHeight}
+                  fill="var(--green, #4caf50)"
+                />
+              )}
+            </g>
+          )
+        })}
+      </svg>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--text-muted, #888)', marginTop: 2 }}>
+        <span>{formatDateTime(tUsToIso(grouped[0].bucketStartUs))}</span>
+        <span>{formatDateTime(tUsToIso(grouped[grouped.length - 1].bucketStartUs))}</span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted, #888)', marginTop: 6 }}>
+        {formatCompactCount(totalEntries)} interesting blocks · {formatCompactCount(totalFired)} fires in this range
+        {grouped.length < buckets.length ? ` (each bar ≈ ${Math.max(1, Math.ceil(
+          (grouped[1]?.bucketStartUs - grouped[0]?.bucketStartUs) / 60_000_000 || 1
+        ))} min)` : ''}
+      </div>
+    </div>
+  )
+}
+
 const STATUS_LABEL = {
   analyzed: 'Analyzed',
   skipped_not_ready: 'Skipped (BirdNET not ready)',
@@ -192,8 +288,29 @@ export default function AnalyticsTab() {
   const [triggerError, setTriggerError] = useState(null)
   const [histogramData, setHistogramData]   = useState(null)
   const [histogramError, setHistogramError] = useState(null)
-  const [rangePreset, setRangePreset] = useState('1h')
+  const [rollupData, setRollupData]   = useState(null)
+  const [rollupError, setRollupError] = useState(null)
   const isMobile = useIsMobile()
+
+  // Shared date-range/moment controls, reused from the Detections tab
+  // (detectionFilters.js) so "Dawn", "Last 7 days" etc. mean the same thing
+  // everywhere in the app — directly useful here, since checking whether a
+  // fire clusters with dawn/dusk activity is exactly the question this tab
+  // exists to answer. Defaults to 'today' rather than DetectionsTab's 'all'
+  // — an unbounded rollup/histogram query risks a much larger fetch than an
+  // unbounded detections query.
+  const [datePreset, setDatePreset] = useState('today')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo]     = useState('')
+  const [moment, setMoment]         = useState('')
+
+  function chooseDatePreset(key) {
+    setDatePreset(key)
+    if (isQuickMoment(moment)) setMoment('')
+  }
+  function chooseMoment(key) {
+    setMoment(key)
+  }
 
   const [activeSubTab, setActiveSubTab] = useState('events') // 'events' | 'trigger'
   const [eventsDetailOpen, setEventsDetailOpen] = useState(false)
@@ -237,14 +354,22 @@ export default function AnalyticsTab() {
   // Ratio histogram: an explicit time-range query, not a live feed — pulling
   // the same range every few seconds would just re-fetch an unchanged
   // result. Refetches only when the range/node selection changes, plus the
-  // manual Refresh button below (which also re-runs fetchTriggerDiag).
+  // manual Refresh button below (which also re-runs the other two fetches).
+  // Clamped to HISTOGRAM_MAX_LOOKBACK_MS regardless of the selected range,
+  // since raw trigger_events can't answer anything older than that anyway —
+  // picking "Last 7 days" here still only queries the last 6h. time_of_day
+  // ('Dawn' etc.) isn't supported server-side for the histogram yet, so a
+  // sun-relative moment selection only narrows the rollup chart below, not
+  // this one.
   const fetchHistogram = useCallback(async () => {
     try {
-      const preset = RANGE_PRESETS.find(p => p.key === rangePreset) ?? RANGE_PRESETS[1]
-      const untilUs = Date.now() * 1000
-      const sinceUs = untilUs - preset.ms * 1000
+      const range = resolveRange(moment, datePreset, customFrom, customTo)
+      const now = Date.now()
+      const earliestMs = now - HISTOGRAM_MAX_LOOKBACK_MS
+      const untilMs = range?.to ? Math.min(range.to.getTime(), now) : now
+      const sinceMs = Math.max(range?.from ? range.from.getTime() : earliestMs, earliestMs)
       const params = new URLSearchParams({
-        sinceUs: String(sinceUs), untilUs: String(untilUs),
+        sinceUs: String(sinceMs * 1000), untilUs: String(untilMs * 1000),
         bucketWidth: '1', maxRatio: '20',
       })
       if (nodeFilter) params.set('nodeId', nodeFilter)
@@ -258,7 +383,32 @@ export default function AnalyticsTab() {
     } catch (err) {
       setHistogramError(err.message ?? String(err))
     }
-  }, [nodeFilter, rangePreset])
+  }, [nodeFilter, moment, datePreset, customFrom, customTo])
+
+  // Time-bucketed activity, from trigger_event_rollups — not capped to the
+  // raw retention window, so the full selected range applies here (unlike
+  // the histogram above). time_of_day is passed straight through for
+  // sun-relative moments; quick moments (Last 10 min/Last hour) are already
+  // expressed as from/to by resolveRange, matching how DetectionsTab does it.
+  const fetchRollups = useCallback(async () => {
+    try {
+      const range = resolveRange(moment, datePreset, customFrom, customTo)
+      const params = new URLSearchParams()
+      if (nodeFilter) params.set('nodeId', nodeFilter)
+      if (range?.from) params.set('from', range.from.toISOString())
+      if (range?.to) params.set('to', range.to.toISOString())
+      if (moment && !isQuickMoment(moment)) params.set('timeOfDay', moment)
+      const res = await apiFetch(`/analytics/trigger-diag/rollups?${params}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      setRollupData(await res.json())
+      setRollupError(null)
+    } catch (err) {
+      setRollupError(err.message ?? String(err))
+    }
+  }, [nodeFilter, moment, datePreset, customFrom, customTo])
 
   useEffect(() => {
     fetchAnalytics()
@@ -268,8 +418,9 @@ export default function AnalyticsTab() {
 
   // No polling here (unlike fetchAnalytics above) — this tab is a deliberate
   // query over a chosen node/range, not a live-updating feed. Refetches on
-  // mount and whenever fetchTriggerDiag/fetchHistogram's own dependencies
-  // (nodeFilter, rangePreset) change, plus the manual Refresh button.
+  // mount and whenever the fetch functions' own dependencies (nodeFilter,
+  // moment, datePreset, customFrom, customTo) change, plus the manual
+  // Refresh button.
   useEffect(() => {
     fetchTriggerDiag()
   }, [fetchTriggerDiag])
@@ -277,6 +428,10 @@ export default function AnalyticsTab() {
   useEffect(() => {
     fetchHistogram()
   }, [fetchHistogram])
+
+  useEffect(() => {
+    fetchRollups()
+  }, [fetchRollups])
 
   const sty = {
     root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1 },
@@ -326,6 +481,13 @@ export default function AnalyticsTab() {
       background: 'var(--surface1, #1e1e1e)', borderRadius: 8,
       border: '1px solid var(--border, #333)', overflowY: 'auto', maxHeight: 260,
     },
+    presetBtn: (active) => ({
+      padding: '4px 10px', fontSize: 12, borderRadius: 14,
+      border: `1px solid ${active ? 'var(--accent, #4da6ff)' : 'var(--border, #333)'}`,
+      background: active ? 'var(--accent, #4da6ff)' : 'transparent',
+      color: active ? '#fff' : 'var(--text-muted, #888)',
+      cursor: 'pointer', whiteSpace: 'nowrap',
+    }),
   }
 
   if (error) {
@@ -513,35 +675,76 @@ export default function AnalyticsTab() {
 
           {triggerData && triggerData.summary.length > 0 && (
             <div>
-              <div style={{ ...sty.toolbar, marginBottom: 8 }}>
-                <div style={sty.sectionLabel}>Ratio histogram</div>
-                <div style={{ flex: 1 }} />
-                <select
-                  style={sty.input}
-                  value={rangePreset}
-                  onChange={e => setRangePreset(e.target.value)}
-                >
-                  {RANGE_PRESETS.map(p => (
-                    <option key={p.key} value={p.key}>{p.label}</option>
-                  ))}
-                </select>
+              {/* Shared with the Detections tab — same date-range/moment
+                  vocabulary everywhere. Feeds the histogram (clamped to 6h,
+                  see fetchHistogram) and the rollup time chart (full range) */}
+              <div style={{ ...sty.toolbar, gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                {DATE_PRESETS.map(p => (
+                  <button key={p.key} style={sty.presetBtn(datePreset === p.key)} onClick={() => chooseDatePreset(p.key)}>
+                    {p.label}
+                  </button>
+                ))}
+                {datePreset === 'custom' && (
+                  <>
+                    <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={sty.input} />
+                    <span style={{ color: 'var(--text-muted, #888)', fontSize: 12 }}>to</span>
+                    <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={sty.input} />
+                  </>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                {MOMENT_OPTIONS.map(o => (
+                  <button key={o.key || 'all-day'} style={sty.presetBtn(moment === o.key)} onClick={() => chooseMoment(o.key)}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ ...sty.toolbar, marginBottom: 12 }}>
                 <input
                   style={sty.input}
                   placeholder="Filter by node id…"
                   value={nodeFilter}
                   onChange={e => setNodeFilter(e.target.value)}
                 />
+                <div style={{ flex: 1 }} />
                 <button
                   style={{
                     ...sty.disclosureBtn, padding: '4px 10px',
                     border: '1px solid var(--border, #333)', borderRadius: 4,
                   }}
-                  onClick={() => { fetchTriggerDiag(); fetchHistogram() }}
+                  onClick={() => { fetchTriggerDiag(); fetchHistogram(); fetchRollups() }}
                 >
                   Refresh
                 </button>
               </div>
 
+              <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Activity over time</div>
+              {rollupError ? (
+                <div style={{
+                  fontSize: 12, padding: '6px 10px', borderRadius: 4,
+                  background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+                }}>
+                  {rollupError}
+                </div>
+              ) : !rollupData ? (
+                <div style={sty.empty}>Loading…</div>
+              ) : (
+                <div style={{
+                  background: 'var(--surface1, #1e1e1e)', borderRadius: 8,
+                  border: '1px solid var(--border, #333)', padding: 12, marginBottom: 20,
+                }}>
+                  <RollupTimeChart buckets={rollupData.buckets} />
+                  <div style={{ fontSize: 11, color: 'var(--text-muted, #888)', marginTop: 8 }}>
+                    Muted = near-miss + fired blocks per bar; green = the fired portion (floored to
+                    stay visible). From trigger_event_rollups, which is never pruned — unlike the
+                    histogram below, the full selected range applies here, including "Dawn"/"Dusk".
+                    A fire with no surrounding muted activity is worth a second look; one that sits
+                    inside a rising bar is consistent with real, ongoing activity.
+                  </div>
+                </div>
+              )}
+
+              <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Ratio histogram</div>
               {histogramError ? (
                 <div style={{
                   fontSize: 12, padding: '6px 10px', borderRadius: 4,
@@ -566,8 +769,8 @@ export default function AnalyticsTab() {
                     the dashed threshold line is a fire attributable to the low-band gate — its
                     ratios here are whatever the high-band gates read at that moment, not what
                     triggered it (the node doesn't currently record which gate fired). Scoped to
-                    the raw retention window (recent hours) — older activity only survives in
-                    per-minute rollups, not shown here yet.
+                    the raw retention window (recent hours) regardless of the range selected above
+                    — see the time chart for anything older.
                   </div>
                 </div>
               )}
