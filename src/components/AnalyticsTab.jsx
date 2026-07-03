@@ -8,7 +8,6 @@ import { formatTime, formatDateTime } from './DetectionFormat.jsx'
 import { useIsMobile } from '../hooks/useBreakpoint.js'
 import { MOMENT_OPTIONS, isQuickMoment, startOfDay, endOfDay } from '../utils/detectionFilters.js'
 
-const POLL_INTERVAL_MS = 5000
 const EVENTS_LIMIT = 200
 
 // Trigger-diagnostics summary fetch no longer needs the raw `events` array
@@ -356,10 +355,21 @@ export default function AnalyticsTab() {
   const [activeSubTab, setActiveSubTab] = useState('events') // 'events' | 'trigger'
   const [eventsDetailOpen, setEventsDetailOpen] = useState(false)
 
+  // Push events — same deliberate-query model as the trigger diagnostics
+  // fetches below rather than the live 5s poll this used to run: this tab
+  // answers "is the trigger firing enough" / "is BirdNET seeing near-misses"
+  // over a chosen window, not "watch pushes arrive right now", and a
+  // recency-capped live feed has the same crowding problem the trigger
+  // detail table did (a busy node buries everything else under its own
+  // shared limit) — see project discussion.
   const fetchAnalytics = useCallback(async () => {
     try {
+      const range = resolveTriggerRange(moment, datePreset, customFrom, customTo)
       const params = new URLSearchParams({ limit: String(EVENTS_LIMIT) })
       if (nodeFilter) params.set('nodeId', nodeFilter)
+      if (range?.from) params.set('from', range.from.toISOString())
+      if (range?.to) params.set('to', range.to.toISOString())
+      if (moment && !isQuickMoment(moment)) params.set('timeOfDay', moment)
       const res = await apiFetch(`/analytics/audio?${params}`)
       if (!res.ok) {
         const body = await res.json().catch(() => null)
@@ -370,7 +380,7 @@ export default function AnalyticsTab() {
     } catch (err) {
       setError(err.message ?? String(err))
     }
-  }, [nodeFilter])
+  }, [nodeFilter, moment, datePreset, customFrom, customTo])
 
   // Trigger-diagnostics: per-block dual-gate ratios pulled from each node's
   // /app/api/trigger-diag ring buffer (only near-misses + fires are ever
@@ -450,17 +460,14 @@ export default function AnalyticsTab() {
     }
   }, [nodeFilter, moment, datePreset, customFrom, customTo])
 
+  // No polling on any of these four — this whole tab is a deliberate query
+  // over a chosen node/range, not a live-updating feed. Each refetches on
+  // mount and whenever its own dependencies (nodeFilter, moment, datePreset,
+  // customFrom, customTo) change, plus the single Refresh button below.
   useEffect(() => {
     fetchAnalytics()
-    const t = setInterval(fetchAnalytics, POLL_INTERVAL_MS)
-    return () => clearInterval(t)
   }, [fetchAnalytics])
 
-  // No polling here (unlike fetchAnalytics above) — this tab is a deliberate
-  // query over a chosen node/range, not a live-updating feed. Refetches on
-  // mount and whenever the fetch functions' own dependencies (nodeFilter,
-  // moment, datePreset, customFrom, customTo) change, plus the manual
-  // Refresh button.
   useEffect(() => {
     fetchTriggerDiag()
   }, [fetchTriggerDiag])
@@ -551,6 +558,51 @@ export default function AnalyticsTab() {
 
   return (
     <div style={sty.root}>
+      {/* Shared across both sub-tabs — same window applies whether you're
+          looking at pushes or trigger diagnostics, since they're usually the
+          same investigation from two angles. Date range/Custom is a local
+          fork (TRIGGER_DATE_PRESETS above); Moment stays shared with the
+          Detections tab's sun-relative vocabulary. */}
+      <div style={{ ...sty.toolbar, gap: 8, flexWrap: 'wrap' }}>
+        {TRIGGER_DATE_PRESETS.map(p => (
+          <button key={p.key} style={sty.presetBtn(datePreset === p.key)} onClick={() => chooseDatePreset(p.key)}>
+            {p.label}
+          </button>
+        ))}
+        {datePreset === 'custom' && (
+          <>
+            <input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={sty.input} />
+            <span style={{ color: 'var(--text-muted, #888)', fontSize: 12 }}>to</span>
+            <input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} style={sty.input} />
+          </>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {MOMENT_OPTIONS.map(o => (
+          <button key={o.key || 'all-day'} style={sty.presetBtn(moment === o.key)} onClick={() => chooseMoment(o.key)}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <div style={sty.toolbar}>
+        <input
+          style={sty.input}
+          placeholder="Filter by node id…"
+          value={nodeFilter}
+          onChange={e => setNodeFilter(e.target.value)}
+        />
+        <div style={{ flex: 1 }} />
+        <button
+          style={{
+            ...sty.disclosureBtn, padding: '4px 10px',
+            border: '1px solid var(--border, #333)', borderRadius: 4,
+          }}
+          onClick={() => { fetchAnalytics(); fetchTriggerDiag(); fetchHistogram(); fetchRollups() }}
+        >
+          Refresh
+        </button>
+      </div>
+
       <div style={sty.subTabBar}>
         <button
           style={{ ...sty.subTabBtn, ...(activeSubTab === 'events' ? sty.subTabBtnActive : {}) }}
@@ -616,13 +668,6 @@ export default function AnalyticsTab() {
               <span>{eventsDetailOpen ? '▾' : '▸'}</span>
               Recent push events ({events.length})
             </button>
-            <div style={{ flex: 1 }} />
-            <input
-              style={sty.input}
-              placeholder="Filter by node id…"
-              value={nodeFilter}
-              onChange={e => setNodeFilter(e.target.value)}
-            />
           </div>
 
           {eventsDetailOpen && (
@@ -715,51 +760,6 @@ export default function AnalyticsTab() {
 
           {triggerData && triggerData.summary.length > 0 && (
             <div>
-              {/* Date range/Custom is a local fork (see TRIGGER_DATE_PRESETS
-                  above) — Moment stays shared with the Detections tab, same
-                  sun-relative vocabulary. Feeds the histogram (clamped to
-                  6h, see fetchHistogram) and the rollup time chart (full
-                  range). */}
-              <div style={{ ...sty.toolbar, gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                {TRIGGER_DATE_PRESETS.map(p => (
-                  <button key={p.key} style={sty.presetBtn(datePreset === p.key)} onClick={() => chooseDatePreset(p.key)}>
-                    {p.label}
-                  </button>
-                ))}
-                {datePreset === 'custom' && (
-                  <>
-                    <input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={sty.input} />
-                    <span style={{ color: 'var(--text-muted, #888)', fontSize: 12 }}>to</span>
-                    <input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} style={sty.input} />
-                  </>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                {MOMENT_OPTIONS.map(o => (
-                  <button key={o.key || 'all-day'} style={sty.presetBtn(moment === o.key)} onClick={() => chooseMoment(o.key)}>
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-              <div style={{ ...sty.toolbar, marginBottom: 12 }}>
-                <input
-                  style={sty.input}
-                  placeholder="Filter by node id…"
-                  value={nodeFilter}
-                  onChange={e => setNodeFilter(e.target.value)}
-                />
-                <div style={{ flex: 1 }} />
-                <button
-                  style={{
-                    ...sty.disclosureBtn, padding: '4px 10px',
-                    border: '1px solid var(--border, #333)', borderRadius: 4,
-                  }}
-                  onClick={() => { fetchTriggerDiag(); fetchHistogram(); fetchRollups() }}
-                >
-                  Refresh
-                </button>
-              </div>
-
               <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>Activity over time</div>
               {rollupError ? (
                 <div style={{

@@ -1117,6 +1117,7 @@ async def audio_analytics(
     node_id: str | None = Query(default=None, alias="nodeId"),
     from_ts: str | None = Query(default=None, alias="from"),
     to_ts: str | None = Query(default=None, alias="to"),
+    time_of_day: str | None = Query(default=None, alias="timeOfDay", pattern="^(dawn|dusk|daytime|nighttime)$"),
 ):
     """Return audio-push event history + per-node summary stats.
 
@@ -1129,26 +1130,102 @@ async def audio_analytics(
     `summary` is one row per node_id (per-node stat cards); `events` is the
     raw push history (recent-events table), both filtered the same way by
     node_id/from/to.
+
+    time_of_day follows the same convention as GET /detections: classified
+    per-row against the array's sun-relative dawn/dusk/daytime/nighttime
+    windows (see suntimes.py), since each event's window depends on its own
+    calendar date and can't be expressed as a SQL range. That also means
+    `summary` can't use its normal SQL GROUP BY path under time_of_day (same
+    reasoning as GET /detections/species-summary) — it re-aggregates the
+    classified rows in Python instead, capped at the same 2000-row ceiling
+    GET /detections uses.
     """
-    raw_events = await db.list_audio_events(limit=limit, node_id=node_id, from_ts=from_ts, to_ts=to_ts)
-    raw_summary = await db.audio_event_summary(from_ts=from_ts, to_ts=to_ts)
-    if node_id:
-        raw_summary = [r for r in raw_summary if r["node_id"] == node_id]
+    if not time_of_day:
+        raw_events = await db.list_audio_events(limit=limit, node_id=node_id, from_ts=from_ts, to_ts=to_ts)
+        raw_summary = await db.audio_event_summary(from_ts=from_ts, to_ts=to_ts)
+        if node_id:
+            raw_summary = [r for r in raw_summary if r["node_id"] == node_id]
+
+        summary = [
+            NodeAudioSummary(
+                node_id=r["node_id"],
+                total_pushes=r["total_pushes"],
+                triggered_pushes=r["triggered_pushes"] or 0,
+                pushes_with_detections=r["pushes_with_detections"] or 0,
+                pushes_zero_detections=r["pushes_zero_detections"] or 0,
+                detection_rate=(r["pushes_with_detections"] or 0) / r["total_pushes"] if r["total_pushes"] else 0.0,
+                last_push_at=r["last_push_at"],
+                last_trigger_at=r["last_trigger_at"],
+                avg_near_miss_confidence=r["avg_near_miss_confidence"],
+            )
+            for r in raw_summary
+        ]
+        events = [
+            AudioEventRecord(
+                id=r["id"], node_id=r["node_id"], triggered=bool(r["triggered"]),
+                received_at=r["received_at"], bytes=r["bytes"],
+                analysis_status=r["analysis_status"], detection_count=r["detection_count"],
+                top_confidence=r["top_confidence"], top_species=r["top_species"],
+                t_start_us=r["t_start_us"], t_end_us=r["t_end_us"],
+            )
+            for r in raw_events
+        ]
+        return AudioAnalytics(summary=summary, events=events)
+
+    origin = await db.get_array_origin()
+    if origin is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Array origin not set — configure the array's reference lat/lon before filtering by time of day",
+        )
+
+    raw = await db.list_audio_events(limit=2000, node_id=node_id, from_ts=from_ts, to_ts=to_ts)
+    buckets = suntimes.classify_many(
+        (datetime.fromisoformat(r["received_at"]) for r in raw), origin["lat"], origin["lon"],
+    )
+    matched = [r for r, bucket in zip(raw, buckets) if bucket == time_of_day]
+
+    # Re-aggregate per node — same fields/logic as audio_event_summary()'s
+    # SQL, just computed over the already-classified rows in Python.
+    agg: dict[str, dict] = {}
+    for r in matched:
+        entry = agg.setdefault(r["node_id"], {
+            "node_id": r["node_id"], "total_pushes": 0, "triggered_pushes": 0,
+            "pushes_with_detections": 0, "pushes_zero_detections": 0,
+            "last_push_at": r["received_at"], "last_trigger_at": None,
+            "_conf_sum": 0.0, "_conf_count": 0,
+        })
+        entry["total_pushes"] += 1
+        if r["triggered"]:
+            entry["triggered_pushes"] += 1
+            if entry["last_trigger_at"] is None or r["received_at"] > entry["last_trigger_at"]:
+                entry["last_trigger_at"] = r["received_at"]
+        if r["detection_count"] > 0:
+            entry["pushes_with_detections"] += 1
+        else:
+            entry["pushes_zero_detections"] += 1
+            if r["top_confidence"] is not None:
+                entry["_conf_sum"] += r["top_confidence"]
+                entry["_conf_count"] += 1
+        if r["received_at"] > entry["last_push_at"]:
+            entry["last_push_at"] = r["received_at"]
 
     summary = [
         NodeAudioSummary(
-            node_id=r["node_id"],
-            total_pushes=r["total_pushes"],
-            triggered_pushes=r["triggered_pushes"] or 0,
-            pushes_with_detections=r["pushes_with_detections"] or 0,
-            pushes_zero_detections=r["pushes_zero_detections"] or 0,
-            detection_rate=(r["pushes_with_detections"] or 0) / r["total_pushes"] if r["total_pushes"] else 0.0,
-            last_push_at=r["last_push_at"],
-            last_trigger_at=r["last_trigger_at"],
-            avg_near_miss_confidence=r["avg_near_miss_confidence"],
+            node_id=v["node_id"],
+            total_pushes=v["total_pushes"],
+            triggered_pushes=v["triggered_pushes"],
+            pushes_with_detections=v["pushes_with_detections"],
+            pushes_zero_detections=v["pushes_zero_detections"],
+            detection_rate=(v["pushes_with_detections"] / v["total_pushes"]) if v["total_pushes"] else 0.0,
+            last_push_at=v["last_push_at"],
+            last_trigger_at=v["last_trigger_at"],
+            avg_near_miss_confidence=(v["_conf_sum"] / v["_conf_count"]) if v["_conf_count"] else None,
         )
-        for r in raw_summary
+        for v in agg.values()
     ]
+    summary.sort(key=lambda s: s.total_pushes, reverse=True)
+
     events = [
         AudioEventRecord(
             id=r["id"], node_id=r["node_id"], triggered=bool(r["triggered"]),
@@ -1157,7 +1234,7 @@ async def audio_analytics(
             top_confidence=r["top_confidence"], top_species=r["top_species"],
             t_start_us=r["t_start_us"], t_end_us=r["t_end_us"],
         )
-        for r in raw_events
+        for r in matched[:limit]
     ]
     return AudioAnalytics(summary=summary, events=events)
 
