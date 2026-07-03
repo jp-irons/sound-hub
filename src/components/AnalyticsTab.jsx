@@ -6,7 +6,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { apiFetch } from '../auth.js'
 import { formatTime, formatDateTime } from './DetectionFormat.jsx'
 import { useIsMobile } from '../hooks/useBreakpoint.js'
-import { DATE_PRESETS, MOMENT_OPTIONS, isQuickMoment, resolveRange } from '../utils/detectionFilters.js'
+import { MOMENT_OPTIONS, isQuickMoment, startOfDay, endOfDay } from '../utils/detectionFilters.js'
 
 const POLL_INTERVAL_MS = 5000
 const EVENTS_LIMIT = 200
@@ -24,6 +24,48 @@ const TRIGGER_SUMMARY_EVENTS_LIMIT = 1
 // per-minute rollups that can't reconstruct a distribution — the histogram
 // fetch clamps its lower bound to this regardless of what range is selected.
 const HISTOGRAM_MAX_LOOKBACK_MS = 6 * 60 * 60 * 1000
+
+// Forked from detectionFilters.js's DATE_PRESETS/resolveRange, deliberately
+// diverging from the Detections tab rather than sharing the component (see
+// project discussion) — this tab dropped "Last 7 days" (not useful against
+// either the histogram's 6h cap or what's actually been used to investigate
+// trigger behaviour) and Custom takes full date+time instead of whole-day
+// granularity, since the real use case here is a short, specific window
+// ("did anything fire between 2:00 and 2:30am"), not picking whole calendar
+// days.
+const TRIGGER_DATE_PRESETS = [
+  { key: 'all',       label: 'All' },
+  { key: 'today',     label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'custom',    label: 'Custom' },
+]
+
+function resolveTriggerRange(moment, datePreset, customFrom, customTo) {
+  const now = new Date()
+  if (moment === 'last10min') return { from: new Date(now.getTime() - 10 * 60 * 1000), to: now }
+  if (moment === 'last1hour') return { from: new Date(now.getTime() - 60 * 60 * 1000), to: now }
+
+  switch (datePreset) {
+    case 'today':
+      return { from: startOfDay(now), to: endOfDay(now) }
+    case 'yesterday': {
+      const y = new Date(now); y.setDate(y.getDate() - 1)
+      return { from: startOfDay(y), to: endOfDay(y) }
+    }
+    case 'custom': {
+      if (!customFrom && !customTo) return null
+      // customFrom/customTo are datetime-local strings ("YYYY-MM-DDTHH:mm")
+      // — parsed directly as local time by the Date constructor, no
+      // start/end-of-day snapping needed since the user picked exact times.
+      return {
+        from: customFrom ? new Date(customFrom) : null,
+        to: customTo ? new Date(customTo) : null,
+      }
+    }
+    default:
+      return null // 'all'
+  }
+}
 
 function relativeTime(isoString) {
   if (!isoString) return '—'
@@ -292,13 +334,12 @@ export default function AnalyticsTab() {
   const [rollupError, setRollupError] = useState(null)
   const isMobile = useIsMobile()
 
-  // Shared date-range/moment controls, reused from the Detections tab
-  // (detectionFilters.js) so "Dawn", "Last 7 days" etc. mean the same thing
-  // everywhere in the app — directly useful here, since checking whether a
-  // fire clusters with dawn/dusk activity is exactly the question this tab
-  // exists to answer. Defaults to 'today' rather than DetectionsTab's 'all'
-  // — an unbounded rollup/histogram query risks a much larger fetch than an
-  // unbounded detections query.
+  // Moment (Dawn/Dusk/etc.) is still shared with the Detections tab — same
+  // sun-relative vocabulary is directly useful here. Date range/Custom is a
+  // local fork (TRIGGER_DATE_PRESETS/resolveTriggerRange above), not shared.
+  // Defaults to 'today' rather than DetectionsTab's 'all' — an unbounded
+  // rollup/histogram query risks a much larger fetch than an unbounded
+  // detections query.
   const [datePreset, setDatePreset] = useState('today')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo]     = useState('')
@@ -356,14 +397,13 @@ export default function AnalyticsTab() {
   // result. Refetches only when the range/node selection changes, plus the
   // manual Refresh button below (which also re-runs the other two fetches).
   // Clamped to HISTOGRAM_MAX_LOOKBACK_MS regardless of the selected range,
-  // since raw trigger_events can't answer anything older than that anyway —
-  // picking "Last 7 days" here still only queries the last 6h. time_of_day
-  // ('Dawn' etc.) isn't supported server-side for the histogram yet, so a
-  // sun-relative moment selection only narrows the rollup chart below, not
-  // this one.
+  // since raw trigger_events can't answer anything older than that anyway.
+  // time_of_day ('Dawn' etc.) isn't supported server-side for the histogram
+  // yet, so a sun-relative moment selection only narrows the rollup chart
+  // below, not this one.
   const fetchHistogram = useCallback(async () => {
     try {
-      const range = resolveRange(moment, datePreset, customFrom, customTo)
+      const range = resolveTriggerRange(moment, datePreset, customFrom, customTo)
       const now = Date.now()
       const earliestMs = now - HISTOGRAM_MAX_LOOKBACK_MS
       const untilMs = range?.to ? Math.min(range.to.getTime(), now) : now
@@ -389,10 +429,10 @@ export default function AnalyticsTab() {
   // raw retention window, so the full selected range applies here (unlike
   // the histogram above). time_of_day is passed straight through for
   // sun-relative moments; quick moments (Last 10 min/Last hour) are already
-  // expressed as from/to by resolveRange, matching how DetectionsTab does it.
+  // expressed as from/to by resolveTriggerRange.
   const fetchRollups = useCallback(async () => {
     try {
-      const range = resolveRange(moment, datePreset, customFrom, customTo)
+      const range = resolveTriggerRange(moment, datePreset, customFrom, customTo)
       const params = new URLSearchParams()
       if (nodeFilter) params.set('nodeId', nodeFilter)
       if (range?.from) params.set('from', range.from.toISOString())
@@ -675,20 +715,22 @@ export default function AnalyticsTab() {
 
           {triggerData && triggerData.summary.length > 0 && (
             <div>
-              {/* Shared with the Detections tab — same date-range/moment
-                  vocabulary everywhere. Feeds the histogram (clamped to 6h,
-                  see fetchHistogram) and the rollup time chart (full range) */}
+              {/* Date range/Custom is a local fork (see TRIGGER_DATE_PRESETS
+                  above) — Moment stays shared with the Detections tab, same
+                  sun-relative vocabulary. Feeds the histogram (clamped to
+                  6h, see fetchHistogram) and the rollup time chart (full
+                  range). */}
               <div style={{ ...sty.toolbar, gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                {DATE_PRESETS.map(p => (
+                {TRIGGER_DATE_PRESETS.map(p => (
                   <button key={p.key} style={sty.presetBtn(datePreset === p.key)} onClick={() => chooseDatePreset(p.key)}>
                     {p.label}
                   </button>
                 ))}
                 {datePreset === 'custom' && (
                   <>
-                    <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={sty.input} />
+                    <input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={sty.input} />
                     <span style={{ color: 'var(--text-muted, #888)', fontSize: 12 }}>to</span>
-                    <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={sty.input} />
+                    <input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)} style={sty.input} />
                   </>
                 )}
               </div>
