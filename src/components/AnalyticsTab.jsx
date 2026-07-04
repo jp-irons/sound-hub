@@ -527,6 +527,7 @@ export default function AnalyticsTab() {
     detailWrap: {
       background: 'var(--surface1, #1e1e1e)', borderRadius: 8,
       border: '1px solid var(--border, #333)', overflowY: 'auto', maxHeight: 260,
+      flexShrink: 0,
     },
     presetBtn: (active) => ({
       padding: '4px 10px', fontSize: 12, borderRadius: 14,
