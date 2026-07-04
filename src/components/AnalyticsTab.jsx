@@ -481,7 +481,7 @@ export default function AnalyticsTab() {
   }, [fetchRollups])
 
   const sty = {
-    root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1 },
+    root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1, minHeight: 0 },
     nodeCol: { fontWeight: 600, color: 'var(--text, #eee)' },
     toolbar: {
       display: 'flex', alignItems: 'center', gap: 8,
