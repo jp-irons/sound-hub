@@ -18,14 +18,6 @@ function clockAccuracyLabel(node) {
   return `±${(us/1000000).toFixed(1)}s`
 }
 
-function clockAccuracyColor(node) {
-  const us = node.clock?.accuracyUs
-  if (us == null) return 'var(--text-muted)'
-  if (us <= 100)   return 'var(--green)'
-  if (us <= 5000)  return 'var(--yellow)'
-  return 'var(--red)'
-}
-
 function bufferFraction(node) {
   const used = node.audio?.bufferUsedS
   const cap = node.audio?.bufferCapacityS
@@ -87,18 +79,31 @@ export default function NodeCard({ node, selected, onSelect }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>⏱</span>
-          <span style={{ fontSize: 11, color: clockAccuracyColor(node) }}>
-            {clockAccuracyLabel(node)}
-          </span>
           {(() => {
             const s = node.clock?.source
-            if (s === 'GPS_PPS')              return <span style={{ fontSize: 10, color: 'var(--green)'      }}>(PPS)</span>
-            if (s === 'GPS_NMEA')             return <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(NMEA)</span>
-            if (s === 'NETWORK_GPS_PPS')      return <span style={{ fontSize: 10, color: 'var(--blue)'       }}>(Net PPS)</span>
-            if (s === 'NETWORK_GPS_NMEA')     return <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(Net NMEA)</span>
-            if (s === 'NETWORK_FREE_RUNNING') return <span style={{ fontSize: 10, color: 'var(--yellow)'     }}>(Net)</span>
-            if (s === 'FREE_RUNNING')         return <span style={{ fontSize: 10, color: 'var(--yellow)'     }}>(free)</span>
-            return null
+            const labelColor = {
+              GPS_PPS:              'var(--green)',
+              GPS_NMEA:             'var(--text-muted)',
+              NETWORK_GPS_PPS:      'var(--blue)',
+              NETWORK_GPS_NMEA:     'var(--text-muted)',
+              NETWORK_FREE_RUNNING: 'var(--yellow)',
+              FREE_RUNNING:         'var(--yellow)',
+            }[s]
+            const label = {
+              GPS_PPS:              'PPS',
+              GPS_NMEA:             'NMEA',
+              NETWORK_GPS_PPS:      'Net PPS',
+              NETWORK_GPS_NMEA:     'Net NMEA',
+              NETWORK_FREE_RUNNING: 'Net',
+              FREE_RUNNING:         'free',
+            }[s]
+            if (!label) return null
+            const us = node.clock?.accuracyUs
+            return (
+              <span style={{ fontSize: 11, color: labelColor }}>
+                {label}{us != null && ` (${clockAccuracyLabel(node)})`}
+              </span>
+            )
           })()}
         </div>
         {node.espNow && (
