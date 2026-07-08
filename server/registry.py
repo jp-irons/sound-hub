@@ -12,7 +12,7 @@ from typing import Optional
 
 import aiosqlite
 
-from . import db
+from . import config, db
 
 log = logging.getLogger("sound_hub.registry")
 
@@ -188,3 +188,87 @@ def get_live_status(node_id: str) -> dict:
         "reg_heap_free_bytes": None, "reg_heap_min_free_bytes": None, "reg_heap_at": None,
         "reg_https_active_sockets": None, "reg_https_max_sockets": None,
     })
+
+
+# --- GPS EMA (in-memory, volatile) ---
+#
+# Hub-side replacement for the firmware's removed GpsCentroid (Welford +
+# EMA) — see GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md in sound-capture-node.
+# One continuously-updated, half-life-decayed lat/lon/alt average per node,
+# fed from the raw GPS fix on every poll. Never persisted, same rationale as
+# `_live_status`: a hub restart just reconverges within a couple of
+# half-lives (a few minutes), so there's nothing worth writing to disk.
+#
+# Quality gates mirror the firmware's old GpsCentroid thresholds exactly, so
+# behavior doesn't silently change: a fix is only admitted once satellites
+# >= _GPS_EMA_MIN_SATELLITES, and only after the node's GPS has held lock
+# continuously for at least _GPS_EMA_LOCK_SETTLE_S (settles the receiver's
+# solution past its initial coarse fix, same as the firmware's
+# kLockSettleS). Losing lock resets the settle timer, same as the firmware
+# resetting lockAcquiredAt_ on loss of fix.
+_gps_ema: dict[str, dict] = {}
+
+_GPS_EMA_MIN_SATELLITES = 8    # matches firmware's GpsCentroid::kMinSatellitesForSample
+_GPS_EMA_LOCK_SETTLE_S  = 30.0 # matches firmware's GpsCentroid::kLockSettleS
+_GPS_EMA_HALF_LIFE_S    = 600.0  # 10 minutes
+
+# Decay per poll, derived from the half-life and the *configured* poll
+# interval (not a hardcoded guess) so the effective half-life stays correct
+# even if an operator changes STATUS_POLL_INTERVAL_S.
+_GPS_EMA_DECAY = 0.5 ** (config.STATUS_POLL_INTERVAL_S / _GPS_EMA_HALF_LIFE_S)
+
+
+def update_gps_ema(node_id: str, raw_status: Optional[dict]) -> None:
+    """Feed one poll's raw GPS fix into a node's hub-side EMA.
+
+    Call this from the poller on every status fetch (successful or not —
+    pass raw_status=None on failure, which is treated the same as no fix:
+    lock-settle timer resets, no sample admitted).
+    """
+    gps = (raw_status or {}).get("gps") or {}
+    now = datetime.now(timezone.utc).timestamp()
+    state = _gps_ema.get(node_id)
+
+    if not gps.get("available") or not gps.get("receiving"):
+        # No current lock — require the solution to settle again on
+        # reacquisition, same as the firmware's lockAcquiredAt_ reset.
+        if state is not None:
+            state["lock_since"] = None
+        return
+
+    if state is None:
+        state = {"lat": None, "lon": None, "alt": None, "n": 0, "lock_since": None}
+        _gps_ema[node_id] = state
+
+    if state["lock_since"] is None:
+        state["lock_since"] = now
+    if now - state["lock_since"] < _GPS_EMA_LOCK_SETTLE_S:
+        return
+    if (gps.get("satellites") or 0) < _GPS_EMA_MIN_SATELLITES:
+        return
+
+    lat, lon = gps.get("latitude"), gps.get("longitude")
+    if lat is None or lon is None:
+        return
+    alt = gps.get("altitudeM")
+    alt = alt if alt is not None else 0.0
+
+    if state["n"] == 0:
+        # First admitted sample — seed directly rather than decaying from
+        # None (mirrors the firmware EMA's cold-start behavior).
+        state["lat"], state["lon"], state["alt"] = lat, lon, alt
+    else:
+        d = _GPS_EMA_DECAY
+        state["lat"] = d * state["lat"] + (1 - d) * lat
+        state["lon"] = d * state["lon"] + (1 - d) * lon
+        state["alt"] = d * state["alt"] + (1 - d) * alt
+    state["n"] += 1
+
+
+def get_gps_ema(node_id: str) -> Optional[dict]:
+    """Return {"lat", "lon", "alt", "n"} for a node's live GPS EMA, or None
+    if no sample has been admitted yet (no lock, or still settling)."""
+    state = _gps_ema.get(node_id)
+    if state is None or state["n"] == 0:
+        return None
+    return {"lat": state["lat"], "lon": state["lon"], "alt": state["alt"], "n": state["n"]}

@@ -152,7 +152,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                 </span>
               </div>
               {/* Lat/Lon — projected from hub array_origin + stored E/N offset,
-                  or GPS centroid fallback when no array origin is set yet. */}
+                  or hub-side GPS EMA fallback when no array origin is set yet. */}
               {node.latLon && (
                 <>
                   <div className="kv">
@@ -175,7 +175,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                       background: 'var(--blue-dim)', borderRadius: 4,
                       fontSize: 11, color: 'var(--blue)',
                     }}>
-                      GPS centroid estimate — array origin not yet configured
+                      GPS EMA estimate — array origin not yet configured
                     </div>
                   )}
                 </>
@@ -200,7 +200,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                 <div className="kv">
                   <span className="kv-key">Survey Δ</span>
                   <span className={`kv-val ${node.surveyDisagreementM < 2 ? 'good' : node.surveyDisagreementM < 5 ? 'warn' : 'bad'}`}>
-                    {node.surveyDisagreementM.toFixed(2)} m from GPS centroid
+                    {node.surveyDisagreementM.toFixed(2)} m from live GPS EMA
                   </span>
                 </div>
               )}
@@ -297,26 +297,14 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             </div>
             <div className="kv">
               <span className="kv-key">EMA fix</span>
-              <span className="kv-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+              <span className="kv-val good" style={{ fontFamily: 'monospace', fontSize: 11 }}>
                 {fmtFix(node.gps.ema)}
               </span>
             </div>
             <div className="kv">
-              <span className="kv-key">Centroid fix</span>
-              <span className="kv-val good" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                {fmtFix(node.gps.centroid)}
-              </span>
-            </div>
-            <div className="kv">
-              <span className="kv-key">Centroid N</span>
+              <span className="kv-key">EMA samples</span>
               <span className="kv-val">
-                {node.gps.centroidN != null ? `${node.gps.centroidN.toLocaleString()} samples` : '—'}
-              </span>
-            </div>
-            <div className="kv">
-              <span className="kv-key">Centroid σ</span>
-              <span className={`kv-val ${node.gps.centroidStddevM == null ? '' : node.gps.centroidStddevM < 2 ? 'good' : node.gps.centroidStddevM < 5 ? 'warn' : 'bad'}`}>
-                {fmtNum(node.gps.centroidStddevM, 2, ' m')}
+                {node.gps.emaN != null ? `${node.gps.emaN.toLocaleString()} samples` : '—'}
               </span>
             </div>
             <div className="kv">

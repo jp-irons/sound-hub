@@ -17,7 +17,8 @@ from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
-    NodeAudioSummary, NodeConfigRequest, NodePosition, NodeRegisterRequest,
+    NodeAudioSummary, NodeConfigRequest, NodePosition, PositionFromEma,
+    NodeRegisterRequest,
     NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
     SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
@@ -204,9 +205,6 @@ def _node_position_from_row(pos: dict) -> NodePosition:
         origin_lat=pos["origin_lat"],
         origin_lon=pos["origin_lon"],
         origin_alt=pos["origin_alt"],
-        surveyed_lat=pos.get("surveyed_lat"),
-        surveyed_lon=pos.get("surveyed_lon"),
-        surveyed_alt=pos.get("surveyed_alt"),
     )
 
 
@@ -265,6 +263,7 @@ async def _mapped_nodes() -> list[tuple[dict, dict, dict]]:
             raw_status=live["raw_status"],
             node_pos=node_pos,
             array_origin=array_origin,
+            gps_ema=registry.get_gps_ema(node["id"]),
         )
         triples.append((node, live, derived))
 
@@ -539,14 +538,49 @@ async def set_node_position(node_id: str, req: NodePosition):
         origin_lat=req.origin_lat,
         origin_lon=req.origin_lon,
         origin_alt=req.origin_alt,
-        surveyed_lat=req.surveyed_lat,
-        surveyed_lon=req.surveyed_lon,
-        surveyed_alt=req.surveyed_alt,
         updated_at=_now_iso(),
     )
 
     pos = await db.get_node_position(node_id)
     return _node_position_from_row(pos)
+
+
+@router.get("/nodes/{node_id}/position/from-ema", response_model=PositionFromEma,
+            dependencies=[Depends(require_viewer)])
+async def get_position_from_ema(node_id: str):
+    """Preview this node's E/N/Alt offset as computed from its current
+    hub-side GPS EMA, back-projected through the array origin.
+
+    Read-only — nothing is persisted. The operator reviews the preview and,
+    if happy with it, applies it via PUT /nodes/{node_id}/position.
+    """
+    node = await registry.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    origin = await db.get_array_origin()
+    if origin is None:
+        raise HTTPException(status_code=422, detail="Array origin not configured")
+
+    ema = registry.get_gps_ema(node_id)
+    if ema is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No GPS EMA yet for this node — wait for GPS to lock and settle",
+        )
+
+    # Forward-project: this node's offset from the origin, given both the
+    # origin and this node's current absolute position (the EMA). Same
+    # underlying math as the origin-from-node back-projection, solving for
+    # the other unknown.
+    pos_n = (ema["lat"] - origin["lat"]) * status_mapper._M_PER_DEG_LAT
+    pos_e = (ema["lon"] - origin["lon"]) * status_mapper._M_PER_DEG_LON
+    pos_alt = ema["alt"] - origin["alt_m"]
+
+    return PositionFromEma(
+        pos_e=pos_e, pos_n=pos_n, pos_alt=pos_alt,
+        ema_lat=ema["lat"], ema_lon=ema["lon"], ema_alt=ema["alt"], ema_n=ema["n"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -569,30 +603,23 @@ async def get_origin():
 
 
 @router.post("/origin/set-from-node/{node_id}", response_model=ArrayOrigin, dependencies=[Depends(require_admin)])
-async def set_origin_from_node(
-    node_id: str,
-    source: str = Query(
-        default="gps_centroid",
-        description="Coordinate source: 'gps_centroid' (live GPS average) or 'surveyed_coords' (stored lat/lon/alt)",
-    ),
-):
+async def set_origin_from_node(node_id: str):
     """Compute and store the hub array origin from a surveyed node's position.
 
-    Back-projects the array (0,0,0) datum from the node's reference coordinates
+    Back-projects the array (0,0,0) datum from the node's live GPS EMA
+    (registry.get_gps_ema — an in-memory hub-side average, see registry.py)
     minus its stored N/E/Alt array offset:
-        origin = ref_latlon - node_array_offset
+        origin = ema_latlon - node_array_offset
 
-    source=gps_centroid  — use the node's live GPS centroid (default).
-    source=surveyed_coords — use the operator-entered lat/lon/alt stored for
-                            this node (surveyedLat/Lon/Alt in node_positions).
-
-    Either way the math is identical — the node's N/E/Alt offset is preserved
-    so all other surveyed nodes remain valid with no re-surveying required.
+    The node's N/E/Alt offset is preserved so all other surveyed nodes
+    remain valid with no re-surveying required.
 
     A node used this way is not given any ongoing "reference node" status —
     the hub origin is a standalone setting (see PUT /origin for setting it
-    directly, with no node involved at all). Any stale is_origin marker from
-    a previous call is cleared rather than reassigned.
+    directly, with no node involved at all — the route to use if you have an
+    independent absolute reference for the origin itself, e.g. from a
+    survey-grade GNSS unit or a known landmark). Any stale is_origin marker
+    from a previous call is cleared rather than reassigned.
     """
     node = await registry.get_node(node_id)
     if node is None:
@@ -614,29 +641,13 @@ async def set_origin_from_node(
             detail="Node position is not marked as surveyed — update posStatus to 'surveyed' first",
         )
 
-    if source == "surveyed_coords":
-        # Use the stored surveyed coordinates.
-        ref_lat = node_pos.get("surveyed_lat")
-        ref_lon = node_pos.get("surveyed_lon")
-        ref_alt = node_pos.get("surveyed_alt")
-        if ref_lat is None or ref_lon is None or ref_alt is None:
-            raise HTTPException(
-                status_code=422,
-                detail="No surveyed coordinates stored for this node — enter lat/lon/alt first",
-            )
-    else:
-        # Default: use the live GPS centroid.
-        live = registry.get_live_status(node_id)
-        raw = live.get("raw_status") or {}
-        centroid = raw.get("gpsCentroid") or {}
-        if centroid.get("latitude") is None or centroid.get("longitude") is None:
-            raise HTTPException(
-                status_code=422,
-                detail="Node has no GPS centroid yet — wait for GPS to converge",
-            )
-        ref_lat = centroid["latitude"]
-        ref_lon = centroid["longitude"]
-        ref_alt = centroid.get("altitudeM", 0.0)
+    ema = registry.get_gps_ema(node_id)
+    if ema is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Node has no GPS EMA yet — wait for GPS to lock and settle",
+        )
+    ref_lat, ref_lon, ref_alt = ema["lat"], ema["lon"], ema["alt"]
 
     # Back-project: subtract the node's array offset from its reference coordinates.
     origin_lat = ref_lat - (node_pos["pos_n"] / status_mapper._M_PER_DEG_LAT)

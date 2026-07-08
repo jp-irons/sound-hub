@@ -40,7 +40,14 @@ async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
     try:
         resp = await client.get(url, timeout=config.STATUS_TIMEOUT_S)
         resp.raise_for_status()
-        registry.update_live_status(node_id, reachable=True, raw_status=resp.json())
+        raw_status = resp.json()
+        registry.update_live_status(node_id, reachable=True, raw_status=raw_status)
+        # Feed the hub-side GPS EMA (replaces firmware's removed GpsCentroid —
+        # see GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md). Deliberately only
+        # called on a successful poll: a failed poll tells us nothing about
+        # whether the node's GPS is still locked, so the EMA/settle-timer
+        # state is just left as-is rather than treated as a lock loss.
+        registry.update_gps_ema(node_id, raw_status)
     except (httpx.HTTPError, ValueError) as exc:
         # Distinguish failure classes in the log — previously every cause
         # (timeout, connection refused, TLS error, non-2xx status, bad JSON)

@@ -33,8 +33,7 @@ export const MOCK_NODES = [
     gps: {
       locked: true,
       satellites: 11,
-      centroidN: 2847,
-      centroidStddevM: 1.4,
+      emaN: 2847,
       divergenceM: 0.6,
       divergenceN: 0.3,
       divergenceE: 0.5,

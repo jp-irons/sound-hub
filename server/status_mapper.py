@@ -4,9 +4,17 @@ shape the frontend expects (see src/data/mockNodes.js for the reference shape).
 Architecture note (2026-06-09): nodes no longer report position data
 (`posE/N/Alt`, `positionStatus`, `isOrigin`, `originLat/Lon/Alt`,
 `surveyDisagreementM`). All position ownership has moved to the hub's
-`node_positions` SQLite table. Nodes report only GPS telemetry (raw fix,
-EMA, centroid) which the hub passthrouh for display and uses to compute
-`surveyDisagreementM` against the stored position.
+`node_positions` SQLite table.
+
+Architecture note (2026-07-08 — GPS telemetry simplification, see
+GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md in sound-capture-node): nodes now
+report only a raw current GPS fix (`gps`). The node-side long-term Welford
+centroid and EMA (`gpsCentroid`/`gpsEma`) are gone — the hub maintains its
+own in-memory GPS EMA per node instead (see `registry.get_gps_ema`), passed
+into this module's functions as `gps_ema` rather than read out of
+`raw_status`. `map_status`'s `survey_disagreement_m` output field and the
+pre-survey array-origin fallback in `derive_relative_positions` both source
+from that hub-side EMA now (see `_ema_survey_divergence`).
 
 Role vocabulary has also changed: firmware now reports `node.isBroker` (bool)
 rather than `node.role` (enum). The frontend still uses "PRIMARY"/"LEAF" for
@@ -37,7 +45,7 @@ def _role(raw: dict) -> str:
     return "UNKNOWN"
 
 
-def _lat_lon_from_gps(raw: dict) -> Optional[dict]:
+def _lat_lon_from_gps(raw: dict, gps_ema: Optional[dict]) -> Optional[dict]:
     """Derive a GPS-based lat/lon for display when no surveyed position exists.
 
     Used as a fallback before the array origin is established — e.g. during
@@ -45,11 +53,10 @@ def _lat_lon_from_gps(raw: dict) -> Optional[dict]:
     hub array_origin is set, derive_relative_positions() projects all
     surveyed nodes from their stored E/N offsets and overrides this value.
 
-    Priority: GPS centroid (most stable) → live fix.
+    Priority: hub-side GPS EMA (most stable) → live fix.
     """
-    centroid = raw.get("gpsCentroid")
-    if centroid and centroid.get("latitude") is not None:
-        return {"lat": centroid["latitude"], "lon": centroid["longitude"]}
+    if gps_ema is not None:
+        return {"lat": gps_ema["lat"], "lon": gps_ema["lon"]}
     gps = raw.get("gps")
     if gps and gps.get("available") and gps.get("latitude") is not None:
         return {"lat": gps["latitude"], "lon": gps["longitude"]}
@@ -57,33 +64,39 @@ def _lat_lon_from_gps(raw: dict) -> Optional[dict]:
 
 
 def _fix(obj: Optional[dict]) -> Optional[dict]:
-    """Pull {lat, lon, altM} out of a raw gps/gpsEma/gpsCentroid sub-object."""
+    """Pull {lat, lon, altM} out of a raw gps sub-object, or an already
+    latitude/longitude/altitudeM-shaped dict (see _ema_fix)."""
     if not obj or obj.get("latitude") is None:
         return None
     return {"lat": obj["latitude"], "lon": obj["longitude"], "altM": obj.get("altitudeM")}
 
 
-def _gps(raw: dict) -> Optional[dict]:
+def _ema_fix(gps_ema: Optional[dict]) -> Optional[dict]:
+    """Reshape a registry.get_gps_ema() result ({lat, lon, alt, n}) into the
+    same {lat, lon, altM} shape _fix() produces from a raw gps object."""
+    if gps_ema is None:
+        return None
+    return {"lat": gps_ema["lat"], "lon": gps_ema["lon"], "altM": gps_ema["alt"]}
+
+
+def _gps(raw: dict, gps_ema: Optional[dict], divergence: Optional[dict]) -> Optional[dict]:
     gps = raw.get("gps")
     if not gps or not gps.get("available"):
         return None
-    ema = raw.get("gpsEma") or {}
-    centroid = raw.get("gpsCentroid") or {}
     return {
         "locked": bool(gps.get("receiving")),
         "satellites": gps.get("satellites"),
-        "centroidN": centroid.get("count"),
-        "centroidStddevM": centroid.get("horizontalStddevM"),
-        "divergenceM": ema.get("divergenceM"),
-        "divergenceN": ema.get("divergenceN"),
-        "divergenceE": ema.get("divergenceE"),
-        "divergenceAlt": ema.get("divergenceAlt"),
-        # Three views of "where the GPS *thinks* it is" — the live
-        # instantaneous fix (jittery), the EMA-smoothed fix, and the
-        # long-running centroid average (most stable estimate).
+        "emaN": gps_ema["n"] if gps_ema else None,
+        "divergenceM": divergence["m"] if divergence else None,
+        "divergenceN": divergence["n"] if divergence else None,
+        "divergenceE": divergence["e"] if divergence else None,
+        "divergenceAlt": divergence["alt"] if divergence else None,
+        # Two views of "where the GPS *thinks* it is" — the live
+        # instantaneous fix (jittery) and the hub-side EMA-smoothed estimate
+        # (replaces the old node-side EMA/centroid split — see
+        # GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md).
         "live": _fix(gps),
-        "ema": _fix(ema),
-        "centroid": _fix(centroid),
+        "ema": _ema_fix(gps_ema),
     }
 
 
@@ -181,38 +194,38 @@ def _offset_to_latlon(origin: dict, e_m: float, n_m: float) -> dict:
     }
 
 
-def survey_disagreement_m(
+def _ema_survey_divergence(
     node_pos: Optional[dict],
-    raw: dict,
-    array_origin: Optional[dict] = None,
-) -> Optional[float]:
-    """Compute the horizontal distance between the node's projected survey
-    position and its GPS centroid estimate, in metres.
+    array_origin: Optional[dict],
+    gps_ema: Optional[dict],
+) -> Optional[dict]:
+    """Delta between a node's persisted position (projected through the array
+    origin) and its current hub-side GPS EMA, decomposed N/E/Alt plus the
+    horizontal magnitude — {"m", "n", "e", "alt"} in metres.
 
-    Meaningful for any node that has both a surveyed E/N position and an
-    active GPS centroid — not limited to the is_origin node.  Returns None
-    if array_origin is not set, the node has no position, or GPS centroid
-    is unavailable.
-
-    This is one input to operator confidence in the surveyed position — not
-    a single composite trust verdict.
+    This is the live equivalent of what survey_disagreement_m() used to
+    compute against the firmware's node-side GPS centroid — same idea, fed
+    the hub-side EMA instead (see GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md).
+    Meaningful for any node that has both a surveyed E/N position and a
+    converged GPS EMA — not limited to any particular node. Returns None if
+    array_origin isn't set, the node has no stored E/N position, or the EMA
+    hasn't converged yet.
     """
-    if not node_pos or array_origin is None:
+    if not node_pos or array_origin is None or gps_ema is None:
         return None
     pos_e = node_pos.get("pos_e")
     pos_n = node_pos.get("pos_n")
+    pos_alt = node_pos.get("pos_alt")
     if pos_e is None or pos_n is None:
-        return None
-    centroid = (raw or {}).get("gpsCentroid") or {}
-    if centroid.get("latitude") is None:
         return None
     # Project the stored E/N position to lat/lon for comparison.
     surveyed = _offset_to_latlon(
         {"lat": array_origin["lat"], "lon": array_origin["lon"]}, pos_e, pos_n
     )
-    dlat = centroid["latitude"] - surveyed["lat"]
-    dlon = centroid["longitude"] - surveyed["lon"]
-    return ((dlat * _M_PER_DEG_LAT) ** 2 + (dlon * _M_PER_DEG_LON) ** 2) ** 0.5
+    d_n = (gps_ema["lat"] - surveyed["lat"]) * _M_PER_DEG_LAT
+    d_e = (gps_ema["lon"] - surveyed["lon"]) * _M_PER_DEG_LON
+    d_alt = (gps_ema["alt"] - (array_origin["alt_m"] + pos_alt)) if pos_alt is not None else None
+    return {"m": (d_n ** 2 + d_e ** 2) ** 0.5, "n": d_n, "e": d_e, "alt": d_alt}
 
 
 def derive_relative_positions(
@@ -226,22 +239,23 @@ def derive_relative_positions(
     `lat`, `lon`, `alt_m` from the `array_origin` DB table.  It is independent
     of any specific node; pass it in from routes._mapped_nodes().
 
-    If `array_origin` is None (not yet configured), falls back to the GPS
-    centroid of the first online BROKER node — a pre-survey display aid only,
-    not used for TDOA.
+    If `array_origin` is None (not yet configured), falls back to the
+    hub-side GPS EMA of the first online BROKER node — a pre-survey display
+    aid only, not used for TDOA.
 
     All nodes with a stored position_relative are projected from the datum
     the same way — there is no node that "is" the origin any more (the hub
     array origin is a standalone geographic datum, not tied to a node).
     """
     if array_origin is None:
-        # Pre-survey fallback: use BROKER GPS centroid as an approximate datum.
+        # Pre-survey fallback: use BROKER's hub-side GPS EMA as an
+        # approximate datum.
         for m in mapped:
             if m.get("role") == "BROKER":
                 gps = m.get("gps") or {}
-                centroid = gps.get("centroid")
-                if centroid:
-                    array_origin = {"lat": centroid["lat"], "lon": centroid["lon"]}
+                ema = gps.get("ema")
+                if ema:
+                    array_origin = {"lat": ema["lat"], "lon": ema["lon"]}
                 break
 
     if array_origin is None:
@@ -255,7 +269,7 @@ def derive_relative_positions(
         rel = m["position_relative"]
         m["lat_lon"] = _offset_to_latlon(origin_latlon, rel["eM"], rel["nM"])
         # Every node's lat/lon is projected from the hub array origin — flag
-        # it so the UI shows that provenance rather than a GPS-centroid guess.
+        # it so the UI shows that provenance rather than a GPS-EMA guess.
         m["flags"] = [*m.get("flags", []), "POSITION_DERIVED"]
 
 
@@ -265,11 +279,17 @@ def map_status(
     raw_status: Optional[dict],
     node_pos: Optional[dict] = None,
     array_origin: Optional[dict] = None,
+    gps_ema: Optional[dict] = None,
 ) -> dict:
     """Build the set of derived/display fields the frontend expects.
 
     `node_pos` is the hub's persisted position record for this node (from
     `db.get_node_position`), or None if no position has been set yet.
+
+    `gps_ema` is this node's current hub-side GPS EMA (from
+    `registry.get_gps_ema`), or None if no sample has been admitted yet.
+    Replaces the firmware-reported `gpsCentroid`/`gpsEma` this function used
+    to read out of `raw_status` — see the module docstring.
 
     `lat_lon` is left None here for nodes with a stored position — it will
     be filled by derive_relative_positions() once the hub array_origin is
@@ -316,7 +336,8 @@ def map_status(
     # lat_lon: only set from GPS here for nodes without a stored position
     # (pre-survey display fallback).  Nodes with stored positions get their
     # lat_lon projected from the hub array_origin by derive_relative_positions().
-    lat_lon = None if position_known else _lat_lon_from_gps(raw_status)
+    lat_lon = None if position_known else _lat_lon_from_gps(raw_status, gps_ema)
+    divergence = _ema_survey_divergence(node_pos, array_origin, gps_ema)
 
     return {
         "status": _status(reachable, flags),
@@ -326,8 +347,8 @@ def map_status(
         "position_known": position_known,
         "position_status": pos_status,
         "is_origin": is_origin,
-        "survey_disagreement_m": survey_disagreement_m(node_pos, raw_status, array_origin),
-        "gps": _gps(raw_status),
+        "survey_disagreement_m": divergence["m"] if divergence else None,
+        "gps": _gps(raw_status, gps_ema, divergence),
         "clock": clock,
         "audio": audio,
         "esp_now": None,

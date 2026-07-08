@@ -142,11 +142,26 @@ class NodePosition(BaseModel):
     origin_lat: Optional[float] = Field(default=None, alias="originLat")
     origin_lon: Optional[float] = Field(default=None, alias="originLon")
     origin_alt: Optional[float] = Field(default=None, alias="originAlt")
-    # Operator-surveyed absolute coordinates — alternative to GPS centroid
-    # when setting array origin.  All three must be provided together.
-    surveyed_lat: Optional[float] = Field(default=None, alias="surveyedLat")
-    surveyed_lon: Optional[float] = Field(default=None, alias="surveyedLon")
-    surveyed_alt: Optional[float] = Field(default=None, alias="surveyedAlt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PositionFromEma(BaseModel):
+    """Response for GET /api/nodes/{id}/position/from-ema.
+
+    A preview, not a write: computed E/N/Alt offset for this node, derived
+    by back-projecting its current hub-side GPS EMA (registry.get_gps_ema)
+    through the array origin. Nothing is persisted until the operator
+    applies it via PUT /api/nodes/{id}/position. emaLat/Lon/Alt and emaN are
+    included so the UI can show what the preview was computed from.
+    """
+    pos_e: float = Field(alias="posE")
+    pos_n: float = Field(alias="posN")
+    pos_alt: float = Field(alias="posAlt")
+    ema_lat: float = Field(alias="emaLat")
+    ema_lon: float = Field(alias="emaLon")
+    ema_alt: float = Field(alias="emaAlt")
+    ema_n: int = Field(alias="emaN", description="Samples admitted into the EMA so far")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -155,7 +170,7 @@ class ArrayOrigin(BaseModel):
     """Hub-level geographic datum for the node array (array_origin table).
 
     Set by POST /api/origin/set-from-node/{node_id} (back-projected from a
-    node's GPS centroid + surveyed array offset) or by PUT /api/origin
+    node's live GPS EMA + surveyed array offset) or by PUT /api/origin
     (manual override).  Independent of any specific node.
     """
     lat: float
@@ -444,17 +459,20 @@ class GpsFix(BaseModel):
 class GpsView(BaseModel):
     locked: bool
     satellites: Optional[int] = None
-    centroidN: Optional[int] = None
-    centroidStddevM: Optional[float] = None
+    emaN: Optional[int] = Field(
+        default=None, description="Samples admitted into the hub-side GPS EMA"
+    )
     divergenceM: Optional[float] = None
     divergenceN: Optional[float] = None
     divergenceE: Optional[float] = None
     divergenceAlt: Optional[float] = None
-    # Three views of the node's GPS-derived absolute position — see
-    # status_mapper._fix. `centroid` is the most stable estimate.
+    # Two views of the node's GPS-derived absolute position — see
+    # status_mapper._fix. `live` is the raw current fix reported by the
+    # node; `ema` is the hub-side smoothed estimate that replaced the old
+    # node-side centroid/EMA split (see
+    # GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md in sound-capture-node).
     live: Optional[GpsFix] = None
     ema: Optional[GpsFix] = None
-    centroid: Optional[GpsFix] = None
 
 
 class ClockView(BaseModel):

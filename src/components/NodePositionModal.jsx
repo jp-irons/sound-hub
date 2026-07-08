@@ -50,19 +50,17 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
-  const [originSetting, setOriginSetting] = useState(null)  // null | 'gps_centroid' | 'surveyed_coords'
+  const [settingOrigin, setSettingOrigin] = useState(false)
   const [originMessage, setOriginMessage] = useState(null)
+  const [emaLoading, setEmaLoading] = useState(false)
+  const [emaMessage, setEmaMessage] = useState(null)
 
   // Form state — strings so inputs stay controlled; coerced on submit.
   const [posE, setPosE] = useState('')
   const [posN, setPosN] = useState('')
   const [posAlt, setPosAlt] = useState('')
   const [posStatus, setPosStatus] = useState('estimated')
-  const [surveyedLat, setSurveyedLat] = useState('')
-  const [surveyedLon, setSurveyedLon] = useState('')
-  const [surveyedAlt, setSurveyedAlt] = useState('')
 
-  const centroid = node.gps?.centroid ?? null
   const disagreementM = node.surveyDisagreementM
 
   // Escape closes — backdrop click does not (a stray click while
@@ -91,9 +89,6 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
         setPosN(pos.posN != null ? String(pos.posN) : '')
         setPosAlt(pos.posAlt != null ? String(pos.posAlt) : '')
         setPosStatus(pos.posStatus ?? 'estimated')
-        setSurveyedLat(pos.surveyedLat != null ? String(pos.surveyedLat) : '')
-        setSurveyedLon(pos.surveyedLon != null ? String(pos.surveyedLon) : '')
-        setSurveyedAlt(pos.surveyedAlt != null ? String(pos.surveyedAlt) : '')
       })
       .catch(err => !cancelled && setError(err.message ?? String(err)))
       .finally(() => !cancelled && setLoading(false))
@@ -103,13 +98,10 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
   const handleSubmit = async (andClose) => {
     setError(null)
     const payload = {
-      posE:        posE        === '' ? null : parseFloat(posE),
-      posN:        posN        === '' ? null : parseFloat(posN),
-      posAlt:      posAlt      === '' ? null : parseFloat(posAlt),
+      posE:   posE   === '' ? null : parseFloat(posE),
+      posN:   posN   === '' ? null : parseFloat(posN),
+      posAlt: posAlt === '' ? null : parseFloat(posAlt),
       posStatus,
-      surveyedLat: surveyedLat === '' ? null : parseFloat(surveyedLat),
-      surveyedLon: surveyedLon === '' ? null : parseFloat(surveyedLon),
-      surveyedAlt: surveyedAlt === '' ? null : parseFloat(surveyedAlt),
     }
     setSubmitting(true)
     try {
@@ -122,32 +114,58 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
     }
   }
 
-  const handleSetOrigin = async (source) => {
-    setOriginSetting(source)
+  // Preview-only: fetches the node's current hub-side GPS EMA back-projected
+  // through the array origin and fills the N/E/Alt fields with it. Nothing
+  // is persisted until the operator hits Apply/Save & Close below — same
+  // as typing the numbers in by hand.
+  const handleUseLiveEma = async () => {
+    setEmaLoading(true)
+    setEmaMessage(null)
+    setError(null)
+    try {
+      const res = await apiFetch(`/nodes/${node.id}/position/from-ema`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
+      }
+      const preview = await res.json()
+      setPosN(preview.posN.toFixed(2))
+      setPosE(preview.posE.toFixed(2))
+      setPosAlt(preview.posAlt.toFixed(2))
+      setEmaMessage(
+        `Filled from live EMA (${preview.emaN.toLocaleString()} samples) — review, then Apply/Save to persist`
+      )
+    } catch (err) {
+      setError(err.message ?? String(err))
+    } finally {
+      setEmaLoading(false)
+    }
+  }
+
+  const handleSetOrigin = async () => {
+    setSettingOrigin(true)
     setOriginMessage(null)
     setError(null)
     try {
-      const res = await apiFetch(`/origin/set-from-node/${node.id}?source=${source}`, { method: 'POST' })
+      const res = await apiFetch(`/origin/set-from-node/${node.id}`, { method: 'POST' })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
       }
       const origin = await res.json()
-      const srcLabel = source === 'surveyed_coords' ? 'surveyed coordinates' : 'GPS centroid'
       setOriginMessage(
-        `Origin set from ${srcLabel}: ${origin.lat.toFixed(6)}, ${origin.lon.toFixed(6)}, ${origin.altM?.toFixed(1) ?? '?'} m`
+        `Origin set from live GPS EMA: ${origin.lat.toFixed(6)}, ${origin.lon.toFixed(6)}, ${origin.altM?.toFixed(1) ?? '?'} m`
       )
     } catch (err) {
       setError(err.message ?? String(err))
     } finally {
-      setOriginSetting(null)
+      setSettingOrigin(false)
     }
   }
 
   const offsetFilled = posE !== '' && posN !== '' && posAlt !== ''
   const isSurveyed = posStatus === 'surveyed'
-  const canUseSurveyedCoords = isSurveyed && offsetFilled &&
-    surveyedLat !== '' && surveyedLon !== '' && surveyedAlt !== ''
+  const canSetOrigin = isSurveyed && offsetFilled
 
   return (
     <div
@@ -183,44 +201,29 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
           <form onSubmit={e => e.preventDefault()} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
             {/* Array-frame offset */}
-            <div className="section-label" style={{ marginBottom: 0 }}>
-              Array position (N / E / Alt from origin)
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 0 }}>
+              <div className="section-label" style={{ marginBottom: 0, flex: 1 }}>
+                Array position (N / E / Alt from origin)
+              </div>
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: 10, padding: '2px 8px' }}
+                disabled={emaLoading}
+                title="Fill N/E/Alt below from this node's current hub-side GPS EMA, back-projected through the array origin — preview only, not saved until you Apply"
+                onClick={handleUseLiveEma}
+              >
+                {emaLoading ? 'Loading…' : 'Use Live EMA'}
+              </button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8 }}>
               <NumberField label="N (m)" value={posN} onChange={setPosN} />
               <NumberField label="E (m)" value={posE} onChange={setPosE} />
               <NumberField label="Alt (m)" value={posAlt} onChange={setPosAlt} />
             </div>
-
-            {/* Absolute surveyed coordinates */}
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 0 }}>
-              <div className="section-label" style={{ marginBottom: 0, flex: 1 }}>
-                Surveyed coordinates (optional)
-              </div>
-              {centroid && (
-                <button
-                  type="button"
-                  className="btn"
-                  style={{ fontSize: 10, padding: '2px 8px' }}
-                  title="Populate the fields below from this node's live GPS centroid"
-                  onClick={() => {
-                    setSurveyedLat(centroid.lat.toFixed(8))
-                    setSurveyedLon(centroid.lon.toFixed(8))
-                    setSurveyedAlt(centroid.altM != null ? String(centroid.altM) : '')
-                  }}
-                >
-                  Use GPS Centroid
-                </button>
-              )}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8 }}>
-              <NumberField label="Latitude" value={surveyedLat} onChange={setSurveyedLat} placeholder="-27.123456" />
-              <NumberField label="Longitude" value={surveyedLon} onChange={setSurveyedLon} placeholder="153.123456" />
-              <NumberField label="Alt (m)" value={surveyedAlt} onChange={setSurveyedAlt} placeholder="42.0" />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: -8 }}>
-              Independently surveyed absolute position. Used as an alternative to GPS centroid when setting the array origin.
-            </div>
+            {emaMessage && (
+              <div style={{ fontSize: 11, color: 'var(--green)', marginTop: -8 }}>{emaMessage}</div>
+            )}
 
             {/* Position status */}
             <Field
@@ -244,9 +247,11 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
                 Set hub origin from this node
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                Back-projects the hub's geographic origin from this node's surveyed coordinates (above) minus its
-                N/E/Alt offset. All other surveyed nodes remain valid — no re-surveying required. The origin can
-                also be set directly, without going through a node, from the Settings tab.
+                Back-projects the hub's geographic origin from this node's current live GPS EMA
+                minus its N/E/Alt offset (above). All other surveyed nodes remain valid — no
+                re-surveying required. If you have an independent absolute reference for the
+                origin itself (e.g. a survey-grade GNSS reading or a known landmark), set it
+                directly from the Settings tab instead.
               </div>
 
               {disagreementM != null && (
@@ -267,13 +272,13 @@ export default function NodePositionModal({ node, onClose, onSubmit }) {
                   type="button"
                   className="btn btn-primary"
                   style={{ fontSize: 11, padding: '5px 12px' }}
-                  disabled={!canUseSurveyedCoords || originSetting != null}
-                  title={canUseSurveyedCoords
-                    ? 'Back-project hub origin from the surveyed lat/lon/alt above + N/E/Alt offset'
-                    : 'Requires: Surveyed status, all three offsets, and all three surveyed coordinates entered above'}
-                  onClick={() => handleSetOrigin('surveyed_coords')}
+                  disabled={!canSetOrigin || settingOrigin}
+                  title={canSetOrigin
+                    ? "Back-project hub origin from this node's live GPS EMA + N/E/Alt offset"
+                    : 'Requires: Surveyed status and all three offsets entered above'}
+                  onClick={handleSetOrigin}
                 >
-                  {originSetting === 'surveyed_coords' ? 'Setting…' : 'Set hub origin'}
+                  {settingOrigin ? 'Setting…' : 'Set hub origin'}
                 </button>
               </div>
 

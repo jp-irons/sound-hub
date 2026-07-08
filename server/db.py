@@ -8,8 +8,9 @@ of startup.
 array_origin holds the hub-level geographic datum for the node array.
 It is independent of any node — set by the operator via
 POST /api/origin/set-from-node/{node_id} (computed by back-projecting a
-node's GPS centroid through its surveyed array offset) or via a manual
-PUT /api/origin override.  Once set it survives all node restarts/removals.
+node's live GPS EMA — an in-memory hub-side average, see registry.py —
+through its surveyed array offset) or via a manual PUT /api/origin
+override.  Once set it survives all node restarts/removals.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -80,12 +81,6 @@ CREATE TABLE IF NOT EXISTS node_positions (
     origin_lat REAL,
     origin_lon REAL,
     origin_alt REAL,
-    -- Operator-surveyed absolute coordinates for this node (optional).
-    -- Used as an alternative to live GPS centroid when setting array origin.
-    -- Same back-projection math: origin = surveyed_latlon - N/E/Alt_offset.
-    surveyed_lat REAL,
-    surveyed_lon REAL,
-    surveyed_alt REAL,
     updated_at TEXT NOT NULL
 );
 
@@ -378,14 +373,27 @@ async def init_db() -> None:
                      datetime.now(timezone.utc).isoformat()),
                 )
 
-        # Migration: add surveyed_lat/lon/alt columns if they don't exist yet.
+        # Migration: drop surveyed_lat/lon/alt columns — replaced entirely by
+        # the hub-side GPS EMA (registry.get_gps_ema) as of the GPS telemetry
+        # simplification (see GPS-TELEMETRY-SIMPLIFICATION-PROPOSAL.md in
+        # sound-capture-node). These were only ever a transient alternative
+        # input for the origin-from-node back-projection, not an independent
+        # ongoing fact worth persisting — actually removed, not just
+        # deprecated, to avoid a stale value ever disagreeing with the live
+        # EMA. Requires SQLite >=3.35 (2021) for DROP COLUMN; guarded so an
+        # older runtime just logs and leaves the (harmless, unused) columns
+        # in place rather than failing startup.
         cursor = await conn.execute("PRAGMA table_info(node_positions)")
         pos_columns = {row[1] for row in await cursor.fetchall()}
         for col in ("surveyed_lat", "surveyed_lon", "surveyed_alt"):
-            if col not in pos_columns:
-                await conn.execute(
-                    f"ALTER TABLE node_positions ADD COLUMN {col} REAL"
-                )
+            if col in pos_columns:
+                try:
+                    await conn.execute(f"ALTER TABLE node_positions DROP COLUMN {col}")
+                except aiosqlite.OperationalError:
+                    log.warning(
+                        "Could not drop node_positions.%s (SQLite <3.35?) — "
+                        "leaving it in place, unused", col,
+                    )
 
         # Migration: add node_id to detections if it doesn't exist yet —
         # `CREATE TABLE IF NOT EXISTS` doesn't touch an already-existing table.
@@ -461,9 +469,6 @@ async def upsert_node_position(
     origin_lat: float | None = None,
     origin_lon: float | None = None,
     origin_alt: float | None = None,
-    surveyed_lat: float | None = None,
-    surveyed_lon: float | None = None,
-    surveyed_alt: float | None = None,
     updated_at: str,
 ) -> None:
     """Insert or replace the hub-stored position for a node."""
@@ -471,13 +476,11 @@ async def upsert_node_position(
         await conn.execute(
             """INSERT OR REPLACE INTO node_positions
                (node_id, pos_e, pos_n, pos_alt, pos_status,
-                is_origin, origin_lat, origin_lon, origin_alt,
-                surveyed_lat, surveyed_lon, surveyed_alt, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                is_origin, origin_lat, origin_lon, origin_alt, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (node_id, pos_e, pos_n, pos_alt, pos_status,
              1 if is_origin else 0,
-             origin_lat, origin_lon, origin_alt,
-             surveyed_lat, surveyed_lon, surveyed_alt, updated_at),
+             origin_lat, origin_lon, origin_alt, updated_at),
         )
         await conn.commit()
 
