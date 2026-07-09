@@ -124,8 +124,8 @@ export default function NodeCard({ node, selected, onSelect }) {
         )}
       </div>
 
-      {/* Row 3: buffer fill bar */}
-      {node.audio && (
+      {/* Row 3: buffer fill bar — not shown for brokers, no mic assumed */}
+      {node.audio && node.role !== 'BROKER' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
             <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>Buffer</span>
@@ -209,12 +209,12 @@ export default function NodeCard({ node, selected, onSelect }) {
             >ESTIMATED</span>
           )
         )}
-        {!node.flags?.length && node.audio?.lastTriggerAt && (
+        {node.role !== 'BROKER' && !node.flags?.length && node.audio?.lastTriggerAt && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             Triggered {relativeTime(node.audio.lastTriggerAt)}
           </span>
         )}
-        {!node.flags?.length && !node.audio?.lastTriggerAt && (
+        {node.role !== 'BROKER' && !node.flags?.length && !node.audio?.lastTriggerAt && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>No trigger data yet</span>
         )}
       </div>

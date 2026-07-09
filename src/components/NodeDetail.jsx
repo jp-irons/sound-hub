@@ -348,8 +348,9 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           </section>
         )}
 
-        {/* Audio buffer */}
-        {node.audio && (
+        {/* Audio buffer — not shown for brokers; audio capture is
+            intentionally skipped on broker firmware (no mic assumed). */}
+        {node.audio && node.role !== 'BROKER' && (
           <section>
             <div className="section-label">Audio Buffer</div>
             <div style={{ marginBottom: 8 }}>
