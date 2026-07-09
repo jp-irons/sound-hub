@@ -69,7 +69,11 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
         <MapFocus nodes={nodes} selectedId={selectedId} />
 
         {nodes.map(node => {
-          if (!node.latLon) return null
+          // Brokers don't belong on the map even if they happen to have
+          // stored position data (e.g. a node switched to broker after
+          // being surveyed) — its role is comms relay, not a sensing
+          // array member.
+          if (!node.latLon || node.role === 'BROKER') return null
 
           const isSelected = node.id === selectedId
           const color = STATUS_COLOR[node.status] ?? STATUS_COLOR.offline
@@ -120,8 +124,9 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
         })}
       </MapContainer>
 
-      {/* Overlay: uncalibrated node warning */}
-      {nodes.some(n => !n.positionKnown) && (
+      {/* Overlay: uncalibrated node warning — brokers excluded, they don't
+          need array-geometry calibration regardless of position status. */}
+      {nodes.some(n => n.role !== 'BROKER' && !n.positionKnown) && (
         <div style={{
           position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
           background: 'rgba(210,153,34,0.15)',
@@ -132,7 +137,7 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
           pointerEvents: 'none',
           color: 'rgba(210,153,34,0.9)',
         }}>
-          {nodes.filter(n => !n.positionKnown).map(n => n.hostname).join(', ')} — position unknown · calibration required
+          {nodes.filter(n => n.role !== 'BROKER' && !n.positionKnown).map(n => n.hostname).join(', ')} — position unknown · calibration required
         </div>
       )}
     </div>

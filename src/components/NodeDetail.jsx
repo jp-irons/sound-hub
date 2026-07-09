@@ -513,7 +513,11 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             Begin TOF Calibration
           </button>
         )}
-        {node.role !== 'BROKER' && (
+        {/* Kept for brokers too — this is the only path to "set hub
+            origin from this node" (see NodePositionModal), which stays
+            useful for a broker that happens to have GPS. The Position/GPS
+            display sections above are still hidden for brokers; this is a
+            one-off admin action, not an ongoing status display. */}
         <button
           className="btn"
           style={{ width: '100%' }}
@@ -522,7 +526,6 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
         >
           Set Position
         </button>
-        )}
         <button
           className="btn"
           style={{ width: '100%' }}
