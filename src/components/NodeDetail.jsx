@@ -140,7 +140,10 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
       {/* Scrollable content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 18 }}>
 
-        {/* Position */}
+        {/* Position — not meaningful for a broker: it's not a sensing array
+            member, so it may have no stored position at all (dedicated
+            relay-only hardware) and TDOA geometry doesn't apply to it. */}
+        {node.role !== 'BROKER' && (
         <section>
           <div className="section-label">Position</div>
           {relPos ? (
@@ -212,6 +215,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             </div>
           )}
         </section>
+        )}
 
         {/* Clock */}
         <section>
@@ -271,8 +275,9 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           )}
         </section>
 
-        {/* GPS — primary node only */}
-        {node.gps && (
+        {/* GPS — not shown for brokers; survey/divergence is a sensing-array
+            concern and doesn't apply to a relay-only node. */}
+        {node.gps && node.role !== 'BROKER' && (
           <section>
             <div className="section-label">GPS</div>
             <div className="kv">
@@ -502,11 +507,12 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
             Inventory
           </button>
         </div>
-        {!node.positionKnown && (
+        {node.role !== 'BROKER' && !node.positionKnown && (
           <button className="btn" style={{ width: '100%', borderColor: 'var(--yellow)', color: 'var(--yellow)' }}>
             Begin TOF Calibration
           </button>
         )}
+        {node.role !== 'BROKER' && (
         <button
           className="btn"
           style={{ width: '100%' }}
@@ -515,6 +521,7 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
         >
           Set Position
         </button>
+        )}
         <button
           className="btn"
           style={{ width: '100%' }}

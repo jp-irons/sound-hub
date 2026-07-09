@@ -329,9 +329,22 @@ def map_status(
 
     clock = _clock(raw_status)
     audio = _audio(raw_status)
-    flags = _flags(position_known, clock, reachable)
-    if audio is not None and audio.get("running") is False:
-        flags.append("AUDIO_STOPPED")
+    role = _role(raw_status)
+
+    if role == "BROKER":
+        # A broker's health is about relay + time-sync duty, not its own
+        # position or audio capture — it may have neither (dedicated
+        # relay-only hardware) or have GPS but run free-running by design
+        # (EspNowSync::startSource()'s documented fallback). None of
+        # POSITION_UNKNOWN / CLOCK_INVALID / CLOCK_NO_UTC / AUDIO_STOPPED
+        # reflect an actual fault for a broker, so only reachability should
+        # drive it to "degraded". clock/gps/audio are still returned below
+        # for display — this only changes what feeds `status`.
+        flags = [] if reachable else ["UNREACHABLE"]
+    else:
+        flags = _flags(position_known, clock, reachable)
+        if audio is not None and audio.get("running") is False:
+            flags.append("AUDIO_STOPPED")
 
     # lat_lon: only set from GPS here for nodes without a stored position
     # (pre-survey display fallback).  Nodes with stored positions get their
@@ -341,7 +354,7 @@ def map_status(
 
     return {
         "status": _status(reachable, flags),
-        "role": _role(raw_status),
+        "role": role,
         "lat_lon": lat_lon,
         "position_relative": position_relative,
         "position_known": position_known,

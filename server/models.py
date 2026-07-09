@@ -2,7 +2,7 @@
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AckStatus(str, Enum):
@@ -22,12 +22,38 @@ class AudioAckBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+# Matches AudioStore::kHubPullMaxSeconds in sound-capture-node's firmware —
+# the capacity of the pre-allocated hub-pull scratch slot (2026-07-09, added
+# after a node-172 incident traced to per-call PSRAM allocation under
+# fragmentation; see AudioStore.hpp for the full rationale). The automatic
+# species-TDOA pull (_plan_tdoa_attempt in routes.py) never asks for more
+# than ~8-9s in practice, so this only really constrains this manual path.
+# Enforced hub-side so an oversized manual request fails fast with a clear
+# 422 here rather than a silent node-side clip or an UNAVAILABLE. A window
+# wider than this should be requested as multiple sequential pulls instead
+# of raising the cap — see the sizing discussion in project chat history.
+MAX_MANUAL_PULL_US = 10_000_000  # 10s
+
+
 class AudioSampleRequest(BaseModel):
     """Body for POST /api/nodes/{id}/sample — trigger an audio pull from a node."""
     t_start_us: int = Field(alias="tStartUs", description="UTC µs — inclusive segment start")
     t_end_us:   int = Field(alias="tEndUs",   description="UTC µs — exclusive segment end")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> "AudioSampleRequest":
+        if self.t_end_us <= self.t_start_us:
+            raise ValueError("tEndUs must be greater than tStartUs")
+        duration_us = self.t_end_us - self.t_start_us
+        if duration_us > MAX_MANUAL_PULL_US:
+            raise ValueError(
+                f"requested window ({duration_us / 1e6:.1f}s) exceeds the "
+                f"{MAX_MANUAL_PULL_US / 1e6:.0f}s node-side scratch-slot cap — "
+                "split into multiple sequential pulls instead"
+            )
+        return self
 
 
 class ManualNodeRequest(BaseModel):
