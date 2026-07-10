@@ -1050,7 +1050,7 @@ async def audio_push(
         )
         await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
-            bytes_=len(data), analysis_status="skipped_tdoa_corroboration",
+            bytes_=len(data), analysis_status="skipped_birdnet_tdoa_pull",
             t_start_us=tStartUs, t_end_us=tEndUs,
         )
         return
