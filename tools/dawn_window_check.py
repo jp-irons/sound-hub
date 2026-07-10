@@ -95,7 +95,13 @@ def earliest_detection(conn, lo: datetime, hi: datetime, min_conf: float):
         ORDER BY analyzed_at ASC
         LIMIT 1
         """,
-        (lo.isoformat(), hi.isoformat(), min_conf),
+        # analyzed_at is stored as UTC ISO8601 (see db.py schema comment); lo/hi
+        # are local-tz-aware (from windows_for_date), so they must be converted
+        # to UTC before comparison — SQLite does plain TEXT/lexicographic
+        # comparison on this column, which silently breaks across mismatched
+        # UTC offsets (e.g. "+10:00" vs "+00:00") even though both are valid
+        # ISO8601 and represent the correct instant.
+        (lo.astimezone(timezone.utc).isoformat(), hi.astimezone(timezone.utc).isoformat(), min_conf),
     ).fetchone()
     if row is None:
         return None
@@ -210,15 +216,4 @@ def main():
 
     if earliest_gap < 0:
         suggested = int((-earliest_gap + 4) // 5) * 5  # round up to nearest 5 min
-        current = int(DAWN_BEFORE.total_seconds() // 60)
-        print(f"Current DAWN_BEFORE = {current} min. Earliest activity seen was "
-              f"{-earliest_gap:.1f} min before dawn_start.")
-        if suggested > current:
-            print(f"Consider DAWN_BEFORE ~= {suggested} min if this pattern holds across more days.")
-    else:
-        print("No activity found earlier than the current dawn_start — buffer looks adequate "
-              "for this sample.")
-
-
-if __name__ == "__main__":
-    main()
+        current = int
