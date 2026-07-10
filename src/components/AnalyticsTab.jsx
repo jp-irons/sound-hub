@@ -312,6 +312,8 @@ function RollupTimeChart({ buckets }) {
 const STATUS_LABEL = {
   analyzed: 'Analyzed',
   skipped_not_ready: 'Skipped (BirdNET not ready)',
+  skipped_birdnet_tdoa_pull: 'Skipped BirdNET (TDOA pull)',
+  skipped_tdoa_corroboration: 'Skipped BirdNET (TDOA pull)', // old label, pre-2026-07-11 rows
   error: 'Error',
 }
 
