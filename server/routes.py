@@ -33,6 +33,26 @@ _AUDIO_DIR = os.path.join(os.path.dirname(__file__), "..", "audio")
 log = logging.getLogger("sound_hub.routes")
 router = APIRouter()
 
+# Shared client for node/broker relay calls (audio pulls — see
+# _issue_sample_pull). Reused across calls instead of opening a fresh
+# httpx.AsyncClient (and paying a fresh TLS handshake) per pull — same
+# rationale as poller.py's single long-lived client. TDOA orchestration can
+# fan out to several neighbours per detection, so this matters more here
+# than it looks. Initialised/closed from the FastAPI lifespan (main.py).
+_relay_client: httpx.AsyncClient | None = None
+
+
+async def init_relay_client() -> None:
+    global _relay_client
+    _relay_client = httpx.AsyncClient(verify=False, timeout=5.0)
+
+
+async def close_relay_client() -> None:
+    global _relay_client
+    if _relay_client is not None:
+        await _relay_client.aclose()
+        _relay_client = None
+
 
 # ---------------------------------------------------------------------------
 # Auth request / response models
@@ -797,11 +817,44 @@ async def _plan_tdoa_attempt(
     and record per-node outcomes (milestone 2). Correlating the resulting
     WAVs back to this attempt is milestone 3 — not done here.
 
-    Called from audio_push() inside its own try/except so a bug here never
-    breaks the push/analysis path that's the actual thing being acknowledged.
-    A per-node pull failure (one neighbour unreachable) is caught individually
-    below and does not abort pulls to the remaining neighbours.
+    Dispatched from audio_push() via asyncio.create_task — fire-and-forget,
+    not awaited — so a slow or unreachable neighbour can never delay the
+    HTTP response to the node whose push triggered this (see
+    project_soundhub_congestion notes: this used to run inline before the
+    push response returned). Because nothing awaits this task, the whole
+    body is wrapped in its own try/except below rather than relying on a
+    caller to catch it — an unhandled exception in a detached task would
+    otherwise only surface as an "exception was never retrieved" warning.
+    A per-node pull failure (one neighbour unreachable) is caught
+    individually inside _pull_one and does not abort pulls to the remaining
+    neighbours.
     """
+    try:
+        await _plan_tdoa_attempt_inner(
+            audio_event_id=audio_event_id,
+            origin_node_id=origin_node_id,
+            species_key=species_key,
+            t_start_us=t_start_us,
+            t_end_us=t_end_us,
+        )
+    except Exception:
+        log.exception(
+            "TDOA attempt planning failed for audio_event_id=%s species=%s",
+            audio_event_id, species_key,
+        )
+
+
+async def _plan_tdoa_attempt_inner(
+    *,
+    audio_event_id: int,
+    origin_node_id: str | None,
+    species_key: str,
+    t_start_us: int,
+    t_end_us: int,
+) -> None:
+    """Actual planning logic for _plan_tdoa_attempt — see that function's
+    docstring. Split out so the outer function can wrap this in a single
+    try/except without an extra indent level across the whole body."""
     params, used_default = await db.get_effective_species_tdoa_params(species_key)
 
     candidates = await _approved_positioned_nodes()
@@ -861,10 +914,15 @@ async def _plan_tdoa_attempt(
         )
         return
 
-    issued = 0
-    for nid in planned_node_ids:
+    async def _pull_one(nid: str) -> bool:
+        """Issue one neighbour's pull and record its outcome. Returns True
+        if the pull was successfully issued (not the same as the WAV having
+        arrived yet — see tdoa_attempt_nodes.status='requested')."""
         try:
-            request_id = await _issue_sample_pull(nid, pull_t_start_us, pull_t_end_us)
+            request_id = await _issue_sample_pull(
+                nid, pull_t_start_us, pull_t_end_us,
+                purpose="tdoa_corroboration",
+            )
         except Exception as exc:
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             await db.insert_tdoa_attempt_node(
@@ -875,12 +933,19 @@ async def _plan_tdoa_attempt(
                 "tdoa attempt id=%s — pull to node=%s failed: %s",
                 attempt_id, nid, detail,
             )
-            continue
+            return False
         await db.insert_tdoa_attempt_node(
             attempt_id=attempt_id, node_id=nid, request_id=request_id,
             status="requested",
         )
-        issued += 1
+        return True
+
+    # Fan out to all candidate neighbours concurrently rather than one at a
+    # time — see project_soundhub_congestion notes: this used to be a
+    # sequential loop, so N neighbours meant N round-trips stacked back to
+    # back inside a single audio_push request.
+    results = await asyncio.gather(*(_pull_one(nid) for nid in planned_node_ids))
+    issued = sum(1 for ok in results if ok)
 
     # Per-node pull failures (caught above) can shrink the final
     # corroborating count below min_corroborating_nodes even though the
@@ -950,6 +1015,15 @@ async def audio_push(
     detections are persisted tagged with this node.  Analysis failures are
     logged, not raised — a node's push is the thing being acknowledged here,
     not the success of analysis.
+
+    Exception: a push whose requestId was issued by _plan_tdoa_attempt
+    purely for TDOA corroboration (purpose="tdoa_corroboration" in
+    _audio_requests) skips BirdNET analysis entirely — the species is
+    already known from the origin detection that triggered the pull, so
+    re-running the model would just be wasted CPU. This mattered enough to
+    fix: with min_corroborating_nodes=4 (default), every planned attempt was
+    quietly costing up to 4 extra full analyses on top of the one that
+    mattered — see project_soundhub_congestion notes.
     """
     data = await request.body()
     os.makedirs(_AUDIO_DIR, exist_ok=True)
@@ -958,13 +1032,28 @@ async def audio_push(
     fpath = os.path.join(_AUDIO_DIR, fname)
     with open(fpath, "wb") as fh:
         fh.write(data)
+    purpose = None
     if requestId is not None:
         entry = _audio_requests.setdefault(requestId, {"acks": []})
         entry.update({"file": fname, "bytes": len(data), "savedAt": _now_iso(), "nodeId": nodeId})
+        purpose = entry.get("purpose")
     log.info("audio push id=%s node=%s from %s — %d bytes → %s",
               requestId, nodeId, srcMac, len(data), fname)
 
     triggered = requestId is None
+
+    if purpose == "tdoa_corroboration":
+        log.info(
+            "audio push id=%s node=%s — TDOA-corroboration pull, skipping "
+            "BirdNET re-analysis (species already known from origin detection)",
+            requestId, nodeId,
+        )
+        await db.insert_audio_event(
+            node_id=nodeId, triggered=triggered, received_at=_now_iso(),
+            bytes_=len(data), analysis_status="skipped_tdoa_corroboration",
+            t_start_us=tStartUs, t_end_us=tEndUs,
+        )
+        return
 
     if not birdnet_worker.ready():
         log.warning("audio push id=%s node=%s — BirdNET not yet loaded, skipping analysis",
@@ -1016,19 +1105,19 @@ async def audio_push(
     # firmware that doesn't send the actual capture window yet — nothing to
     # anchor a pull window on, so planning is skipped for this push.
     if persisted and tStartUs is not None and tEndUs is not None:
-        try:
-            await _plan_tdoa_attempt(
-                audio_event_id=audio_event_id,
-                origin_node_id=nodeId,
-                species_key=top["common_name"],
-                t_start_us=tStartUs,
-                t_end_us=tEndUs,
-            )
-        except Exception:
-            log.exception(
-                "audio push id=%s node=%s — TDOA attempt planning failed",
-                requestId, nodeId,
-            )
+        # Fire-and-forget: _plan_tdoa_attempt catches its own exceptions
+        # (it has to — nothing awaits this task) and neighbour pulls should
+        # never delay the ack we're about to send back to the pushing node.
+        # See project_soundhub_congestion notes: this used to be awaited
+        # inline here, holding the response open for the full sequential
+        # neighbour fan-out.
+        asyncio.create_task(_plan_tdoa_attempt(
+            audio_event_id=audio_event_id,
+            origin_node_id=nodeId,
+            species_key=top["common_name"],
+            t_start_us=tStartUs,
+            t_end_us=tEndUs,
+        ))
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
@@ -1044,12 +1133,24 @@ async def get_audio_request(request_id: int):
     return {"requestId": request_id, **entry}
 
 
-async def _issue_sample_pull(node_id: str, t_start_us: int, t_end_us: int) -> int:
+async def _issue_sample_pull(
+    node_id: str, t_start_us: int, t_end_us: int,
+    *, purpose: str = "manual",
+) -> int:
     """Trigger an audio pull from a node for a specific UTC time range.
     Shared by the POST /nodes/{id}/sample route and the TDOA orchestration
     hook (_plan_tdoa_attempt) — extracted so both go through identical
     mac/broker resolution and _audio_requests bookkeeping rather than two
     copies of the same relay logic.
+
+    purpose tags the resulting _audio_requests entry — "manual" (default,
+    operator-triggered via /nodes/{id}/sample) or "tdoa_corroboration"
+    (issued by _plan_tdoa_attempt purely to get a neighbour's waveform for
+    TDOA cross-correlation). audio_push() reads this back to decide whether
+    the arriving push needs a full BirdNET re-analysis — a corroboration
+    pull already knows its species from the origin detection, so re-running
+    the model on it is pure wasted CPU. See project_soundhub_congestion
+    notes for why this matters under TDOA load.
 
     Flow:
       1. Resolves the target node's wifiMac from its last polled status.
@@ -1061,7 +1162,7 @@ async def _issue_sample_pull(node_id: str, t_start_us: int, t_end_us: int) -> in
     Raises HTTPException:
       404 — node not found in registry
       422 — node wifiMac not yet known (wait for next status poll)
-      503 — no reachable broker, or broker IP unknown
+      503 — no reachable broker, or broker IP unknown, or relay client not ready
       502 — broker relay endpoint returned an error
     """
     node = await registry.get_node(node_id)
@@ -1089,12 +1190,16 @@ async def _issue_sample_pull(node_id: str, t_start_us: int, t_end_us: int) -> in
     if broker_ip is None:
         raise HTTPException(status_code=503, detail="No reachable broker node found")
 
+    if _relay_client is None:
+        raise HTTPException(status_code=503, detail="Relay client not initialised")
+
     import random
     request_id = random.randint(1, 2**31 - 1)
     _audio_requests[request_id] = {
         "acks": [],
         "targetMac": target_mac,
         "createdAt": _now_iso(),
+        "purpose": purpose,
     }
 
     payload = {
@@ -1106,8 +1211,7 @@ async def _issue_sample_pull(node_id: str, t_start_us: int, t_end_us: int) -> in
         "hubPort":   config.BASE_STATION_PORT,
     }
 
-    async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
-        r = await client.post(f"{config.NODE_SCHEME}://{broker_ip}/espnow/relay", json=payload)
+    r = await _relay_client.post(f"{config.NODE_SCHEME}://{broker_ip}/espnow/relay", json=payload)
 
     if r.status_code not in (200, 202):
         raise HTTPException(

@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS audio_events (
     received_at      TEXT NOT NULL,   -- ISO8601 UTC, when the push hit the hub
     bytes            INTEGER NOT NULL,
     analysis_status  TEXT NOT NULL,   -- 'analyzed' | 'skipped_not_ready' | 'error'
+                                      -- | 'skipped_tdoa_corroboration' (pull was
+                                      -- for TDOA corroboration only — species
+                                      -- already known, BirdNET deliberately not
+                                      -- re-run; see routes.py audio_push())
     detection_count   INTEGER DEFAULT 0,  -- rows actually persisted to `detections` (>= threshold)
     top_confidence    REAL,               -- best raw candidate confidence, any threshold (NULL if no candidates at all)
     top_species       TEXT,               -- common_name of the top candidate, NULL if none

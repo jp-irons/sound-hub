@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import birdnet_worker, db, discovery, poller
+from . import birdnet_worker, db, discovery, poller, routes
 from .routes import router
 
 logging.basicConfig(
@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
             "localhost", 8000,
         )
     await discovery.start()
+    await routes.init_relay_client()
     _poller_task = asyncio.create_task(poller.run())
     # Load BirdNET model in a thread so the event loop is not blocked.
     await asyncio.get_running_loop().run_in_executor(None, birdnet_worker.init)
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI):
     yield
     if _poller_task:
         _poller_task.cancel()
+    await routes.close_relay_client()
 
 
 app = FastAPI(title="Sound Hub", lifespan=lifespan)

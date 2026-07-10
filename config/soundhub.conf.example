@@ -46,7 +46,10 @@ MDNS_RESCAN_INTERVAL_S = 180.0
 # intentional on a closed home LAN.
 NODE_SCHEME            = "https"
 STATUS_POLL_INTERVAL_S = 5.0
-STATUS_TIMEOUT_S       = 3.0
+# See project_soundhub_congestion notes: raised from 3.0s so a busy TDOA
+# burst on the hub's single event loop doesn't false-flip a healthy node
+# offline just because the poller's own outbound call was delayed.
+STATUS_TIMEOUT_S       = 7.0
 
 # ---------------------------------------------------------------------------
 # Database
