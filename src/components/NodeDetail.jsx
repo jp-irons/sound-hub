@@ -495,15 +495,19 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
           <button
             className="btn btn-primary"
             style={{ flex: 1 }}
-            disabled={node.status === 'offline'}
-            title={node.status === 'offline' ? 'Node offline' : 'Request audio sample from this node'}
+            disabled={node.status === 'offline' || node.role === 'BROKER'}
+            title={
+              node.role === 'BROKER' ? 'Broker nodes do not capture audio'
+              : node.status === 'offline' ? 'Node offline'
+              : 'Request audio sample from this node'
+            }
           >
             Request Sample
           </button>
           <button
             className="btn"
-            disabled={node.status === 'offline'}
-            title="View buffer inventory"
+            disabled={node.status === 'offline' || node.role === 'BROKER'}
+            title={node.role === 'BROKER' ? 'Broker nodes do not capture audio' : 'View buffer inventory'}
           >
             Inventory
           </button>

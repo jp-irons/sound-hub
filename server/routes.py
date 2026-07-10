@@ -730,17 +730,29 @@ async def audio_ack(body: AudioAckBody):
 
 
 async def _approved_positioned_nodes() -> dict[str, tuple[float, float, float]]:
-    """Return {node_id: (pos_e, pos_n, pos_alt)} for every approved node with
-    a fully-known position. This is the candidate set for TDOA orchestration
-    — neighbour-selection ("initially: all") and the array-wide travel-time
-    floor both start from this set. See species_tdoa_pipeline design notes
-    (sound-hub/DESIGN.md) — "no neighbour-selection logic" gap.
+    """Return {node_id: (pos_e, pos_n, pos_alt)} for every approved,
+    non-broker node with a fully-known position. This is the candidate set
+    for TDOA orchestration — neighbour-selection ("initially: all") and the
+    array-wide travel-time floor both start from this set. See
+    species_tdoa_pipeline design notes (sound-hub/DESIGN.md) — "no
+    neighbour-selection logic" gap.
+
+    Brokers are excluded even if they happen to have a stored position
+    (e.g. a node switched to broker after being surveyed, or kept for
+    migration continuity — see project memory on the node-role rename):
+    a broker never captures its own audio, so pulling from one only ever
+    yields UNAVAILABLE, and including its position would corrupt the
+    array-wide travel-time floor with a non-sensing point.
     """
     nodes = await registry.list_nodes()
     positions = await db.list_node_positions()
     out: dict[str, tuple[float, float, float]] = {}
     for node in nodes:
         if node["approval_status"] != db.APPROVED:
+            continue
+        live = registry.get_live_status(node["id"])
+        raw_status = live.get("raw_status") or {}
+        if (raw_status.get("node") or {}).get("isBroker") is True:
             continue
         pos = positions.get(node["id"])
         if pos is None:
