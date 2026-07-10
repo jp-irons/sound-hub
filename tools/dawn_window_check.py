@@ -25,9 +25,9 @@ Run on the NUC (has the venv with astral/timezonefinder already installed
 for the server):
 
     cd /opt/sound-hub
-    python3 tools/dawn_window_check.py
-    python3 tools/dawn_window_check.py --days 14 --min-conf 0.5
-    python3 tools/dawn_window_check.py --db /opt/sound-hub/sound_hub.db
+    venv/bin/python3 tools/dawn_window_check.py
+    venv/bin/python3 tools/dawn_window_check.py --days 14 --min-conf 0.5
+    venv/bin/python3 tools/dawn_window_check.py --db /opt/sound-hub/sound_hub.db
 
 Uses stdlib sqlite3 + the server's own suntimes module (imported directly,
 so the dawn-window math can never drift out of sync with what the app
@@ -216,4 +216,15 @@ def main():
 
     if earliest_gap < 0:
         suggested = int((-earliest_gap + 4) // 5) * 5  # round up to nearest 5 min
-        current = int
+        current = int(DAWN_BEFORE.total_seconds() // 60)
+        print(f"Current DAWN_BEFORE = {current} min. Earliest activity seen was "
+              f"{-earliest_gap:.1f} min before dawn_start.")
+        if suggested > current:
+            print(f"Consider DAWN_BEFORE ~= {suggested} min if this pattern holds across more days.")
+    else:
+        print("No activity found earlier than the current dawn_start — buffer looks adequate "
+              "for this sample.")
+
+
+if __name__ == "__main__":
+    main()
