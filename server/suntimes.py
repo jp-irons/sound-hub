@@ -62,7 +62,7 @@ def local_tz_for(lat: float, lon: float) -> ZoneInfo:
 # sunset, tailing off quickly once it's dark — hence a window weighted
 # *before* sunset. Adjust these once you have enough real detection data
 # to see where the actual chorus boundaries fall at a given site.
-DAWN_BEFORE = timedelta(minutes=30)
+DAWN_BEFORE = timedelta(minutes=45)
 DAWN_AFTER = timedelta(minutes=90)
 DUSK_BEFORE = timedelta(minutes=90)
 DUSK_AFTER = timedelta(minutes=30)
