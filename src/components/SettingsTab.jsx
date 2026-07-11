@@ -23,6 +23,7 @@ function fieldsFromRow(row) {
     enabled: row.enabled,
     correlationMethod: row.correlationMethod,
     onsetDetectionMethod: row.onsetDetectionMethod,
+    onsetThresholdFactor: String(row.onsetThresholdFactor),
     freqBandLowHz: row.freqBandLowHz != null ? String(row.freqBandLowHz) : '',
     freqBandHighHz: row.freqBandHighHz != null ? String(row.freqBandHighHz) : '',
     pullWindowS: String(row.pullWindowS),
@@ -75,6 +76,7 @@ const BLANK_ADD_FIELDS = {
   enabled: true,
   correlationMethod: 'gcc_phat',
   onsetDetectionMethod: 'global_peak',
+  onsetThresholdFactor: '8.0',
   freqBandLowHz: '',
   freqBandHighHz: '',
   pullWindowS: '3.0',
@@ -92,6 +94,7 @@ function buildSpeciesParamsBody(fields) {
   const windowMarginPreMs = parseFloat(fields.windowMarginPreMs)
   const windowMarginPostMs = parseFloat(fields.windowMarginPostMs)
   const minCorroboratingNodes = parseInt(fields.minCorroboratingNodes, 10)
+  const onsetThresholdFactor = parseFloat(fields.onsetThresholdFactor)
   const freqBandLowHz = fields.freqBandLowHz.trim() === '' ? null : parseFloat(fields.freqBandLowHz)
   const freqBandHighHz = fields.freqBandHighHz.trim() === '' ? null : parseFloat(fields.freqBandHighHz)
 
@@ -99,6 +102,12 @@ function buildSpeciesParamsBody(fields) {
   if (Number.isNaN(windowMarginPreMs) || windowMarginPreMs < 0) return [null, 'Pre-margin must be a non-negative number of ms.']
   if (Number.isNaN(windowMarginPostMs) || windowMarginPostMs < 0) return [null, 'Post-margin must be a non-negative number of ms.']
   if (!Number.isInteger(minCorroboratingNodes) || minCorroboratingNodes < 4) return [null, 'Min corroborating nodes must be an integer >= 4 (the solver requires at least 4).']
+  // >2 mirrors models.py's SpeciesTdoaParams.onset_threshold_factor (gt=2.0)
+  // — a floor against zeroing this out by accident, not a claim that
+  // low-single-digit values are safe (see that field's description for why:
+  // the detector has no defense against locking onto a louder wrong
+  // transient once the bar is lowered).
+  if (Number.isNaN(onsetThresholdFactor) || onsetThresholdFactor <= 2) return [null, 'Onset threshold must be a number > 2.']
   if (fields.freqBandLowHz.trim() !== '' && Number.isNaN(freqBandLowHz)) return [null, 'Freq band low must be a number, or blank.']
   if (fields.freqBandHighHz.trim() !== '' && Number.isNaN(freqBandHighHz)) return [null, 'Freq band high must be a number, or blank.']
   if (!fields.correlationMethod.trim()) return [null, 'Correlation method is required.']
@@ -108,6 +117,7 @@ function buildSpeciesParamsBody(fields) {
     enabled: fields.enabled,
     correlationMethod: fields.correlationMethod.trim(),
     onsetDetectionMethod: fields.onsetDetectionMethod.trim(),
+    onsetThresholdFactor,
     freqBandLowHz, freqBandHighHz,
     pullWindowS, windowMarginPreMs, windowMarginPostMs, minCorroboratingNodes,
     notes: fields.notes.trim() === '' ? null : fields.notes.trim(),
@@ -568,6 +578,7 @@ export default function SettingsTab() {
                 <th style={sty.th}>Enabled</th>
                 <th style={sty.th}>Methods</th>
                 <th style={sty.th}>Freq band</th>
+                <th style={sty.th}>Onset threshold</th>
                 <th style={sty.th}>Pull / margins</th>
                 <th style={sty.th}>Min nodes</th>
                 <th style={sty.th}>Updated</th>
@@ -588,6 +599,7 @@ export default function SettingsTab() {
                       <td style={sty.td}>{row.enabled ? 'Yes' : 'No'}</td>
                       <td style={sty.td}>{row.correlationMethod} / {row.onsetDetectionMethod}</td>
                       <td style={sty.td}>{fmtFreqBand(row.freqBandLowHz, row.freqBandHighHz)}</td>
+                      <td style={sty.td}>{row.onsetThresholdFactor}×</td>
                       <td style={sty.td}>{row.pullWindowS}s / ±{row.windowMarginPreMs}–{row.windowMarginPostMs}ms</td>
                       <td style={sty.td}>{row.minCorroboratingNodes}</td>
                       <td style={{ ...sty.td, color: 'var(--text-muted, #888)', fontSize: 11 }}>
@@ -622,7 +634,7 @@ export default function SettingsTab() {
 
                     {isEditing && (
                       <tr key={`${row.speciesKey}-edit`} style={{ background: 'var(--surface2, #2a2a2a)' }}>
-                        <td colSpan={8} style={{ padding: '12px' }}>
+                        <td colSpan={9} style={{ padding: '12px' }}>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 10, marginBottom: 10 }}>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Enabled</span>
@@ -662,6 +674,12 @@ export default function SettingsTab() {
                               <input style={sty.smallInput} type="number" step="any" placeholder="blank = no ceiling"
                                 value={editFields.freqBandHighHz}
                                 onChange={e => setEditField('freqBandHighHz', e.target.value)} />
+                            </label>
+                            <label style={sty.fieldGroup}>
+                              <span style={sty.fieldLabelText}>Onset threshold (× background RMS)</span>
+                              <input style={sty.smallInput} type="number" step="any" min={2}
+                                value={editFields.onsetThresholdFactor}
+                                onChange={e => setEditField('onsetThresholdFactor', e.target.value)} />
                             </label>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Pull window (s)</span>
@@ -706,7 +724,7 @@ export default function SettingsTab() {
 
               {speciesParams.length === 0 && (
                 <tr>
-                  <td colSpan={8} style={{ ...sty.td, color: 'var(--text-muted, #888)', textAlign: 'center', padding: 24 }}>
+                  <td colSpan={9} style={{ ...sty.td, color: 'var(--text-muted, #888)', textAlign: 'center', padding: 24 }}>
                     No species TDOA params configured yet.
                   </td>
                 </tr>
@@ -753,6 +771,12 @@ export default function SettingsTab() {
               <input style={sty.smallInput} type="number" step="any" disabled={addBusy} placeholder="blank = no ceiling"
                 value={addFields.freqBandHighHz}
                 onChange={e => setAddField('freqBandHighHz', e.target.value)} />
+            </label>
+            <label style={sty.fieldGroup}>
+              <span style={sty.fieldLabelText}>Onset threshold (× background RMS)</span>
+              <input style={sty.smallInput} type="number" step="any" min={2} disabled={addBusy}
+                value={addFields.onsetThresholdFactor}
+                onChange={e => setAddField('onsetThresholdFactor', e.target.value)} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Pull window (s)</span>

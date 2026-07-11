@@ -6,6 +6,7 @@ zeroconf
 httpx
 aiosqlite
 numpy
+scipy
 python-multipart
 birdnetlib
 librosa

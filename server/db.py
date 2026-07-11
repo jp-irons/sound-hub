@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
     enabled                 INTEGER NOT NULL DEFAULT 1,
     correlation_method      TEXT NOT NULL DEFAULT 'gcc_phat',
     onset_detection_method  TEXT NOT NULL DEFAULT 'global_peak',
+    onset_threshold_factor  REAL NOT NULL DEFAULT 8.0,
     freq_band_low_hz        REAL,
     freq_band_high_hz       REAL,
     pull_window_s           REAL NOT NULL DEFAULT 3.0,
@@ -209,10 +210,11 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
 -- pattern as the rest of this file — not designed yet, deliberately deferred
 -- until the milestone that needs them.
 --
--- correlation_method/onset_detection_method/min_corroborating_nodes are
--- copied from species_tdoa_params at plan time rather than joined live, so
--- a later edit to that table doesn't retroactively change what an
--- already-planned attempt says it used.
+-- correlation_method/onset_detection_method/min_corroborating_nodes/
+-- onset_threshold_factor/freq_band_low_hz/freq_band_high_hz are copied from
+-- species_tdoa_params at plan time rather than joined live, so a later edit
+-- to that table doesn't retroactively change what an already-planned
+-- attempt says it used.
 --
 -- planned_node_ids is a JSON array of candidate neighbour node_ids — the
 -- plan as it stood at planning time. Per-node *execution* state (requestId,
@@ -242,6 +244,9 @@ CREATE TABLE IF NOT EXISTS tdoa_attempts (
     min_corroborating_nodes INTEGER NOT NULL,
     correlation_method      TEXT NOT NULL,
     onset_detection_method  TEXT NOT NULL,
+    onset_threshold_factor  REAL NOT NULL DEFAULT 8.0,
+    freq_band_low_hz        REAL,
+    freq_band_high_hz       REAL,
     travel_time_floor_s     REAL NOT NULL,
     failure_reason          TEXT,
     solved_e                REAL,
@@ -340,6 +345,7 @@ FACTORY_DEFAULT_SPECIES_PARAMS = {
     "enabled": True,
     "correlation_method": "gcc_phat",
     "onset_detection_method": "global_peak",
+    "onset_threshold_factor": 8.0,
     "freq_band_low_hz": None,
     "freq_band_high_hz": None,
     "pull_window_s": 3.0,
@@ -492,6 +498,30 @@ async def init_db() -> None:
         ):
             if col not in tdoa_attempt_columns:
                 await conn.execute(f"ALTER TABLE tdoa_attempts ADD COLUMN {col} {coltype}")
+
+        # Migration: add onset_threshold_factor to species_tdoa_params (per-
+        # species onset tuning) if it doesn't exist yet.
+        cursor = await conn.execute("PRAGMA table_info(species_tdoa_params)")
+        species_param_columns = {row[1] for row in await cursor.fetchall()}
+        if "onset_threshold_factor" not in species_param_columns:
+            await conn.execute(
+                "ALTER TABLE species_tdoa_params "
+                "ADD COLUMN onset_threshold_factor REAL NOT NULL DEFAULT 8.0"
+            )
+
+        # Migration: add onset_threshold_factor/freq_band_low_hz/
+        # freq_band_high_hz snapshot columns to tdoa_attempts (same per-
+        # species onset tuning, copied at plan time like correlation_method/
+        # onset_detection_method above) if they don't exist yet.
+        if "onset_threshold_factor" not in tdoa_attempt_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempts "
+                "ADD COLUMN onset_threshold_factor REAL NOT NULL DEFAULT 8.0"
+            )
+        if "freq_band_low_hz" not in tdoa_attempt_columns:
+            await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN freq_band_low_hz REAL")
+        if "freq_band_high_hz" not in tdoa_attempt_columns:
+            await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN freq_band_high_hz REAL")
 
         # Index backing find_covering_audio_event's per-node window lookup —
         # same rationale as idx_trigger_events_t_us below: audio_events grows
@@ -1324,6 +1354,7 @@ async def upsert_species_tdoa_params(
     enabled: bool,
     correlation_method: str,
     onset_detection_method: str,
+    onset_threshold_factor: float,
     freq_band_low_hz: float | None,
     freq_band_high_hz: float | None,
     pull_window_s: float,
@@ -1340,14 +1371,14 @@ async def upsert_species_tdoa_params(
         await conn.execute(
             """INSERT OR REPLACE INTO species_tdoa_params
                (species_key, enabled, correlation_method, onset_detection_method,
-                freq_band_low_hz, freq_band_high_hz, pull_window_s,
-                window_margin_pre_ms, window_margin_post_ms,
+                onset_threshold_factor, freq_band_low_hz, freq_band_high_hz,
+                pull_window_s, window_margin_pre_ms, window_margin_post_ms,
                 min_corroborating_nodes, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (species_key, 1 if enabled else 0, correlation_method,
-             onset_detection_method, freq_band_low_hz, freq_band_high_hz,
-             pull_window_s, window_margin_pre_ms, window_margin_post_ms,
-             min_corroborating_nodes, notes, updated_at),
+             onset_detection_method, onset_threshold_factor, freq_band_low_hz,
+             freq_band_high_hz, pull_window_s, window_margin_pre_ms,
+             window_margin_post_ms, min_corroborating_nodes, notes, updated_at),
         )
         await conn.commit()
 
@@ -1440,6 +1471,9 @@ async def insert_tdoa_attempt(
     min_corroborating_nodes: int,
     correlation_method: str,
     onset_detection_method: str,
+    onset_threshold_factor: float,
+    freq_band_low_hz: float | None,
+    freq_band_high_hz: float | None,
     travel_time_floor_s: float,
     failure_reason: str | None = None,
 ) -> int:
@@ -1459,12 +1493,14 @@ async def insert_tdoa_attempt(
                (audio_event_id, origin_node_id, species_key, used_default,
                 status, t_start_us, t_end_us, planned_node_ids,
                 min_corroborating_nodes, correlation_method,
-                onset_detection_method, travel_time_floor_s, failure_reason,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                onset_detection_method, onset_threshold_factor,
+                freq_band_low_hz, freq_band_high_hz, travel_time_floor_s,
+                failure_reason, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (audio_event_id, origin_node_id, species_key, 1 if used_default else 0,
              status, t_start_us, t_end_us, planned_node_ids,
              min_corroborating_nodes, correlation_method, onset_detection_method,
+             onset_threshold_factor, freq_band_low_hz, freq_band_high_hz,
              travel_time_floor_s, failure_reason, now, now),
         )
         await conn.commit()
@@ -1649,7 +1685,8 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
     """Milestone 3: given the requestId an arriving corroboration push is
     tagged with, find the tdoa_attempt_nodes row it corresponds to, joined
     with the fields from its parent tdoa_attempts row that correlation
-    needs (species_key, onset_detection_method, min_corroborating_nodes).
+    needs (species_key, onset_detection_method, onset_threshold_factor,
+    freq_band_low_hz/high_hz, min_corroborating_nodes).
     Returns None if no attempt ever issued this requestId (e.g. a manual
     /nodes/{id}/sample pull, purpose='manual')."""
     async with connect() as conn:
@@ -1658,7 +1695,8 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
             """SELECT tan.id AS node_row_id, tan.attempt_id, tan.node_id,
                       tan.status AS node_status,
                       ta.species_key, ta.onset_detection_method,
-                      ta.min_corroborating_nodes
+                      ta.onset_threshold_factor, ta.freq_band_low_hz,
+                      ta.freq_band_high_hz, ta.min_corroborating_nodes
                FROM tdoa_attempt_nodes tan
                JOIN tdoa_attempts ta ON ta.id = tan.attempt_id
                WHERE tan.request_id = ?

@@ -12,27 +12,46 @@ solver itself. tools/ is a standalone operator-run diagnostic script, not a
 production dependency of the server, so the implementation is duplicated
 here rather than imported across that boundary.
 
-Known gap (not solved here): no species-matched bandpass filtering is
-applied before onset detection. docs/tdoa-correlation-design-notes.md found
-that narrow-window onset detection without a bandpass filter misses 71-78%
-of real bird calls in the 0-15dB SNR range that most real detections fall
-into — bandpass recovery of that miss rate is a validated finding but not
-yet wired into any production code path, here included. Species like
-Pheasant Coucal (short, smooth, low-frequency) are not reliably detected by
-this method at all — see that doc's "open exception" section.
+Bandpass filtering (added 2026-07-11): docs/tdoa-correlation-design-notes.md
+found that narrow-window onset detection without a bandpass filter misses
+71-78% of real bird calls in the 0-15dB SNR range that most real detections
+fall into — bandpass recovery of that miss rate is a validated finding
+(tools/synthetic_snr_feasibility.py), and bandpass_filter() below is that
+same validated implementation, now wired into detect_onset_us(). It's still
+a per-species opt-in, though: species_tdoa_params.freq_band_low_hz/high_hz
+default to NULL (no filtering) for any species that hasn't had its call
+band characterized from a reference recording yet, so this is plumbing, not
+an automatic fix — see get_effective_species_tdoa_params() in db.py.
+Species like Pheasant Coucal (short, smooth, low-frequency) are not
+reliably detected by the onset detector at all even with filtering — see
+that doc's "open exception" section.
+
+onset_threshold_factor (added 2026-07-11): also now a per-species,
+DB-tunable parameter (species_tdoa_params.onset_threshold_factor) rather
+than a hardcoded constant — see SpeciesTdoaParams.onset_threshold_factor in
+models.py for the full rationale on why 8.0 remains the factory default and
+why lowering it isn't a substitute for bandpass filtering.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import butter, sosfiltfilt
 
 # Onset detector tuning — short-time energy envelope, refined to the
 # steepest-rise sample. Copied from tools/clap_sync_check.py; keep in sync
-# manually if that file's tuning changes (see module docstring).
+# manually if that file's tuning changes (see module docstring). These are
+# the last-resort Python-level defaults used only if a caller doesn't pass
+# an explicit value — in production, routes.py always passes the
+# per-species DB-resolved values through (species_tdoa_params, or its
+# FACTORY_DEFAULT_SPECIES_PARAMS fallback in db.py if the DB row is missing/
+# disabled), so these constants exist as a second, redundant safety net,
+# not the live source of truth.
 _ONSET_WINDOW_MS = 3.0          # short-time energy averaging window
 _ONSET_THRESHOLD_FACTOR = 8.0   # multiple of background RMS the peak must exceed
 _ONSET_REFINE_MARGIN_MS = 5.0   # +/- search margin around the peak for steepest-rise refinement
+_BANDPASS_ORDER = 4             # Butterworth filter order, matches synthetic_snr_feasibility.py
 
 
 def _load_mono(filepath: str) -> tuple[int, np.ndarray]:
@@ -52,6 +71,30 @@ def _energy_envelope(data: np.ndarray, rate: int, window_ms: float) -> np.ndarra
     win = max(1, int(round(window_ms * 1e-3 * rate)))
     energy = np.convolve(data.astype(np.float64) ** 2, np.ones(win) / win, mode="same")
     return np.sqrt(energy)
+
+
+def bandpass_filter(
+    data: np.ndarray, rate: int, low_hz: float, high_hz: float,
+    order: int = _BANDPASS_ORDER,
+) -> np.ndarray:
+    """Zero-phase Butterworth bandpass (sosfiltfilt — no group delay, so it
+    doesn't itself bias the TDOA estimate). Ported from
+    tools/synthetic_snr_feasibility.py's bandpass_filter(), the
+    implementation that validated bandpass recovery of the onset-detection
+    miss rate at realistic SNR — see module docstring. Keep in sync
+    manually if that file's implementation changes, same copy-don't-diverge
+    convention as detect_onset() and clap_sync_check.py.
+
+    Intended to be applied to the full buffer before detect_onset(), using a
+    per-species band derived from a reference recording (once one exists —
+    species_tdoa_params.freq_band_low_hz/high_hz has no per-species values
+    populated yet as of this writing).
+    """
+    nyq = rate / 2.0
+    low = max(low_hz / nyq, 1e-4)
+    high = min(high_hz / nyq, 0.999)
+    sos = butter(order, [low, high], btype="band", output="sos")
+    return sosfiltfilt(sos, data)
 
 
 def _refine_to_steepest_rise(data: np.ndarray, idx: int, margin_samples: int) -> int:
@@ -110,7 +153,14 @@ def detect_onset(
     return _refine_to_steepest_rise(data, peak_idx, margin)
 
 
-def detect_onset_us(method: str, filepath: str, t_start_us: int) -> float:
+def detect_onset_us(
+    method: str,
+    filepath: str,
+    t_start_us: int,
+    threshold_factor: float = _ONSET_THRESHOLD_FACTOR,
+    freq_band_low_hz: float | None = None,
+    freq_band_high_hz: float | None = None,
+) -> float:
     """Run the species' configured onset_detection_method against a node's
     WAV and return the absolute (node-clock) microsecond timestamp of the
     detected onset.
@@ -121,6 +171,15 @@ def detect_onset_us(method: str, filepath: str, t_start_us: int) -> float:
     padded pull window, so using the wrong start here would silently shift
     every arrival time by a constant offset.
 
+    threshold_factor/freq_band_low_hz/freq_band_high_hz should be the
+    per-species values snapshotted onto the tdoa_attempts row at plan time
+    (see routes.py _plan_tdoa_attempt_inner) — callers should always pass
+    them explicitly rather than relying on this function's defaults, which
+    exist only as a last-resort fallback (see module docstring). The
+    bandpass filter only runs when BOTH freq_band_low_hz and
+    freq_band_high_hz are given — either one alone (or neither) leaves the
+    buffer unfiltered, matching today's default no-filtering behavior.
+
     Raises ValueError if the method is unknown or no transient is found;
     callers should catch this and record 'onset_failed' rather than let it
     propagate (see routes.py _correlate_attempt_node).
@@ -129,5 +188,7 @@ def detect_onset_us(method: str, filepath: str, t_start_us: int) -> float:
         raise ValueError(f"unknown onset_detection_method '{method}'")
 
     rate, data = _load_mono(filepath)
-    onset_idx = detect_onset(data, rate)
+    if freq_band_low_hz is not None and freq_band_high_hz is not None:
+        data = bandpass_filter(data, rate, freq_band_low_hz, freq_band_high_hz)
+    onset_idx = detect_onset(data, rate, threshold_factor=threshold_factor)
     return t_start_us + (onset_idx / rate) * 1e6

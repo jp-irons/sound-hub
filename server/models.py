@@ -185,6 +185,9 @@ class TdoaAttemptRecord(BaseModel):
     min_corroborating_nodes: int = Field(alias="minCorroboratingNodes")
     correlation_method: str = Field(alias="correlationMethod")
     onset_detection_method: str = Field(alias="onsetDetectionMethod")
+    onset_threshold_factor: float = Field(alias="onsetThresholdFactor")
+    freq_band_low_hz: Optional[float] = Field(default=None, alias="freqBandLowHz")
+    freq_band_high_hz: Optional[float] = Field(default=None, alias="freqBandHighHz")
     travel_time_floor_s: float = Field(alias="travelTimeFloorS")
     failure_reason: Optional[str] = Field(default=None, alias="failureReason")
     solved_e: Optional[float] = Field(default=None, alias="solvedE")
@@ -393,8 +396,33 @@ class SpeciesTdoaParams(BaseModel):
                      "as a free string, not an enum, for the same "
                      "no-redeploy-to-extend reason as correlation_method.",
     )
-    freq_band_low_hz: Optional[float] = Field(default=None, alias="freqBandLowHz")
-    freq_band_high_hz: Optional[float] = Field(default=None, alias="freqBandHighHz")
+    onset_threshold_factor: float = Field(
+        default=8.0, gt=2.0, alias="onsetThresholdFactor",
+        description="Multiple of background RMS the onset envelope's "
+                     "global peak must exceed to count as a real transient. "
+                     "8.0 was tuned for hand-clap field validation "
+                     "(tools/clap_sync_check.py), not bird calls — see "
+                     "docs/tdoa-correlation-design-notes.md. Lowering this "
+                     "catches quieter/filtered calls but increases the risk "
+                     "of locking onto a louder non-target transient (wind, "
+                     "insects, echo) instead of the real one — the "
+                     "'global_peak' detector has no defense against that. "
+                     "gt=2.0 is a floor against an operator zeroing this out "
+                     "by accident, not a claim that low-single-digit values "
+                     "are safe.",
+    )
+    freq_band_low_hz: Optional[float] = Field(
+        default=None, alias="freqBandLowHz",
+        description="Bandpass low edge (Hz) applied before onset detection. "
+                     "Null (with freq_band_high_hz) means no filtering — "
+                     "today's default, unfiltered broadband behavior. Both "
+                     "must be set together to take effect (see "
+                     "onset_detection.py).",
+    )
+    freq_band_high_hz: Optional[float] = Field(
+        default=None, alias="freqBandHighHz",
+        description="Bandpass high edge (Hz) — see freq_band_low_hz.",
+    )
     pull_window_s: float = Field(
         default=3.0, alias="pullWindowS",
         description="Duration requested from neighbour nodes for this "

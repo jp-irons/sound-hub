@@ -136,11 +136,21 @@ they're visible rather than discovered by surprise later:
   arrival timestamps — that's the 4-node **quadratic** solve, which is
   mirror-root ambiguous (`tdoa_solver.py`). The unambiguous 5+-node
   least-squares case needs `min_corroborating_nodes=5`, not 4.
-- **No species-matched bandpass filtering.** `docs/tdoa-correlation-design-
-  notes.md` found this recovers a 71-78% onset-detection miss rate down to
-  ~10% for real bird calls at realistic SNR — a validated finding, but not
-  wired into `onset_detection.py`. Onset detection today runs on the raw,
-  unfiltered buffer.
+- **Bandpass filtering + onset threshold are now tunable, but no species has
+  characterized values yet (updated 2026-07-11).** `docs/tdoa-correlation-
+  design-notes.md` found bandpass filtering recovers a 71-78%
+  onset-detection miss rate down to ~10% for real bird calls at realistic
+  SNR — that finding is now wired into `onset_detection.py`
+  (`bandpass_filter()`, ported from `tools/synthetic_snr_feasibility.py`),
+  and `onset_threshold_factor` (previously a hardcoded 8.0, tuned only for
+  hand-clap validation tests) is a per-species DB column alongside
+  `freq_band_low_hz`/`freq_band_high_hz`, editable from the Settings tab.
+  Both are snapshotted onto `tdoa_attempts` at plan time like
+  `onset_detection_method`. Still a gap in practice: every species defaults
+  to `onset_threshold_factor=8.0` / no bandpass (NULL band), since no
+  species — including the Grey Butcherbird case that surfaced this — has
+  had its call band derived from a reference recording yet. The plumbing
+  exists; the per-species values still need deriving.
 - **No `hint_point` wired into the automatic solve.** Nothing in production
   config defines one (only the manual `POST /api/tdoa/solve` route accepts
   one ad-hoc per-request). A 4-node solve's mirror root is stored

@@ -942,9 +942,18 @@ async def _correlate_attempt_node(
     node_id: str,
     audio_event: dict,
     onset_detection_method: str,
+    onset_threshold_factor: float,
+    freq_band_low_hz: float | None = None,
+    freq_band_high_hz: float | None = None,
 ) -> None:
     """TDOA orchestration milestone 3: run onset detection against one
     node's WAV and record the outcome on its tdoa_attempt_nodes row.
+
+    onset_threshold_factor/freq_band_low_hz/freq_band_high_hz should always
+    be the values snapshotted onto the attempt's tdoa_attempts row at plan
+    time (see _plan_tdoa_attempt_inner), not re-read live from
+    species_tdoa_params — same "already-planned attempts keep the params
+    they were planned with" rationale as onset_detection_method itself.
 
     audio_event is the full audio_events row for this node's contribution —
     needs 'filename' (to re-open the WAV) and 't_start_us' (to anchor the
@@ -987,6 +996,9 @@ async def _correlate_attempt_node(
     try:
         arrival_us = onset_detection.detect_onset_us(
             onset_detection_method, fpath, t_start_us,
+            threshold_factor=onset_threshold_factor,
+            freq_band_low_hz=freq_band_low_hz,
+            freq_band_high_hz=freq_band_high_hz,
         )
     except Exception as exc:
         await db.update_tdoa_attempt_node_result(
@@ -1256,6 +1268,9 @@ async def _plan_tdoa_attempt_inner(
         min_corroborating_nodes=params["min_corroborating_nodes"],
         correlation_method=params["correlation_method"],
         onset_detection_method=params["onset_detection_method"],
+        onset_threshold_factor=params["onset_threshold_factor"],
+        freq_band_low_hz=params["freq_band_low_hz"],
+        freq_band_high_hz=params["freq_band_high_hz"],
         travel_time_floor_s=travel_time_floor_s,
     )
     log.info(
@@ -1286,6 +1301,9 @@ async def _plan_tdoa_attempt_inner(
                 node_row_id=origin_row_id, node_id=origin_node_id,
                 audio_event=origin_audio_event,
                 onset_detection_method=params["onset_detection_method"],
+                onset_threshold_factor=params["onset_threshold_factor"],
+                freq_band_low_hz=params["freq_band_low_hz"],
+                freq_band_high_hz=params["freq_band_high_hz"],
             )
         else:
             # Shouldn't happen — audio_event_id came from the very push that
@@ -1310,6 +1328,9 @@ async def _plan_tdoa_attempt_inner(
                 node_row_id=node_row_id, node_id=nid,
                 audio_event=known_audio_event,
                 onset_detection_method=params["onset_detection_method"],
+                onset_threshold_factor=params["onset_threshold_factor"],
+                freq_band_low_hz=params["freq_band_low_hz"],
+                freq_band_high_hz=params["freq_band_high_hz"],
             )
         else:
             await db.update_tdoa_attempt_node_result(
@@ -1368,6 +1389,9 @@ async def _plan_tdoa_attempt_inner(
                 node_row_id=node_row_id, node_id=nid,
                 audio_event=existing_event,
                 onset_detection_method=params["onset_detection_method"],
+                onset_threshold_factor=params["onset_threshold_factor"],
+                freq_band_low_hz=params["freq_band_low_hz"],
+                freq_band_high_hz=params["freq_band_high_hz"],
             )
             return True
         try:
@@ -1533,6 +1557,9 @@ async def audio_push(
                             "t_start_us": tStartUs, "t_end_us": tEndUs,
                         },
                         onset_detection_method=node_row["onset_detection_method"],
+                        onset_threshold_factor=node_row["onset_threshold_factor"],
+                        freq_band_low_hz=node_row["freq_band_low_hz"],
+                        freq_band_high_hz=node_row["freq_band_high_hz"],
                     )
                     await _maybe_solve_tdoa_attempt(node_row["attempt_id"])
                 asyncio.create_task(_correlate_and_maybe_solve())
@@ -2136,6 +2163,9 @@ def _tdoa_attempt_record_from_row(
         min_corroborating_nodes=row["min_corroborating_nodes"],
         correlation_method=row["correlation_method"],
         onset_detection_method=row["onset_detection_method"],
+        onset_threshold_factor=row["onset_threshold_factor"],
+        freq_band_low_hz=row["freq_band_low_hz"],
+        freq_band_high_hz=row["freq_band_high_hz"],
         travel_time_floor_s=row["travel_time_floor_s"],
         failure_reason=row["failure_reason"],
         solved_e=row["solved_e"],
@@ -2226,6 +2256,7 @@ def _species_tdoa_params_record_from_row(row: dict) -> SpeciesTdoaParamsRecord:
         enabled=bool(row["enabled"]),
         correlation_method=row["correlation_method"],
         onset_detection_method=row["onset_detection_method"],
+        onset_threshold_factor=row["onset_threshold_factor"],
         freq_band_low_hz=row["freq_band_low_hz"],
         freq_band_high_hz=row["freq_band_high_hz"],
         pull_window_s=row["pull_window_s"],
@@ -2306,6 +2337,7 @@ async def set_species_tdoa_params(species_key: str, req: SpeciesTdoaParams):
         enabled=req.enabled,
         correlation_method=req.correlation_method,
         onset_detection_method=req.onset_detection_method,
+        onset_threshold_factor=req.onset_threshold_factor,
         freq_band_low_hz=req.freq_band_low_hz,
         freq_band_high_hz=req.freq_band_high_hz,
         pull_window_s=req.pull_window_s,
