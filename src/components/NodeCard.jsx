@@ -66,7 +66,19 @@ export default function NodeCard({ node, selected, onSelect }) {
       {/* Row 1: hostname + anchor indicators + status dot */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <div className={`status-dot ${node.status}`} />
-        <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{node.hostname}</span>
+        {node.ipAddress ? (
+          <a
+            href={`https://${node.ipAddress}`}
+            target={node.id}
+            rel="noopener noreferrer"
+            onClick={e => e.stopPropagation()}
+            style={{ fontWeight: 600, fontSize: 13, flex: 1, color: 'inherit' }}
+          >
+            {node.hostname}
+          </a>
+        ) : (
+          <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{node.hostname}</span>
+        )}
         {node.role === 'BROKER' && (
           <span title="Broker — relays ESP-NOW traffic to/from WiFi" style={{
             fontSize: 10, color: 'var(--text-primary)',
