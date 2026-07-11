@@ -70,7 +70,6 @@ export default function NodeCard({ node, selected, onSelect }) {
           <a
             href={`https://${node.ipAddress}`}
             target={node.id}
-            rel="noopener noreferrer"
             onClick={e => e.stopPropagation()}
             style={{ fontWeight: 600, fontSize: 13, flex: 1, color: 'inherit' }}
           >
