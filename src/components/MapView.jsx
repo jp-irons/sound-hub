@@ -106,7 +106,9 @@ export default function MapView({ nodes, selectedId, onSelectNode, selectable = 
                       </div>
                     )}
                     <div style={{ fontSize: 11, marginTop: 4, color: '#777' }}>
-                      {node.ipAddress}
+                      <a href={`https://${node.ipAddress}`} target={node.id} rel="noopener noreferrer" style={{ color: 'inherit' }}>
+                        {node.ipAddress}
+                      </a>
                     </div>
                   </div>
                 ) : (
