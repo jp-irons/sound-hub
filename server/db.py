@@ -122,8 +122,16 @@ CREATE TABLE IF NOT EXISTS audio_events (
     top_confidence    REAL,               -- best raw candidate confidence, any threshold (NULL if no candidates at all)
     top_species       TEXT,               -- common_name of the top candidate, NULL if none
     t_start_us        INTEGER,            -- capture-window start, node-clock Unix epoch us (NULL for hub-requested pulls predating this column, or if a node hasn't sent it)
-    t_end_us          INTEGER             -- capture-window end, node-clock Unix epoch us
+    t_end_us          INTEGER,            -- capture-window end, node-clock Unix epoch us
+    filename          TEXT                -- WAV filename under the audio/ dir (see routes.py
+                                            -- audio_push()'s fname). NULL for rows written before
+                                            -- this column existed. Needed so TDOA correlation
+                                            -- (milestone 3) can re-open a node's WAV after the
+                                            -- fact — e.g. a "reused_existing" corroborator whose
+                                            -- audio arrived long before the attempt that ends up
+                                            -- using it, or the origin node's own trigger push.
 );
+
 
 -- Per-block AudioTrigger dual-gate ratios pulled from a node's
 -- GET /app/api/trigger-diag (see TriggerDiagnostics.hpp on the node side).
@@ -211,6 +219,16 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
 -- ack/pull outcome) lives in tdoa_attempt_nodes below (added milestone 2)
 -- rather than mutating this column, so the original plan stays a stable
 -- historical record even if a pull is retried or partially fails.
+--
+-- solved_e/solved_n/solved_alt/solve_residual_m/solve_method (milestone 4):
+-- filled by persist_tdoa_solution() once >= min_corroborating_nodes rows in
+-- tdoa_attempt_nodes have an arrival_us, status moves to 'solved'.
+-- solve_ambiguous_json holds the mirror root's [x,y,z] for a 4-node
+-- (quadratic) solve as a JSON array, NULL for a 5+-node (least-squares)
+-- solve where there is no ambiguity — see tdoa_solver.py. No hint_point is
+-- wired into the automatic solve yet (nothing in production config defines
+-- one today), so a 4-node solve's ambiguity is stored, not auto-resolved —
+-- see project_soundhub_tdoa_dedup / DESIGN.md gaps.
 CREATE TABLE IF NOT EXISTS tdoa_attempts (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     audio_event_id          INTEGER REFERENCES audio_events(id) ON DELETE CASCADE,
@@ -226,23 +244,41 @@ CREATE TABLE IF NOT EXISTS tdoa_attempts (
     onset_detection_method  TEXT NOT NULL,
     travel_time_floor_s     REAL NOT NULL,
     failure_reason          TEXT,
+    solved_e                REAL,
+    solved_n                REAL,
+    solved_alt              REAL,
+    solve_residual_m        REAL,
+    solve_method            TEXT,
+    solve_ambiguous_json    TEXT,
+    solved_at               TEXT,
     created_at              TEXT NOT NULL,
     updated_at              TEXT NOT NULL
 );
 
 -- Per-neighbour pull execution state for a tdoa_attempts row (milestone 2).
--- One row per node that planning selected. request_id is NULL when the pull
--- could not even be issued (e.g. node unreachable, broker down) — status
--- distinguishes 'requested' (relay accepted it; the WAV is awaited via the
--- normal audio_push()/requestId mechanism) from 'request_failed' (error
--- holds why). Milestone 3 will update status further as WAVs land and
--- arrival timestamps are derived; not done by this table yet.
+-- One row per node that planning selected, PLUS (as of milestone 3) one row
+-- for the origin node itself (status='origin') and one for every node
+-- resolved via reuse (status='reused_existing') — folding the origin into
+-- this table too means milestone 4's corroborating-node count is a single
+-- uniform query instead of origin/known/pulled being counted three
+-- different ways. request_id is NULL when the pull could not even be
+-- issued (e.g. node unreachable, broker down), or when status is 'origin'
+-- or 'reused_existing' (audio_event_id is set instead — the WAV already
+-- existed, nothing was requested over the air for this row).
+--
+-- arrival_us (milestone 3): the absolute node-clock microsecond timestamp
+-- of the acoustic event's onset in this node's WAV, derived by running the
+-- attempt's onset_detection_method against the file named by
+-- audio_events.filename. NULL until correlation succeeds. status reflects
+-- the outcome: 'arrived' (arrival_us set), 'onset_failed' (WAV present but
+-- no usable transient found, or filename missing — error holds why).
 CREATE TABLE IF NOT EXISTS tdoa_attempt_nodes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id  INTEGER NOT NULL REFERENCES tdoa_attempts(id) ON DELETE CASCADE,
     node_id     TEXT NOT NULL,
     request_id  INTEGER,
     status      TEXT NOT NULL,
+    arrival_us  REAL,
     error       TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -430,6 +466,32 @@ async def init_db() -> None:
                 "ALTER TABLE tdoa_attempt_nodes ADD COLUMN audio_event_id INTEGER "
                 "REFERENCES audio_events(id)"
             )
+
+        # Migration: add arrival_us to tdoa_attempt_nodes (milestone 3 —
+        # correlate arrivals) if it doesn't exist yet.
+        if "arrival_us" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN arrival_us REAL"
+            )
+
+        # Migration: add filename to audio_events (milestone 3 — needed to
+        # re-open a node's WAV for onset detection after the fact, e.g. a
+        # 'reused_existing' corroborator's audio that arrived long before
+        # the attempt that ends up using it) if it doesn't exist yet.
+        if "filename" not in audio_event_columns:
+            await conn.execute("ALTER TABLE audio_events ADD COLUMN filename TEXT")
+
+        # Migration: add solve-result columns to tdoa_attempts (milestone 4)
+        # if they don't exist yet.
+        cursor = await conn.execute("PRAGMA table_info(tdoa_attempts)")
+        tdoa_attempt_columns = {row[1] for row in await cursor.fetchall()}
+        for col, coltype in (
+            ("solved_e", "REAL"), ("solved_n", "REAL"), ("solved_alt", "REAL"),
+            ("solve_residual_m", "REAL"), ("solve_method", "TEXT"),
+            ("solve_ambiguous_json", "TEXT"), ("solved_at", "TEXT"),
+        ):
+            if col not in tdoa_attempt_columns:
+                await conn.execute(f"ALTER TABLE tdoa_attempts ADD COLUMN {col} {coltype}")
 
         # Index backing find_covering_audio_event's per-node window lookup —
         # same rationale as idx_trigger_events_t_us below: audio_events grows
@@ -758,6 +820,7 @@ async def insert_audio_event(
     top_species: str | None = None,
     t_start_us: int | None = None,
     t_end_us: int | None = None,
+    filename: str | None = None,
 ) -> int:
     """Record one push received at POST /api/audio/push, regardless of outcome.
 
@@ -765,6 +828,12 @@ async def insert_audio_event(
     t_start_us/t_end_us are the node-clock capture window — present for
     triggered (node-initiated) pushes, NULL for hub-requested pulls (the hub
     already has those from its own request).
+
+    filename is the WAV's name under the audio/ dir (routes.py audio_push()'s
+    fname) — lets later code (TDOA correlation, milestone 3) re-open this
+    push's audio without re-deriving the requestId/nodeId/srcMac naming
+    scheme. Optional so existing call sites can be migrated incrementally,
+    though as of milestone 3 all of audio_push()'s call sites pass it.
 
     Returns the inserted row's id — used by the TDOA orchestration hook in
     routes.py to link a tdoa_attempts row back to the audio_event that
@@ -774,13 +843,29 @@ async def insert_audio_event(
         cursor = await conn.execute(
             """INSERT INTO audio_events
                (node_id, triggered, received_at, bytes, analysis_status,
-                detection_count, top_confidence, top_species, t_start_us, t_end_us)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                detection_count, top_confidence, top_species, t_start_us,
+                t_end_us, filename)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (node_id, 1 if triggered else 0, received_at, bytes_, analysis_status,
-             detection_count, top_confidence, top_species, t_start_us, t_end_us),
+             detection_count, top_confidence, top_species, t_start_us, t_end_us,
+             filename),
         )
         await conn.commit()
         return cursor.lastrowid
+
+
+async def get_audio_event(audio_event_id: int) -> dict | None:
+    """Return one audio_events row by id, or None. Used by TDOA correlation
+    (routes.py _correlate_attempt_node) to look up the filename/t_start_us
+    needed to re-open a 'reused_existing' or origin node's WAV — those rows
+    only carry audio_event_id, not the file details themselves."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM audio_events WHERE id = ?", (audio_event_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 async def list_audio_events(
@@ -1399,6 +1484,20 @@ async def list_tdoa_attempts(limit: int = 200) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def get_tdoa_attempt(attempt_id: int) -> dict | None:
+    """Return one tdoa_attempts row by id, or None. Used by milestone 4's
+    solve-readiness check (routes.py _maybe_solve_tdoa_attempt_inner) to
+    re-read min_corroborating_nodes/species_key/status after a node's
+    arrival has just been recorded."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM tdoa_attempts WHERE id = ?", (attempt_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def update_tdoa_attempt_status(
     attempt_id: int, status: str, failure_reason: str | None = None
 ) -> None:
@@ -1420,6 +1519,40 @@ async def update_tdoa_attempt_status(
                 "UPDATE tdoa_attempts SET status = ?, updated_at = ? WHERE id = ?",
                 (status, now, attempt_id),
             )
+        await conn.commit()
+
+
+async def persist_tdoa_solution(
+    attempt_id: int,
+    *,
+    e: float,
+    n: float,
+    alt: float,
+    residual_m: float,
+    method: str,
+    ambiguous_root_json: str | None = None,
+) -> None:
+    """Milestone 4: write a successful tdoa_solver.solve() result back to
+    the attempt row and advance status to 'solved'.
+
+    ambiguous_root_json is a pre-serialized JSON array `[x, y, z]` for a
+    4-node (quadratic) solve's mirror root, or None for a 5+-node
+    (least-squares) solve where solve() reports no ambiguity — see
+    tdoa_solver.SolveResult.ambiguous_root. No hint_point is wired into the
+    automatic solve as of milestone 4, so a 4-node solve's mirror root is
+    stored for manual review, not auto-resolved.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        await conn.execute(
+            """UPDATE tdoa_attempts
+               SET status = 'solved', solved_e = ?, solved_n = ?,
+                   solved_alt = ?, solve_residual_m = ?, solve_method = ?,
+                   solve_ambiguous_json = ?, solved_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (e, n, alt, residual_m, method, ambiguous_root_json, now, now,
+             attempt_id),
+        )
         await conn.commit()
 
 
@@ -1465,6 +1598,67 @@ async def list_tdoa_attempt_nodes(attempt_id: int) -> list[dict]:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def update_tdoa_attempt_node_result(
+    node_row_id: int,
+    *,
+    status: str,
+    arrival_us: float | None = None,
+    error: str | None = None,
+    audio_event_id: int | None = None,
+) -> None:
+    """Milestone 3: record one node's correlation outcome against its
+    tdoa_attempt_nodes row — status='arrived' with arrival_us set on
+    success, or 'onset_failed' with error set (no usable transient, or the
+    WAV's filename was missing/unreadable). audio_event_id is passed through
+    for the corroboration-push path, which doesn't have it yet at insert
+    time (the audio_event is only created once the WAV lands — see
+    insert_tdoa_attempt_node's 'requested' rows); left untouched (not
+    overwritten with NULL) when not given, matching
+    update_tdoa_attempt_status's failure_reason convention."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with connect() as conn:
+        if audio_event_id is not None:
+            await conn.execute(
+                """UPDATE tdoa_attempt_nodes
+                   SET status = ?, arrival_us = ?, error = ?,
+                       audio_event_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, arrival_us, error, audio_event_id, now, node_row_id),
+            )
+        else:
+            await conn.execute(
+                """UPDATE tdoa_attempt_nodes
+                   SET status = ?, arrival_us = ?, error = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, arrival_us, error, now, node_row_id),
+            )
+        await conn.commit()
+
+
+async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
+    """Milestone 3: given the requestId an arriving corroboration push is
+    tagged with, find the tdoa_attempt_nodes row it corresponds to, joined
+    with the fields from its parent tdoa_attempts row that correlation
+    needs (species_key, onset_detection_method, min_corroborating_nodes).
+    Returns None if no attempt ever issued this requestId (e.g. a manual
+    /nodes/{id}/sample pull, purpose='manual')."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT tan.id AS node_row_id, tan.attempt_id, tan.node_id,
+                      tan.status AS node_status,
+                      ta.species_key, ta.onset_detection_method,
+                      ta.min_corroborating_nodes
+               FROM tdoa_attempt_nodes tan
+               JOIN tdoa_attempts ta ON ta.id = tan.attempt_id
+               WHERE tan.request_id = ?
+               ORDER BY tan.id DESC LIMIT 1""",
+            (request_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 async def find_covering_audio_event(

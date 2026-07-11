@@ -135,6 +135,67 @@ class TdoaResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class TdoaAttemptNodeRecord(BaseModel):
+    """One node's contribution to a tdoa_attempts row — returned nested
+    inside TdoaAttemptRecord by GET /api/tdoa/attempts.
+
+    status is one of 'requested' | 'request_failed' | 'reused_existing' |
+    'origin' | 'arrived' | 'onset_failed' — see tdoa_attempt_nodes' schema
+    comment in db.py for what each means at every stage of milestones 2-3.
+    """
+    id: int
+    node_id: str = Field(alias="nodeId")
+    request_id: Optional[int] = Field(default=None, alias="requestId")
+    status: str
+    arrival_us: Optional[float] = Field(default=None, alias="arrivalUs")
+    error: Optional[str] = Field(default=None)
+    audio_event_id: Optional[int] = Field(default=None, alias="audioEventId")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class TdoaAttemptRecord(BaseModel):
+    """One TDOA orchestration attempt (species_tdoa_pipeline design,
+    sound-hub/DESIGN.md) — returned by GET /api/tdoa/attempts, newest first.
+
+    status is one of 'planned' | 'pulling' | 'solved' | 'failed'. The
+    solved_*/solve_* fields are only populated once status='solved';
+    failure_reason only once status='failed'. solve_ambiguous_root is the
+    4-node quadratic solve's mirror root (E, N, Alt) when present — see
+    tdoa_solver.py; null for a 5+-node least-squares solve, which has no
+    ambiguity, or for an unsolved/failed attempt.
+    """
+    id: int
+    audio_event_id: Optional[int] = Field(default=None, alias="audioEventId")
+    origin_node_id: Optional[str] = Field(default=None, alias="originNodeId")
+    species_key: str = Field(alias="speciesKey")
+    used_default: bool = Field(alias="usedDefault")
+    status: str
+    t_start_us: int = Field(alias="tStartUs")
+    t_end_us: int = Field(alias="tEndUs")
+    min_corroborating_nodes: int = Field(alias="minCorroboratingNodes")
+    correlation_method: str = Field(alias="correlationMethod")
+    onset_detection_method: str = Field(alias="onsetDetectionMethod")
+    travel_time_floor_s: float = Field(alias="travelTimeFloorS")
+    failure_reason: Optional[str] = Field(default=None, alias="failureReason")
+    solved_e: Optional[float] = Field(default=None, alias="solvedE")
+    solved_n: Optional[float] = Field(default=None, alias="solvedN")
+    solved_alt: Optional[float] = Field(default=None, alias="solvedAlt")
+    solve_residual_m: Optional[float] = Field(default=None, alias="solveResidualM")
+    solve_method: Optional[str] = Field(default=None, alias="solveMethod")
+    solve_ambiguous_root: Optional[tuple[float, float, float]] = Field(
+        default=None, alias="solveAmbiguousRoot",
+    )
+    solved_at: Optional[str] = Field(default=None, alias="solvedAt")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    nodes: list[TdoaAttemptNodeRecord] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class NodeConfigRequest(BaseModel):
     """Body for POST /api/nodes/{id}/configure — proxied to the node's own
     POST /app/api/node-config (NodeConfigHandler.cpp — persists to NVS).

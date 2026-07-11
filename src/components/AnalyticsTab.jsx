@@ -323,6 +323,43 @@ const STATUS_COLOR = {
   error: 'var(--red, #f44336)',
 }
 
+// TDOA orchestration attempt status (tdoa_attempts.status) — see
+// species_tdoa_pipeline design, sound-hub/DESIGN.md.
+const TDOA_STATUS_LABEL = {
+  planned: 'Planned',
+  pulling: 'Pulling',
+  solved: 'Solved',
+  failed: 'Failed',
+}
+const TDOA_STATUS_COLOR = {
+  planned: 'var(--text-muted, #888)',
+  pulling: 'var(--yellow, #ffc107)',
+  solved: 'var(--green, #4caf50)',
+  failed: 'var(--red, #f44336)',
+}
+
+// Per-node correlation status (tdoa_attempt_nodes.status) within one attempt.
+const TDOA_NODE_STATUS_LABEL = {
+  requested: 'Pull requested',
+  request_failed: 'Pull failed',
+  reused_existing: 'Reused existing audio',
+  origin: 'Origin (trigger)',
+  arrived: 'Arrived',
+  onset_failed: 'Onset detection failed',
+}
+const TDOA_NODE_STATUS_COLOR = {
+  requested: 'var(--text-muted, #888)',
+  request_failed: 'var(--red, #f44336)',
+  reused_existing: 'var(--text-muted, #888)',
+  origin: 'var(--text-muted, #888)',
+  arrived: 'var(--green, #4caf50)',
+  onset_failed: 'var(--red, #f44336)',
+}
+
+// arrival_us / t_start_us / t_end_us are node-clock epoch microseconds, same
+// units as trigger_events.t_us — reuses tUsToIso() below rather than a
+// second conversion helper.
+
 export default function AnalyticsTab() {
   const [data, setData]   = useState(null)
   const [error, setError] = useState(null)
@@ -333,6 +370,9 @@ export default function AnalyticsTab() {
   const [histogramError, setHistogramError] = useState(null)
   const [rollupData, setRollupData]   = useState(null)
   const [rollupError, setRollupError] = useState(null)
+  const [tdoaAttempts, setTdoaAttempts] = useState(null)
+  const [tdoaError, setTdoaError]       = useState(null)
+  const [openAttemptId, setOpenAttemptId] = useState(null)
   const isMobile = useIsMobile()
 
   // Moment (Dawn/Dusk/etc.) is still shared with the Detections tab — same
@@ -462,7 +502,28 @@ export default function AnalyticsTab() {
     }
   }, [nodeFilter, moment, datePreset, customFrom, customTo])
 
-  // No polling on any of these four — this whole tab is a deliberate query
+  // TDOA attempts — recent orchestration attempts (species_tdoa_pipeline
+  // design, sound-hub/DESIGN.md), no date-range filter for now: attempt
+  // volume is low enough at this project's scale that "most recent 50" is
+  // plenty, unlike the push-event/trigger-diagnostic fetches above which
+  // genuinely need a window to stay useful. Not wired to nodeFilter either
+  // — an attempt spans multiple nodes, so filtering by a single one doesn't
+  // map cleanly onto "which attempts do I want to see".
+  const fetchTdoaAttempts = useCallback(async () => {
+    try {
+      const res = await apiFetch('/tdoa/attempts?limit=50')
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      setTdoaAttempts(await res.json())
+      setTdoaError(null)
+    } catch (err) {
+      setTdoaError(err.message ?? String(err))
+    }
+  }, [])
+
+  // No polling on any of these five — this whole tab is a deliberate query
   // over a chosen node/range, not a live-updating feed. Each refetches on
   // mount and whenever its own dependencies (nodeFilter, moment, datePreset,
   // customFrom, customTo) change, plus the single Refresh button below.
@@ -481,6 +542,10 @@ export default function AnalyticsTab() {
   useEffect(() => {
     fetchRollups()
   }, [fetchRollups])
+
+  useEffect(() => {
+    fetchTdoaAttempts()
+  }, [fetchTdoaAttempts])
 
   const sty = {
     root: { display: 'flex', flexDirection: 'column', gap: 16, padding: 16, overflow: 'auto', flex: 1, minHeight: 0 },
@@ -600,7 +665,7 @@ export default function AnalyticsTab() {
             ...sty.disclosureBtn, padding: '4px 10px',
             border: '1px solid var(--border, #333)', borderRadius: 4,
           }}
-          onClick={() => { fetchAnalytics(); fetchTriggerDiag(); fetchHistogram(); fetchRollups() }}
+          onClick={() => { fetchAnalytics(); fetchTriggerDiag(); fetchHistogram(); fetchRollups(); fetchTdoaAttempts() }}
         >
           Refresh
         </button>
@@ -618,6 +683,12 @@ export default function AnalyticsTab() {
           onClick={() => setActiveSubTab('trigger')}
         >
           Trigger diagnostics
+        </button>
+        <button
+          style={{ ...sty.subTabBtn, ...(activeSubTab === 'tdoa' ? sty.subTabBtnActive : {}) }}
+          onClick={() => setActiveSubTab('tdoa')}
+        >
+          Localisation
         </button>
       </div>
 
@@ -822,6 +893,121 @@ export default function AnalyticsTab() {
             </div>
           )}
         </>
+      )}
+
+      {activeSubTab === 'tdoa' && (
+        <div>
+          <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>
+            Recent TDOA attempts
+          </div>
+          {tdoaError ? (
+            <div style={{
+              fontSize: 12, padding: '6px 10px', borderRadius: 4,
+              background: 'rgba(244,67,54,0.12)', color: 'var(--red, #f44336)',
+            }}>
+              {tdoaError}
+            </div>
+          ) : !tdoaAttempts ? (
+            <div style={sty.empty}>Loading…</div>
+          ) : tdoaAttempts.length === 0 ? (
+            <div style={sty.empty}>No TDOA attempts recorded yet.</div>
+          ) : (
+            <div style={sty.tableWrap}>
+              <table style={sty.table}>
+                <thead>
+                  <tr>
+                    <th style={sty.th}></th>
+                    <th style={sty.th}>{isMobile ? 'Time' : 'Created'}</th>
+                    <th style={sty.th}>Species</th>
+                    <th style={sty.th}>Status</th>
+                    <th style={sty.th}>Nodes arrived</th>
+                    <th style={sty.th}>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tdoaAttempts.map(a => {
+                    const arrivedCount = a.nodes.filter(n => n.status === 'arrived').length
+                    const isOpen = openAttemptId === a.id
+                    const mainRow = (
+                      <tr
+                        key={`${a.id}-main`}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setOpenAttemptId(o => (o === a.id ? null : a.id))}
+                      >
+                        <td style={sty.td}>{isOpen ? '▾' : '▸'}</td>
+                        <td style={sty.td}>{isMobile ? formatTime(a.createdAt) : formatDateTime(a.createdAt)}</td>
+                        <td style={sty.td}>
+                          {a.speciesKey}
+                          {a.usedDefault && (
+                            <span
+                              style={{ color: 'var(--text-muted, #888)', fontSize: 10, marginLeft: 4 }}
+                              title="No species-specific TDOA params configured — used the __default__ fallback"
+                            >
+                              (default params)
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ ...sty.td, color: TDOA_STATUS_COLOR[a.status] ?? sty.td.color }}>
+                          {TDOA_STATUS_LABEL[a.status] ?? a.status}
+                        </td>
+                        <td style={sty.td}>{arrivedCount}/{a.minCorroboratingNodes}</td>
+                        <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
+                          {a.status === 'solved'
+                            ? `E ${a.solvedE.toFixed(2)} N ${a.solvedN.toFixed(2)} Alt ${a.solvedAlt.toFixed(2)} (±${a.solveResidualM.toFixed(2)}m, ${a.solveMethod})`
+                            : a.status === 'failed'
+                              ? (a.failureReason ?? '—')
+                              : '—'}
+                        </td>
+                      </tr>
+                    )
+                    if (!isOpen) return mainRow
+                    return [
+                      mainRow,
+                      <tr key={`${a.id}-detail`}>
+                        <td colSpan={6} style={{ padding: 0, borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
+                          <div style={{ padding: '8px 10px 12px 30px', background: 'var(--surface1, #1e1e1e)' }}>
+                            {a.status === 'solved' && a.solveAmbiguousRoot && (
+                              <div style={{ fontSize: 11, color: 'var(--yellow, #ffc107)', marginBottom: 8 }}>
+                                4-node solve — mirror root also mathematically valid: E {a.solveAmbiguousRoot[0].toFixed(2)} N{' '}
+                                {a.solveAmbiguousRoot[1].toFixed(2)} Alt {a.solveAmbiguousRoot[2].toFixed(2)} (not
+                                auto-resolved — no hint point configured; set min_corroborating_nodes=5 for an
+                                unambiguous solve instead)
+                              </div>
+                            )}
+                            <table style={sty.table}>
+                              <thead>
+                                <tr>
+                                  <th style={sty.th}>Node</th>
+                                  <th style={sty.th}>Role</th>
+                                  <th style={sty.th}>Arrival</th>
+                                  <th style={sty.th}>Error</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {a.nodes.map(n => (
+                                  <tr key={n.id}>
+                                    <td style={{ ...sty.td, ...sty.nodeCol }}>{n.nodeId}</td>
+                                    <td style={{ ...sty.td, color: TDOA_NODE_STATUS_COLOR[n.status] ?? sty.td.color }}>
+                                      {TDOA_NODE_STATUS_LABEL[n.status] ?? n.status}
+                                    </td>
+                                    <td style={sty.td}>
+                                      {n.arrivalUs != null ? formatDateTime(tUsToIso(n.arrivalUs)) : '—'}
+                                    </td>
+                                    <td style={{ ...sty.td, color: 'var(--red, #f44336)' }}>{n.error ?? '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>,
+                    ]
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
     </div>
   )

@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import birdnet_worker, config, db, registry, status_mapper, suntimes
+from . import birdnet_worker, config, db, onset_detection, registry, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
@@ -20,7 +20,8 @@ from .models import (
     NodeAudioSummary, NodeConfigRequest, NodePosition, PositionFromEma,
     NodeRegisterRequest,
     NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
-    SpeciesTdoaParamsRecord, TdoaRequest, TdoaResponse,
+    SpeciesTdoaParamsRecord, TdoaAttemptNodeRecord, TdoaAttemptRecord,
+    TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
     RatioHistogram, RatioHistogramBucket, TriggerHistogramResponse,
     TriggerRollupBucket, TriggerRollupResponse,
@@ -934,6 +935,181 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
         )
 
 
+async def _correlate_attempt_node(
+    *,
+    node_row_id: int,
+    node_id: str,
+    audio_event: dict,
+    onset_detection_method: str,
+) -> None:
+    """TDOA orchestration milestone 3: run onset detection against one
+    node's WAV and record the outcome on its tdoa_attempt_nodes row.
+
+    audio_event is the full audio_events row for this node's contribution —
+    needs 'filename' (to re-open the WAV) and 't_start_us' (to anchor the
+    detected sample index to an absolute node-clock timestamp; the onset
+    index is relative to the start of *this* buffer, not the attempt's
+    padded pull window). Both can be missing/NULL for rows written before
+    milestone 3 (filename) or from older firmware that never sent its
+    actual capture window (t_start_us) — recorded as 'onset_failed' rather
+    than raised, matching this function's other failure modes.
+
+    A single node's correlation failure (missing file, unreadable WAV, no
+    detectable transient) must not abort processing of the others — same
+    defensive per-node style as _pull_or_reuse_one. Never raises.
+
+    Also backfills tdoa_attempt_nodes.audio_event_id from audio_event['id']
+    on every outcome (success or failure) — the 'requested' row created at
+    pull time doesn't have it yet (the audio_event didn't exist until the
+    push landed), so without this the row would never end up linked to the
+    WAV it was actually correlated against.
+    """
+    audio_event_id = audio_event.get("id")
+    filename = audio_event.get("filename")
+    t_start_us = audio_event.get("t_start_us")
+    if not filename or t_start_us is None:
+        error = (
+            "audio_event missing filename" if not filename
+            else "audio_event missing t_start_us"
+        )
+        await db.update_tdoa_attempt_node_result(
+            node_row_id, status="onset_failed", error=error,
+            audio_event_id=audio_event_id,
+        )
+        log.warning(
+            "tdoa correlation — node=%s audio_event_id=%s: %s",
+            node_id, audio_event_id, error,
+        )
+        return
+
+    fpath = os.path.join(_AUDIO_DIR, filename)
+    try:
+        arrival_us = onset_detection.detect_onset_us(
+            onset_detection_method, fpath, t_start_us,
+        )
+    except Exception as exc:
+        await db.update_tdoa_attempt_node_result(
+            node_row_id, status="onset_failed", error=str(exc),
+            audio_event_id=audio_event_id,
+        )
+        log.warning(
+            "tdoa correlation — node=%s onset detection failed: %s",
+            node_id, exc,
+        )
+        return
+
+    await db.update_tdoa_attempt_node_result(
+        node_row_id, status="arrived", arrival_us=arrival_us,
+        audio_event_id=audio_event_id,
+    )
+    log.info(
+        "tdoa correlation — node=%s arrival_us=%.1f (method=%s)",
+        node_id, arrival_us, onset_detection_method,
+    )
+
+
+async def _maybe_solve_tdoa_attempt(attempt_id: int) -> None:
+    """TDOA orchestration milestone 4: check whether a tdoa_attempts row now
+    has enough correlated arrivals to solve, and if so, solve + persist.
+
+    Called from several places — inline during planning (origin/known/reused
+    nodes correlated eagerly, see _plan_tdoa_attempt_inner) and from
+    audio_push() once a freshly-pulled WAV is correlated (dispatched via
+    asyncio.create_task there, same fire-and-forget reasoning as
+    _plan_tdoa_attempt: nothing should block a node's push response on a
+    solver call). Wrapped in its own try/except for the same reason —
+    an exception here must never propagate into a caller that isn't
+    expecting one.
+    """
+    try:
+        await _maybe_solve_tdoa_attempt_inner(attempt_id)
+    except Exception:
+        log.exception("TDOA solve check failed for attempt_id=%s", attempt_id)
+
+
+async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
+    """Actual solve-readiness check and solve for _maybe_solve_tdoa_attempt
+    — see that function's docstring."""
+    attempt = await db.get_tdoa_attempt(attempt_id)
+    if attempt is None or attempt["status"] not in ("planned", "pulling"):
+        # Already solved/failed by a previous call (multiple nodes can
+        # finish correlating close together), or the attempt no longer
+        # exists — nothing to do.
+        return
+
+    nodes = await db.list_tdoa_attempt_nodes(attempt_id)
+    arrived = [n for n in nodes if n["status"] == "arrived" and n["arrival_us"] is not None]
+
+    # min_corroborating_nodes counts the origin as one of the nodes toward
+    # this total (see _plan_tdoa_attempt_inner's origin_counts) — it is NOT
+    # "origin plus this many corroborators". With the field's own default of
+    # 4, that means a 4-node quadratic solve (mirror-root ambiguous, see
+    # tdoa_solver.py) fires by default, not the unambiguous 5+-node
+    # least-squares case — raise min_corroborating_nodes to 5 for that.
+    min_corroborating_nodes = attempt["min_corroborating_nodes"]
+    if len(arrived) < min_corroborating_nodes:
+        return  # still waiting on more nodes to correlate
+
+    positions = await db.list_node_positions()
+    solver_nodes: list[TdoaNode] = []
+    timestamps_us: list[float] = []
+    for row in arrived:
+        pos = positions.get(row["node_id"])
+        if pos is None or any(pos.get(k) is None for k in ("pos_e", "pos_n", "pos_alt")):
+            # Shouldn't happen — every arrived node came from
+            # _approved_positioned_nodes()'s candidate set at planning time
+            # — but a position can change between planning and correlation
+            # (re-survey, node removed). Guard rather than let a stale
+            # lookup crash the solve.
+            continue
+        solver_nodes.append(TdoaNode(
+            node_id=row["node_id"], x=pos["pos_e"], y=pos["pos_n"], z=pos["pos_alt"],
+        ))
+        timestamps_us.append(row["arrival_us"])
+
+    if len(solver_nodes) < min_corroborating_nodes:
+        log.warning(
+            "tdoa attempt id=%s — %d node(s) arrived but only %d have usable "
+            "positions right now, below min_corroborating_nodes=%d — not "
+            "solving yet",
+            attempt_id, len(arrived), len(solver_nodes), min_corroborating_nodes,
+        )
+        return
+
+    # No hint_point is wired in here — nothing in production config defines
+    # one today (only the manual POST /tdoa/solve route accepts one ad-hoc).
+    # A 4-node solve's mirror-root ambiguity is therefore stored for manual
+    # review (solve_ambiguous_json), not auto-resolved. See DESIGN.md gaps.
+    try:
+        result = tdoa_solve(
+            nodes=solver_nodes, timestamps_us=timestamps_us,
+            speed_of_sound=DEFAULT_SPEED_OF_SOUND,
+        )
+    except ValueError as exc:
+        await db.update_tdoa_attempt_status(
+            attempt_id, "failed", failure_reason=f"solver failed: {exc}",
+        )
+        log.warning("tdoa attempt id=%s — solver failed: %s", attempt_id, exc)
+        return
+
+    ambiguous_json = None
+    if result.ambiguous_root is not None:
+        ambiguous_json = json.dumps(list(result.ambiguous_root[:3]))
+
+    await db.persist_tdoa_solution(
+        attempt_id, e=result.x, n=result.y, alt=result.z,
+        residual_m=result.residual, method=result.method,
+        ambiguous_root_json=ambiguous_json,
+    )
+    log.info(
+        "tdoa attempt id=%s — solved: E=%.2f N=%.2f Alt=%.2f residual=%.3fm "
+        "method=%s nodes=%d%s",
+        attempt_id, result.x, result.y, result.z, result.residual,
+        result.method, len(solver_nodes),
+        " (ambiguous root stored, no hint_point configured)" if ambiguous_json else "",
+    )
+
+
 async def _plan_tdoa_attempt(
     *,
     audio_event_id: int,
@@ -947,8 +1123,12 @@ async def _plan_tdoa_attempt(
     detection, look up the species' params, compute the (travel-time-floored)
     pull window, pick candidate neighbour nodes, record the plan as a
     tdoa_attempts row, then issue the actual pull to each candidate neighbour
-    and record per-node outcomes (milestone 2). Correlating the resulting
-    WAVs back to this attempt is milestone 3 — not done here.
+    and record per-node outcomes (milestone 2). Milestone 3 (correlating
+    WAVs already on hand — origin, known reporters, reused-existing
+    neighbours — back to this attempt) also happens inline inside
+    _plan_tdoa_attempt_inner, since those WAVs already exist by planning
+    time; freshly-*pulled* WAVs are correlated later, from audio_push(),
+    when they land.
 
     known_reporter_audio_events maps node_id -> audio_event_id for other
     nodes that detection-coalescing (_register_detection_for_tdoa /
@@ -1006,6 +1186,21 @@ async def _plan_tdoa_attempt_inner(
     margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
     pull_t_start_us = t_start_us - int(margin_pre_s * 1e6)
     pull_t_end_us = t_end_us + int(margin_post_s * 1e6)
+
+    # Fix: pull_window_s (species_tdoa_params) was stored/returned by the API
+    # but never actually read here — the pulled window came only from the
+    # trigger's own detected span plus the travel-time-floored margins
+    # above. pull_window_s sets a floor on the *total* pulled duration
+    # (see its Field description in models.py); expand symmetrically around
+    # the already-computed window if it falls short, so the origin's
+    # detected event stays centered rather than skewing pre/post. Only ever
+    # expands — never shrinks below the travel-time floor already applied.
+    pull_window_us = int(params["pull_window_s"] * 1e6)
+    span_us = pull_t_end_us - pull_t_start_us
+    if span_us < pull_window_us:
+        deficit_us = pull_window_us - span_us
+        pull_t_start_us -= deficit_us // 2
+        pull_t_end_us += deficit_us - deficit_us // 2
 
     # Straggler safety net: this detection's own debounce cluster
     # (_register_detection_for_tdoa) already fired and reached here without
@@ -1070,11 +1265,56 @@ async def _plan_tdoa_attempt_inner(
         travel_time_floor_s,
     )
 
+    # Milestone 3: the origin's own WAV (the push that triggered planning)
+    # already exists — give it a tdoa_attempt_nodes row too (status='origin'
+    # initially) and correlate it immediately, rather than only ever
+    # recording origin_node_id on the attempt row itself. Folding the origin
+    # into this table means milestone 4's corroborating-node count is one
+    # uniform query over tdoa_attempt_nodes instead of origin/known/pulled
+    # being counted three different ways. Only if the origin is itself
+    # approved+positioned (origin_counts==1) — an unpositioned origin can
+    # never contribute a usable arrival time to the solve.
+    if origin_counts and origin_node_id is not None:
+        origin_audio_event = await db.get_audio_event(audio_event_id)
+        origin_row_id = await db.insert_tdoa_attempt_node(
+            attempt_id=attempt_id, node_id=origin_node_id, request_id=None,
+            status="origin", audio_event_id=audio_event_id,
+        )
+        if origin_audio_event is not None:
+            await _correlate_attempt_node(
+                node_row_id=origin_row_id, node_id=origin_node_id,
+                audio_event=origin_audio_event,
+                onset_detection_method=params["onset_detection_method"],
+            )
+        else:
+            # Shouldn't happen — audio_event_id came from the very push that
+            # triggered this attempt — but guard rather than crash planning.
+            await db.update_tdoa_attempt_node_result(
+                origin_row_id, status="onset_failed",
+                error="origin audio_event not found",
+            )
+
     for nid, aeid in known_reporters.items():
-        await db.insert_tdoa_attempt_node(
+        node_row_id = await db.insert_tdoa_attempt_node(
             attempt_id=attempt_id, node_id=nid, request_id=None,
             status="reused_existing", audio_event_id=aeid,
         )
+        # Known reporters' WAVs already exist (grouped into this origin's
+        # debounce cluster before planning even started, or a straggler
+        # attached above) — correlate now instead of waiting on a push that
+        # will never arrive for these.
+        known_audio_event = await db.get_audio_event(aeid)
+        if known_audio_event is not None:
+            await _correlate_attempt_node(
+                node_row_id=node_row_id, node_id=nid,
+                audio_event=known_audio_event,
+                onset_detection_method=params["onset_detection_method"],
+            )
+        else:
+            await db.update_tdoa_attempt_node_result(
+                node_row_id, status="onset_failed",
+                error=f"audio_event id={aeid} not found",
+            )
 
     # If the array doesn't have enough approved+positioned nodes to ever
     # satisfy min_corroborating_nodes, issuing pulls would just leave the
@@ -1111,7 +1351,7 @@ async def _plan_tdoa_attempt_inner(
             nid, pull_t_start_us, pull_t_end_us
         )
         if existing_event is not None:
-            await db.insert_tdoa_attempt_node(
+            node_row_id = await db.insert_tdoa_attempt_node(
                 attempt_id=attempt_id, node_id=nid, request_id=None,
                 status="reused_existing", audio_event_id=existing_event["id"],
             )
@@ -1119,6 +1359,14 @@ async def _plan_tdoa_attempt_inner(
                 "tdoa attempt id=%s — node=%s already has covering "
                 "audio_event id=%s, skipping pull",
                 attempt_id, nid, existing_event["id"],
+            )
+            # WAV already exists (find_covering_audio_event only returns
+            # events whose window fully contains what this attempt needs) —
+            # correlate now instead of waiting on a push that won't come.
+            await _correlate_attempt_node(
+                node_row_id=node_row_id, node_id=nid,
+                audio_event=existing_event,
+                onset_detection_method=params["onset_detection_method"],
             )
             return True
         try:
@@ -1172,6 +1420,14 @@ async def _plan_tdoa_attempt_inner(
         "tdoa attempt id=%s — pulls/reuses resolved for %d/%d remaining neighbours",
         attempt_id, resolved, len(planned_node_ids),
     )
+
+    # Milestone 4: origin + known reporters + reused-existing neighbours were
+    # all correlated inline above (their WAVs already existed) — if that
+    # alone already reached min_corroborating_nodes, nothing will ever call
+    # back into this attempt again (fresh pulls, if any were issued, are the
+    # only other thing that can), so check now rather than only from
+    # audio_push() when a pull lands.
+    await _maybe_solve_tdoa_attempt(attempt_id)
 
 
 @router.post("/audio/push", status_code=200, dependencies=[Depends(require_node)])
@@ -1251,11 +1507,41 @@ async def audio_push(
             "BirdNET re-analysis (species already known from origin detection)",
             requestId, nodeId,
         )
-        await db.insert_audio_event(
+        audio_event_id = await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
             bytes_=len(data), analysis_status="skipped_birdnet_tdoa_pull",
-            t_start_us=tStartUs, t_end_us=tEndUs,
+            t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
         )
+        # Milestone 3: match this arriving pull back to the
+        # tdoa_attempt_nodes row _plan_tdoa_attempt_inner created when it
+        # issued the pull, then correlate + check whether the attempt can
+        # now solve. tStartUs is required to anchor the onset sample index
+        # to an absolute timestamp — older firmware that doesn't send it
+        # leaves the node_row at 'requested' forever (a known gap, not
+        # solved here). Dispatched via asyncio.create_task, not awaited —
+        # same congestion-avoidance reasoning as _plan_tdoa_attempt: a node's
+        # push response must never block on onset detection or a solve.
+        if nodeId is not None and tStartUs is not None:
+            node_row = await db.find_tdoa_attempt_node_by_request_id(requestId)
+            if node_row is not None:
+                async def _correlate_and_maybe_solve() -> None:
+                    await _correlate_attempt_node(
+                        node_row_id=node_row["node_row_id"], node_id=nodeId,
+                        audio_event={
+                            "id": audio_event_id, "filename": fname,
+                            "t_start_us": tStartUs, "t_end_us": tEndUs,
+                        },
+                        onset_detection_method=node_row["onset_detection_method"],
+                    )
+                    await _maybe_solve_tdoa_attempt(node_row["attempt_id"])
+                asyncio.create_task(_correlate_and_maybe_solve())
+            else:
+                log.warning(
+                    "audio push id=%s node=%s — tdoa_corroboration pull with "
+                    "no matching tdoa_attempt_nodes row (hub restarted since "
+                    "the pull was issued?)",
+                    requestId, nodeId,
+                )
         return
 
     if not birdnet_worker.ready():
@@ -1264,7 +1550,7 @@ async def audio_push(
         await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
             bytes_=len(data), analysis_status="skipped_not_ready",
-            t_start_us=tStartUs, t_end_us=tEndUs,
+            t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
         )
         return
 
@@ -1281,7 +1567,7 @@ async def audio_push(
         await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
             bytes_=len(data), analysis_status="error",
-            t_start_us=tStartUs, t_end_us=tEndUs,
+            t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
         )
         return
 
@@ -1299,7 +1585,7 @@ async def audio_push(
         detection_count=len(persisted),
         top_confidence=top.get("confidence") if top else None,
         top_species=top.get("common_name") if top else None,
-        t_start_us=tStartUs, t_end_us=tEndUs,
+        t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
     )
 
     # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
@@ -1805,6 +2091,87 @@ async def solve_tdoa(req: TdoaRequest):
         method=result.method,
         ambiguous_root=ambiguous,
     )
+
+
+def _tdoa_attempt_node_record_from_row(row: dict) -> TdoaAttemptNodeRecord:
+    """Build a TdoaAttemptNodeRecord from a tdoa_attempt_nodes DB row."""
+    return TdoaAttemptNodeRecord(
+        id=row["id"],
+        node_id=row["node_id"],
+        request_id=row["request_id"],
+        status=row["status"],
+        arrival_us=row["arrival_us"],
+        error=row["error"],
+        audio_event_id=row["audio_event_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _tdoa_attempt_record_from_row(
+    row: dict, node_rows: list[dict],
+) -> TdoaAttemptRecord:
+    """Build a TdoaAttemptRecord from a tdoa_attempts row plus its already-
+    fetched tdoa_attempt_nodes rows. solve_ambiguous_json is stored as a
+    JSON array string (see db.persist_tdoa_solution) — parsed back to a
+    tuple here, the same shape solve_tdoa() above returns ad-hoc."""
+    ambiguous = None
+    if row.get("solve_ambiguous_json"):
+        parsed = json.loads(row["solve_ambiguous_json"])
+        ambiguous = (parsed[0], parsed[1], parsed[2])
+
+    return TdoaAttemptRecord(
+        id=row["id"],
+        audio_event_id=row["audio_event_id"],
+        origin_node_id=row["origin_node_id"],
+        species_key=row["species_key"],
+        used_default=bool(row["used_default"]),
+        status=row["status"],
+        t_start_us=row["t_start_us"],
+        t_end_us=row["t_end_us"],
+        min_corroborating_nodes=row["min_corroborating_nodes"],
+        correlation_method=row["correlation_method"],
+        onset_detection_method=row["onset_detection_method"],
+        travel_time_floor_s=row["travel_time_floor_s"],
+        failure_reason=row["failure_reason"],
+        solved_e=row["solved_e"],
+        solved_n=row["solved_n"],
+        solved_alt=row["solved_alt"],
+        solve_residual_m=row["solve_residual_m"],
+        solve_method=row["solve_method"],
+        solve_ambiguous_root=ambiguous,
+        solved_at=row["solved_at"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        nodes=[_tdoa_attempt_node_record_from_row(n) for n in node_rows],
+    )
+
+
+@router.get(
+    "/tdoa/attempts",
+    response_model=list[TdoaAttemptRecord],
+    dependencies=[Depends(require_viewer)],
+)
+async def list_tdoa_attempts(limit: int = Query(default=50, ge=1, le=500)):
+    """List recent TDOA orchestration attempts (species_tdoa_pipeline
+    design, sound-hub/DESIGN.md), newest first, each with its per-node
+    correlation rows embedded.
+
+    Surfaces milestones 1-4 end to end: plan (candidate neighbours, window),
+    execution (pull/reuse per node), correlation (arrival_us per node), and
+    solve result (or failure reason) — previously DB-inspectable only.
+
+    One query per attempt to fetch its nodes (db.list_tdoa_attempt_nodes) —
+    fine at this project's scale (a handful of nodes, infrequent
+    detections); would need batching if attempt volume grows much beyond
+    that.
+    """
+    attempts = await db.list_tdoa_attempts(limit=limit)
+    records = []
+    for attempt in attempts:
+        node_rows = await db.list_tdoa_attempt_nodes(attempt["id"])
+        records.append(_tdoa_attempt_record_from_row(attempt, node_rows))
+    return records
 
 
 # ---------------------------------------------------------------------------
