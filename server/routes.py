@@ -209,6 +209,40 @@ async def change_password(username: str, req: ChangePasswordRequest):
 # Reset on process restart — this is intentional for Phase 1 (test/debug aid).
 _audio_requests: dict[int, dict] = {}
 
+# ---------------------------------------------------------------------------
+# TDOA detection coalescing (see project_soundhub_tdoa_dedup design notes).
+#
+# Multiple nodes hearing the same call independently push detections within
+# milliseconds of each other. Without coalescing, every one of those pushes
+# fires its own _plan_tdoa_attempt, each pulling from every *other* node —
+# an N-node array with one shared event turns into up to N*(N-1) pull
+# requests for what is fundamentally the same acoustic event.
+#
+# Detections are buffered per-species into short-lived "clusters" keyed on
+# species_key, anchored to the first detection's arrival (the debounce is
+# NOT reset by later joiners — a steady trickle of detections must not be
+# able to postpone planning indefinitely). When the debounce elapses, the
+# highest-confidence member becomes the TDOA attempt's origin and every
+# other member is recorded as an already-known corroborator rather than a
+# fresh pull target.
+TDOA_COALESCE_DEBOUNCE_MS = 100
+
+# How close two detections' capture windows must be (in addition to sharing
+# a species_key) to be treated as the same underlying event. Deliberately a
+# fixed constant rather than a per-species travel-time-floor computation —
+# clustering happens synchronously on the request path and shouldn't need an
+# extra DB round trip; the real precision (window padding) already happens
+# later in _plan_tdoa_attempt_inner once travel_time_floor is known.
+TDOA_CLUSTER_OVERLAP_TOLERANCE_MS = 250
+
+# species_key -> list of open clusters. Each cluster:
+#   {"members": [{"node_id", "audio_event_id", "confidence",
+#                 "t_start_us", "t_end_us"}, ...], "task": asyncio.Task}
+# A species can have more than one concurrently-open cluster (e.g. two
+# separate calls of the same species a second apart) — clusters are
+# distinguished by window overlap, not just species_key.
+_pending_clusters: dict[str, list[dict]] = {}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -802,6 +836,104 @@ def _max_pairwise_distance_m(positions: dict[str, tuple[float, float, float]]) -
     return best
 
 
+def _windows_overlap(
+    a_start: int, a_end: int, b_start: int, b_end: int, tolerance_us: int
+) -> bool:
+    """True if [a_start, a_end] and [b_start, b_end] overlap once each is
+    padded by tolerance_us on both sides."""
+    return a_start - tolerance_us <= b_end and b_start - tolerance_us <= a_end
+
+
+def _register_detection_for_tdoa(
+    *,
+    audio_event_id: int,
+    node_id: str,
+    species_key: str,
+    confidence: float,
+    t_start_us: int,
+    t_end_us: int,
+) -> None:
+    """Entry point called from audio_push() for every persisted detection.
+    Buffers the detection into a same-species, overlapping-window cluster
+    rather than planning a TDOA attempt immediately — see the module-level
+    coalescing comment above _pending_clusters for why.
+
+    Synchronous: only mutates the in-memory cluster dict and, for a new
+    cluster, schedules the debounce task. Never touches the DB directly —
+    that all happens once the debounce elapses, in _fire_cluster_after_delay.
+    """
+    member = {
+        "node_id": node_id,
+        "audio_event_id": audio_event_id,
+        "confidence": confidence,
+        "t_start_us": t_start_us,
+        "t_end_us": t_end_us,
+    }
+    tolerance_us = TDOA_CLUSTER_OVERLAP_TOLERANCE_MS * 1000
+    clusters = _pending_clusters.setdefault(species_key, [])
+    for cluster in clusters:
+        if any(
+            _windows_overlap(
+                t_start_us, t_end_us, m["t_start_us"], m["t_end_us"], tolerance_us
+            )
+            for m in cluster["members"]
+        ):
+            cluster["members"].append(member)
+            log.info(
+                "tdoa cluster species=%s joined by node=%s (now %d member(s))",
+                species_key, node_id, len(cluster["members"]),
+            )
+            return
+
+    cluster = {"members": [member], "task": None}
+    cluster["task"] = asyncio.create_task(
+        _fire_cluster_after_delay(species_key, cluster)
+    )
+    clusters.append(cluster)
+    log.info(
+        "tdoa cluster species=%s opened by node=%s, firing in %dms",
+        species_key, node_id, TDOA_COALESCE_DEBOUNCE_MS,
+    )
+
+
+async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
+    """Waits out the debounce, then plans one TDOA attempt covering every
+    detection that joined this cluster. Fire-and-forget, like
+    _plan_tdoa_attempt — wrapped in its own try/except since nothing awaits
+    this task either."""
+    try:
+        await asyncio.sleep(TDOA_COALESCE_DEBOUNCE_MS / 1000)
+
+        clusters = _pending_clusters.get(species_key)
+        if clusters and cluster in clusters:
+            clusters.remove(cluster)
+            if not clusters:
+                _pending_clusters.pop(species_key, None)
+
+        members = cluster["members"]
+        origin = max(members, key=lambda m: m["confidence"])
+        known_reporters = {
+            m["node_id"]: m["audio_event_id"] for m in members if m is not origin
+        }
+        log.info(
+            "tdoa cluster species=%s fired: origin=%s confidence=%.3f, "
+            "%d known reporter(s)",
+            species_key, origin["node_id"], origin["confidence"], len(known_reporters),
+        )
+        await _plan_tdoa_attempt(
+            audio_event_id=origin["audio_event_id"],
+            origin_node_id=origin["node_id"],
+            species_key=species_key,
+            t_start_us=origin["t_start_us"],
+            t_end_us=origin["t_end_us"],
+            known_reporter_audio_events=known_reporters,
+        )
+    except Exception:
+        log.exception(
+            "tdoa cluster firing failed for species=%s", species_key
+        )
+
+
 async def _plan_tdoa_attempt(
     *,
     audio_event_id: int,
@@ -809,6 +941,7 @@ async def _plan_tdoa_attempt(
     species_key: str,
     t_start_us: int,
     t_end_us: int,
+    known_reporter_audio_events: dict[str, int] | None = None,
 ) -> None:
     """TDOA orchestration milestones 1+2: on a persisted top-species
     detection, look up the species' params, compute the (travel-time-floored)
@@ -817,17 +950,23 @@ async def _plan_tdoa_attempt(
     and record per-node outcomes (milestone 2). Correlating the resulting
     WAVs back to this attempt is milestone 3 — not done here.
 
-    Dispatched from audio_push() via asyncio.create_task — fire-and-forget,
-    not awaited — so a slow or unreachable neighbour can never delay the
-    HTTP response to the node whose push triggered this (see
+    known_reporter_audio_events maps node_id -> audio_event_id for other
+    nodes that detection-coalescing (_register_detection_for_tdoa /
+    _fire_cluster_after_delay) already grouped with this origin as the same
+    underlying acoustic event. Those nodes are known corroborators before
+    planning even starts and must not be pulled again.
+
+    Dispatched from _fire_cluster_after_delay via asyncio.create_task —
+    fire-and-forget, not awaited — so a slow or unreachable neighbour can
+    never delay the HTTP response to the node whose push triggered this (see
     project_soundhub_congestion notes: this used to run inline before the
     push response returned). Because nothing awaits this task, the whole
     body is wrapped in its own try/except below rather than relying on a
     caller to catch it — an unhandled exception in a detached task would
     otherwise only surface as an "exception was never retrieved" warning.
     A per-node pull failure (one neighbour unreachable) is caught
-    individually inside _pull_one and does not abort pulls to the remaining
-    neighbours.
+    individually inside _pull_or_reuse_one and does not abort pulls to the
+    remaining neighbours.
     """
     try:
         await _plan_tdoa_attempt_inner(
@@ -836,6 +975,7 @@ async def _plan_tdoa_attempt(
             species_key=species_key,
             t_start_us=t_start_us,
             t_end_us=t_end_us,
+            known_reporter_audio_events=known_reporter_audio_events or {},
         )
     except Exception:
         log.exception(
@@ -851,6 +991,7 @@ async def _plan_tdoa_attempt_inner(
     species_key: str,
     t_start_us: int,
     t_end_us: int,
+    known_reporter_audio_events: dict[str, int],
 ) -> None:
     """Actual planning logic for _plan_tdoa_attempt — see that function's
     docstring. Split out so the outer function can wrap this in a single
@@ -859,18 +1000,53 @@ async def _plan_tdoa_attempt_inner(
 
     candidates = await _approved_positioned_nodes()
     travel_time_floor_s = _max_pairwise_distance_m(candidates) / DEFAULT_SPEED_OF_SOUND
-    planned_node_ids = [nid for nid in candidates if nid != origin_node_id]
     min_corroborating_nodes = params["min_corroborating_nodes"]
-    # origin_node_id is excluded from planned_node_ids (it's the node that
-    # already has the original detection, not a pull target) but it still
-    # counts toward the corroborating total *if* it's itself approved +
-    # positioned — otherwise its own arrival can't be used in the solve.
-    origin_counts = 1 if origin_node_id in candidates else 0
 
     margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
     margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
     pull_t_start_us = t_start_us - int(margin_pre_s * 1e6)
     pull_t_end_us = t_end_us + int(margin_post_s * 1e6)
+
+    # Straggler safety net: this detection's own debounce cluster
+    # (_register_detection_for_tdoa) already fired and reached here without
+    # finding a sibling for it — e.g. a slower ESP-NOW relay hop landed it
+    # after the cluster's 100ms window closed. Rather than plan a second
+    # full attempt for the same event and re-pull neighbours another attempt
+    # is already pulling, fold this origin (and anything coalesced with it)
+    # into whatever attempt is already in flight for this species+window.
+    existing = await db.find_open_tdoa_attempt(species_key, pull_t_start_us, pull_t_end_us)
+    if existing is not None:
+        stragglers = dict(known_reporter_audio_events)
+        if origin_node_id is not None:
+            stragglers[origin_node_id] = audio_event_id
+        for nid, aeid in stragglers.items():
+            await db.insert_tdoa_attempt_node(
+                attempt_id=existing["id"], node_id=nid, request_id=None,
+                status="reused_existing", audio_event_id=aeid,
+            )
+        log.info(
+            "tdoa attempt id=%s — species=%s window=[%d,%d]us already in "
+            "flight, attached %d straggler(s) instead of planning a new "
+            "attempt: %s",
+            existing["id"], species_key, pull_t_start_us, pull_t_end_us,
+            len(stragglers), list(stragglers),
+        )
+        return
+
+    known_reporters = {
+        nid: aeid for nid, aeid in known_reporter_audio_events.items()
+        if nid in candidates
+    }
+    planned_node_ids = [
+        nid for nid in candidates
+        if nid != origin_node_id and nid not in known_reporters
+    ]
+    # origin_node_id and known_reporters are excluded from planned_node_ids
+    # (they already have audio for this event, not pull targets) but both
+    # still count toward the corroborating total *if* they're approved +
+    # positioned — otherwise their arrival can't be used in the solve.
+    origin_counts = 1 if origin_node_id in candidates else 0
+    known_counts = len(known_reporters)
 
     attempt_id = await db.insert_tdoa_attempt(
         audio_event_id=audio_event_id,
@@ -888,22 +1064,29 @@ async def _plan_tdoa_attempt_inner(
     )
     log.info(
         "tdoa attempt id=%s planned: species=%s origin=%s used_default=%s "
-        "neighbours=%s window=[%d,%d]us floor=%.3fs",
+        "known_reporters=%s neighbours=%s window=[%d,%d]us floor=%.3fs",
         attempt_id, species_key, origin_node_id, used_default,
-        planned_node_ids, pull_t_start_us, pull_t_end_us, travel_time_floor_s,
+        list(known_reporters), planned_node_ids, pull_t_start_us, pull_t_end_us,
+        travel_time_floor_s,
     )
+
+    for nid, aeid in known_reporters.items():
+        await db.insert_tdoa_attempt_node(
+            attempt_id=attempt_id, node_id=nid, request_id=None,
+            status="reused_existing", audio_event_id=aeid,
+        )
 
     # If the array doesn't have enough approved+positioned nodes to ever
     # satisfy min_corroborating_nodes, issuing pulls would just leave the
     # attempt stuck at 'pulling' forever (the solver can never run). Fail
     # fast instead of wasting pulls on neighbours that can't help.
-    total_possible = len(planned_node_ids) + origin_counts
+    total_possible = len(planned_node_ids) + origin_counts + known_counts
     if total_possible < min_corroborating_nodes:
         await db.update_tdoa_attempt_status(
             attempt_id, "failed",
             failure_reason=(
                 f"only {total_possible} approved+positioned node(s) available "
-                f"(incl. origin), need >= {min_corroborating_nodes} — "
+                f"(incl. origin + known reporters), need >= {min_corroborating_nodes} — "
                 f"skipping pulls"
             ),
         )
@@ -914,10 +1097,30 @@ async def _plan_tdoa_attempt_inner(
         )
         return
 
-    async def _pull_one(nid: str) -> bool:
-        """Issue one neighbour's pull and record its outcome. Returns True
-        if the pull was successfully issued (not the same as the WAV having
-        arrived yet — see tdoa_attempt_nodes.status='requested')."""
+    async def _pull_or_reuse_one(nid: str) -> bool:
+        """Resolve one remaining candidate neighbour. If it already pushed
+        (or was pulled for a different attempt) audio covering the window
+        this attempt needs, reuse that instead of pulling again — this is
+        the main defence against duplicate pulls when several nodes detect
+        the same event but miss each other's debounce cluster (e.g. two
+        different top-species calls at once — see design discussion).
+        Otherwise issues a fresh pull. Returns True if the node now has (or
+        will have) audio available — i.e. counts toward the corroborating
+        total."""
+        existing_event = await db.find_covering_audio_event(
+            nid, pull_t_start_us, pull_t_end_us
+        )
+        if existing_event is not None:
+            await db.insert_tdoa_attempt_node(
+                attempt_id=attempt_id, node_id=nid, request_id=None,
+                status="reused_existing", audio_event_id=existing_event["id"],
+            )
+            log.info(
+                "tdoa attempt id=%s — node=%s already has covering "
+                "audio_event id=%s, skipping pull",
+                attempt_id, nid, existing_event["id"],
+            )
+            return True
         try:
             request_id = await _issue_sample_pull(
                 nid, pull_t_start_us, pull_t_end_us,
@@ -944,14 +1147,14 @@ async def _plan_tdoa_attempt_inner(
     # time — see project_soundhub_congestion notes: this used to be a
     # sequential loop, so N neighbours meant N round-trips stacked back to
     # back inside a single audio_push request.
-    results = await asyncio.gather(*(_pull_one(nid) for nid in planned_node_ids))
-    issued = sum(1 for ok in results if ok)
+    results = await asyncio.gather(*(_pull_or_reuse_one(nid) for nid in planned_node_ids))
+    resolved = sum(1 for ok in results if ok)
 
-    # Per-node pull failures (caught above) can shrink the final
-    # corroborating count below min_corroborating_nodes even though the
-    # pre-flight check passed — re-check against the actual issued count,
-    # not just "issued > 0", before deciding 'pulling' vs 'failed'.
-    final_count = issued + origin_counts
+    # Per-node failures (caught above) can shrink the final corroborating
+    # count below min_corroborating_nodes even though the pre-flight check
+    # passed — re-check against the actual resolved count, not just
+    # "resolved > 0", before deciding 'pulling' vs 'failed'.
+    final_count = resolved + origin_counts + known_counts
     if final_count >= min_corroborating_nodes:
         await db.update_tdoa_attempt_status(attempt_id, "pulling")
     else:
@@ -960,14 +1163,14 @@ async def _plan_tdoa_attempt_inner(
             failure_reason=(
                 "no neighbour nodes available" if not planned_node_ids
                 else (
-                    f"only {final_count} node(s) succeeded (incl. origin), "
-                    f"need >= {min_corroborating_nodes}"
+                    f"only {final_count} node(s) succeeded (incl. origin + "
+                    f"known reporters), need >= {min_corroborating_nodes}"
                 )
             ),
         )
     log.info(
-        "tdoa attempt id=%s — pulls issued to %d/%d neighbours",
-        attempt_id, issued, len(planned_node_ids),
+        "tdoa attempt id=%s — pulls/reuses resolved for %d/%d remaining neighbours",
+        attempt_id, resolved, len(planned_node_ids),
     )
 
 
@@ -1101,23 +1304,29 @@ async def audio_push(
 
     # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
     # sound-hub/DESIGN.md): a persisted top-species detection with a known
-    # capture window triggers planning. tStartUs/tEndUs absent means older
-    # firmware that doesn't send the actual capture window yet — nothing to
-    # anchor a pull window on, so planning is skipped for this push.
-    if persisted and tStartUs is not None and tEndUs is not None:
-        # Fire-and-forget: _plan_tdoa_attempt catches its own exceptions
-        # (it has to — nothing awaits this task) and neighbour pulls should
-        # never delay the ack we're about to send back to the pushing node.
-        # See project_soundhub_congestion notes: this used to be awaited
-        # inline here, holding the response open for the full sequential
-        # neighbour fan-out.
-        asyncio.create_task(_plan_tdoa_attempt(
+    # capture window and node identity registers into the detection-
+    # coalescing buffer. tStartUs/tEndUs absent means older firmware that
+    # doesn't send the actual capture window yet — nothing to anchor a pull
+    # window on. nodeId absent means the push couldn't be attributed to a
+    # known node — nothing to record as origin/reporter. Either way,
+    # planning is skipped for this push.
+    #
+    # _register_detection_for_tdoa does not plan immediately: it buffers
+    # into a short debounce (TDOA_COALESCE_DEBOUNCE_MS) so that several
+    # nodes detecting the same call within milliseconds of each other
+    # collapse into one planned attempt instead of each firing its own —
+    # see the module-level coalescing comment near _pending_clusters and
+    # project_soundhub_tdoa_dedup notes. This used to call
+    # asyncio.create_task(_plan_tdoa_attempt(...)) directly here.
+    if persisted and tStartUs is not None and tEndUs is not None and nodeId is not None:
+        _register_detection_for_tdoa(
             audio_event_id=audio_event_id,
-            origin_node_id=nodeId,
+            node_id=nodeId,
             species_key=top["common_name"],
+            confidence=top.get("confidence", 0.0),
             t_start_us=tStartUs,
             t_end_us=tEndUs,
-        ))
+        )
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
@@ -1200,6 +1409,14 @@ async def _issue_sample_pull(
         "targetMac": target_mac,
         "createdAt": _now_iso(),
         "purpose": purpose,
+        # Recorded at issue time (not just once the push arrives, as
+        # "nodeId"/"file" etc. are below in audio_push) so an in-flight pull
+        # can eventually be matched against its target node/window without
+        # waiting for the response — groundwork for de-duplicating
+        # concurrently-outstanding pulls; not yet consumed anywhere.
+        "nodeId": node_id,
+        "tStartUs": t_start_us,
+        "tEndUs": t_end_us,
     }
 
     payload = {

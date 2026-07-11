@@ -419,6 +419,26 @@ async def init_db() -> None:
         if "t_end_us" not in audio_event_columns:
             await conn.execute("ALTER TABLE audio_events ADD COLUMN t_end_us INTEGER")
 
+        # Migration: add audio_event_id to tdoa_attempt_nodes if it doesn't
+        # exist yet — lets a per-node row point directly at an existing
+        # audio_events row it reused instead of issuing a fresh pull, for
+        # detection-coalescing (see routes.py _plan_tdoa_attempt_inner).
+        cursor = await conn.execute("PRAGMA table_info(tdoa_attempt_nodes)")
+        tdoa_attempt_node_columns = {row[1] for row in await cursor.fetchall()}
+        if "audio_event_id" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN audio_event_id INTEGER "
+                "REFERENCES audio_events(id)"
+            )
+
+        # Index backing find_covering_audio_event's per-node window lookup —
+        # same rationale as idx_trigger_events_t_us below: audio_events grows
+        # large and this query runs on every TDOA planning pass.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audio_events_node_window "
+            "ON audio_events(node_id, t_start_us, t_end_us)"
+        )
+
         # Migration: trigger_events only had an implicit index on
         # (node_id, t_us) from its UNIQUE constraint, which isn't usable for
         # ORDER BY t_us DESC across all nodes (the common case — no node_id
@@ -1410,18 +1430,24 @@ async def insert_tdoa_attempt_node(
     request_id: int | None,
     status: str,
     error: str | None = None,
+    audio_event_id: int | None = None,
 ) -> int:
     """Insert one per-neighbour pull execution record against a tdoa_attempts
     row (milestone 2). Returns the inserted row's id. request_id is None when
-    the pull could never be issued (error holds why)."""
+    the pull could never be issued (error holds why) or when status=
+    'reused_existing' — audio_event_id is set instead, pointing at the
+    already-known WAV (either the node's own detection that put it in the
+    same debounce cluster as the origin, or a prior push/pull whose window
+    already covered what this attempt needed). See detection-coalescing
+    notes in routes.py _plan_tdoa_attempt_inner."""
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
         cursor = await conn.execute(
             """INSERT INTO tdoa_attempt_nodes
                (attempt_id, node_id, request_id, status, error,
-                created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (attempt_id, node_id, request_id, status, error, now, now),
+                audio_event_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (attempt_id, node_id, request_id, status, error, audio_event_id, now, now),
         )
         await conn.commit()
         return cursor.lastrowid
@@ -1439,3 +1465,61 @@ async def list_tdoa_attempt_nodes(attempt_id: int) -> list[dict]:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def find_covering_audio_event(
+    node_id: str, t_start_us: int, t_end_us: int
+) -> dict | None:
+    """Return the most recent audio_events row for node_id whose stored
+    capture window fully contains [t_start_us, t_end_us], or None.
+
+    Used by TDOA planning (routes.py _plan_tdoa_attempt_inner) to avoid
+    issuing a redundant pull to a node that already pushed (via its own
+    trigger, or a prior pull for a different attempt) audio covering the
+    window this attempt needs — see project_soundhub_tdoa_dedup design
+    notes. Requires t_start_us/t_end_us to be non-NULL on the candidate row,
+    which excludes older rows predating that column and any push where the
+    node didn't report its actual capture window.
+    """
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT * FROM audio_events
+               WHERE node_id = ?
+                 AND t_start_us IS NOT NULL AND t_end_us IS NOT NULL
+                 AND t_start_us <= ? AND t_end_us >= ?
+               ORDER BY id DESC LIMIT 1""",
+            (node_id, t_start_us, t_end_us),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def find_open_tdoa_attempt(
+    species_key: str, t_start_us: int, t_end_us: int
+) -> dict | None:
+    """Return the most recent in-flight tdoa_attempts row (status 'planned'
+    or 'pulling') for species_key whose window overlaps [t_start_us,
+    t_end_us], or None.
+
+    Safety net for a detection that misses its own debounce/coalesce window
+    (routes.py _register_detection_for_tdoa) — e.g. a slow relay hop lands
+    it after the cluster already fired planning. Rather than spawning a
+    second full attempt (and re-pulling neighbours the first attempt is
+    already pulling), the caller attaches the straggler to this attempt
+    instead. Overlap, not containment, is intentional: the straggler's own
+    window need not be identical to the existing attempt's padded pull
+    window, only to describe the same underlying acoustic event.
+    """
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT * FROM tdoa_attempts
+               WHERE species_key = ?
+                 AND status IN ('planned', 'pulling')
+                 AND t_start_us <= ? AND t_end_us >= ?
+               ORDER BY id DESC LIMIT 1""",
+            (species_key, t_end_us, t_start_us),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
