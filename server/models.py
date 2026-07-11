@@ -150,6 +150,13 @@ class TdoaAttemptNodeRecord(BaseModel):
     arrival_us: Optional[float] = Field(default=None, alias="arrivalUs")
     error: Optional[str] = Field(default=None)
     audio_event_id: Optional[int] = Field(default=None, alias="audioEventId")
+    filename: Optional[str] = Field(
+        default=None,
+        description="WAV filename under the hub's audio/ directory — joined "
+                     "in from audio_events via audio_event_id (db.py's "
+                     "list_tdoa_attempt_nodes). Null if this node hasn't "
+                     "correlated (or never will) yet.",
+    )
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 

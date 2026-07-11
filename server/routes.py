@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import birdnet_worker, config, db, onset_detection, registry, status_mapper, suntimes
@@ -2094,7 +2095,9 @@ async def solve_tdoa(req: TdoaRequest):
 
 
 def _tdoa_attempt_node_record_from_row(row: dict) -> TdoaAttemptNodeRecord:
-    """Build a TdoaAttemptNodeRecord from a tdoa_attempt_nodes DB row."""
+    """Build a TdoaAttemptNodeRecord from a tdoa_attempt_nodes DB row — as
+    returned by db.list_tdoa_attempt_nodes(), which already LEFT JOINs in
+    audio_events.filename."""
     return TdoaAttemptNodeRecord(
         id=row["id"],
         node_id=row["node_id"],
@@ -2103,6 +2106,7 @@ def _tdoa_attempt_node_record_from_row(row: dict) -> TdoaAttemptNodeRecord:
         arrival_us=row["arrival_us"],
         error=row["error"],
         audio_event_id=row["audio_event_id"],
+        filename=row["filename"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -2172,6 +2176,43 @@ async def list_tdoa_attempts(limit: int = Query(default=50, ge=1, le=500)):
         node_rows = await db.list_tdoa_attempt_nodes(attempt["id"])
         records.append(_tdoa_attempt_record_from_row(attempt, node_rows))
     return records
+
+
+@router.get("/tdoa/audio/{filename}", dependencies=[Depends(require_viewer)])
+async def get_tdoa_audio(filename: str):
+    """Serve one WAV file from the hub's audio/ directory by filename —
+    backs the Localisation sub-tab's "File" column, e.g. to manually
+    sanity-check a node's audio behind an onset-detection failure.
+
+    filename always comes from a DB-stored value in the UI's normal flow
+    (audio_events.filename, joined in by db.list_tdoa_attempt_nodes), but
+    it's still a request parameter the browser controls — validated against
+    path traversal regardless, rather than trusted just because the normal
+    caller is well-behaved. Two layers: os.path.basename() strips any
+    directory components (rejects anything containing a slash outright),
+    and the resolved path is confirmed to still be inside audio/ (catches
+    a bare '..' or '.', which basename() alone does not — basename('..')
+    is '..').
+
+    Auth note: viewer-level like the rest of the TDOA read surface, but
+    this repo authenticates with a Bearer header (auth.js), not cookies —
+    a plain <a href> wouldn't carry it, and putting the token in the URL
+    instead was deliberately rejected (browser history / server access
+    logs). The frontend fetches this via apiFetch() as a blob and triggers
+    the download client-side instead of linking directly.
+    """
+    safe_name = os.path.basename(filename)
+    if safe_name != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    audio_root = os.path.realpath(_AUDIO_DIR)
+    fpath = os.path.realpath(os.path.join(audio_root, safe_name))
+    if not fpath.startswith(audio_root + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    return FileResponse(fpath, media_type="audio/wav", filename=safe_name)
 
 
 # ---------------------------------------------------------------------------

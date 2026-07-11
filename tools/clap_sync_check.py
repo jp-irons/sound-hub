@@ -161,6 +161,12 @@ def detect_onset(data: np.ndarray, rate: int,
     than the real event of interest — confirmed in practice to occasionally
     mis-pick. See detect_onset_candidates() for the cross-checked version
     used by run_clap_test.py.
+
+    Error message precision bumped 2026-07-11 (kept in sync with
+    sound-hub/server/onset_detection.py, the production port of this
+    function — see its module docstring) after "background=0.0, peak=0.0"
+    from the old 1-decimal format looked like a detector bug when it was
+    actually just a real near-silent buffer with both values below 0.05.
     """
     rms = _energy_envelope(data, rate, window_ms)
     background = np.median(rms)
@@ -168,8 +174,14 @@ def detect_onset(data: np.ndarray, rate: int,
 
     peak_idx = int(np.argmax(rms))
     if rms[peak_idx] <= threshold:
-        raise ValueError(f"no transient found above {threshold_factor}x background RMS "
-                          f"(background={background:.1f}, peak={rms[peak_idx]:.1f})")
+        duration_s = len(data) / rate if rate else 0.0
+        peak_sample = float(np.max(np.abs(data))) if len(data) else 0.0
+        raise ValueError(
+            f"no transient found above {threshold_factor}x background RMS "
+            f"(background={background:.5f}, peak_envelope={rms[peak_idx]:.5f}, "
+            f"peak_sample={peak_sample:.5f}, duration={duration_s:.2f}s, "
+            f"n_samples={len(data)})"
+        )
 
     margin = max(1, int(round(margin_ms * 1e-3 * rate)))
     return _refine_to_steepest_rise(data, peak_idx, margin)

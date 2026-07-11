@@ -82,7 +82,14 @@ def detect_onset(
     the one that matters).
 
     Raises ValueError if even the loudest point in the buffer doesn't look
-    like a real transient.
+    like a real transient. The message includes enough detail (background/
+    peak RMS at higher precision than the old 1-decimal format — which
+    rounded any background/peak below 0.05 to a misleading "0.0" — plus
+    buffer duration and raw peak sample amplitude) to diagnose the failure
+    from the tdoa_attempt_nodes.error column alone, without needing to pull
+    the WAV file itself. Added 2026-07-11 after exactly that ambiguity came
+    up in practice — "background=0.0, peak=0.0" looked like a bug in the
+    onset detector when it was actually a real near-silent buffer.
     """
     rms = _energy_envelope(data, rate, window_ms)
     background = np.median(rms)
@@ -90,9 +97,13 @@ def detect_onset(
 
     peak_idx = int(np.argmax(rms))
     if rms[peak_idx] <= threshold:
+        duration_s = len(data) / rate if rate else 0.0
+        peak_sample = float(np.max(np.abs(data))) if len(data) else 0.0
         raise ValueError(
             f"no transient found above {threshold_factor}x background RMS "
-            f"(background={background:.1f}, peak={rms[peak_idx]:.1f})"
+            f"(background={background:.5f}, peak_envelope={rms[peak_idx]:.5f}, "
+            f"peak_sample={peak_sample:.5f}, duration={duration_s:.2f}s, "
+            f"n_samples={len(data)})"
         )
 
     margin = max(1, int(round(margin_ms * 1e-3 * rate)))

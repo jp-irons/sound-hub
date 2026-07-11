@@ -523,6 +523,34 @@ export default function AnalyticsTab() {
     }
   }, [])
 
+  // Downloads a TDOA node's WAV via apiFetch (so the Bearer token goes in
+  // the Authorization header, same as every other request) rather than a
+  // plain <a href> — this app has no cookie-based session to piggyback on,
+  // and putting the token in the URL instead (query param) was explicitly
+  // ruled out: browser history and server access logs would carry it.
+  // Fetches the file as a blob, then triggers a normal client-side download
+  // via a throwaway object URL/anchor.
+  const downloadTdoaAudio = useCallback(async (filename) => {
+    try {
+      const res = await apiFetch(`/tdoa/audio/${encodeURIComponent(filename)}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setTdoaError(`Could not download ${filename}: ${err.message ?? String(err)}`)
+    }
+  }, [])
+
   // No polling on any of these five — this whole tab is a deliberate query
   // over a chosen node/range, not a live-updating feed. Each refetches on
   // mount and whenever its own dependencies (nodeFilter, moment, datePreset,
@@ -980,6 +1008,7 @@ export default function AnalyticsTab() {
                                   <th style={sty.th}>Node</th>
                                   <th style={sty.th}>Role</th>
                                   <th style={sty.th}>Arrival</th>
+                                  <th style={sty.th}>File</th>
                                   <th style={sty.th}>Error</th>
                                 </tr>
                               </thead>
@@ -993,7 +1022,27 @@ export default function AnalyticsTab() {
                                     <td style={sty.td}>
                                       {n.arrivalUs != null ? formatDateTime(tUsToIso(n.arrivalUs)) : '—'}
                                     </td>
-                                    <td style={{ ...sty.td, color: 'var(--red, #f44336)' }}>{n.error ?? '—'}</td>
+                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
+                                      {n.filename ? (
+                                        <button
+                                          onClick={() => downloadTdoaAudio(n.filename)}
+                                          title="Download this WAV"
+                                          style={{
+                                            background: 'none', border: 'none', padding: 0,
+                                            color: 'var(--accent, #4da6ff)', textDecoration: 'underline',
+                                            cursor: 'pointer', fontFamily: 'monospace', fontSize: 11,
+                                          }}
+                                        >
+                                          {n.filename}
+                                        </button>
+                                      ) : '—'}
+                                    </td>
+                                    <td style={{
+                                      ...sty.td, color: 'var(--red, #f44336)',
+                                      whiteSpace: 'normal', minWidth: 260, maxWidth: 420,
+                                    }}>
+                                      {n.error ?? '—'}
+                                    </td>
                                   </tr>
                                 ))}
                               </tbody>

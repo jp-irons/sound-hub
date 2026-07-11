@@ -1587,13 +1587,21 @@ async def insert_tdoa_attempt_node(
 
 
 async def list_tdoa_attempt_nodes(attempt_id: int) -> list[dict]:
-    """Return all per-neighbour pull records for one TDOA attempt. No API
-    route exposes this yet — DB-inspectable only, same as tdoa_attempts
-    itself at this milestone."""
+    """Return all per-neighbour pull records for one TDOA attempt, each with
+    its linked audio_events.filename joined in (as `filename`) — lets a
+    caller (GET /api/tdoa/attempts) point at the actual WAV on disk without
+    a second round-trip per node. LEFT JOIN because audio_event_id is NULL
+    for a 'requested'/'request_failed' row that hasn't correlated (or never
+    will) yet — those rows correctly get filename=NULL, not excluded.
+    """
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
-            "SELECT * FROM tdoa_attempt_nodes WHERE attempt_id = ? ORDER BY id",
+            """SELECT tan.*, ae.filename AS filename
+               FROM tdoa_attempt_nodes tan
+               LEFT JOIN audio_events ae ON ae.id = tan.audio_event_id
+               WHERE tan.attempt_id = ?
+               ORDER BY tan.id""",
             (attempt_id,),
         )
         rows = await cursor.fetchall()
