@@ -536,6 +536,57 @@ async def init_db() -> None:
         if "freq_band_high_hz" not in tdoa_attempt_columns:
             await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN freq_band_high_hz REAL")
 
+        # Migration: dedupe tdoa_attempt_nodes before adding the UNIQUE index
+        # below (found 2026-07-13 — the straggler-fold-in path in routes.py's
+        # _plan_tdoa_attempt_inner could insert a second 'reused_existing' row
+        # for a node that already had a 'requested'/'origin' row on the same
+        # attempt, from the concurrent neighbour-pull fan-out. Two rows for
+        # one physical node meant _maybe_solve_tdoa_attempt_inner could feed
+        # the same sensor position into the solver twice with two different
+        # timestamps — a real correctness bug, not just a duplicate row.
+        # CREATE UNIQUE INDEX below would fail outright against any
+        # already-existing duplicate, so existing dupes must be resolved
+        # first. Keeps, per (attempt_id, node_id): an 'arrived' row over
+        # anything else (it carries a real correlated arrival_us — never
+        # discard real data), else any non-terminal-failure row over a
+        # 'request_failed'/'onset_failed' one, else the most recently
+        # inserted (highest id). One-time cleanup — insert_tdoa_attempt_node()
+        # below is now dedup-safe going forward, so this should never find
+        # anything to do again after the first run against an existing DB.
+        await conn.execute(
+            """DELETE FROM tdoa_attempt_nodes
+               WHERE id IN (
+                   SELECT id FROM (
+                       SELECT id,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY attempt_id, node_id
+                                  ORDER BY
+                                      CASE WHEN status = 'arrived' THEN 0
+                                           WHEN status NOT IN
+                                               ('request_failed', 'onset_failed')
+                                           THEN 1
+                                           ELSE 2 END,
+                                      id DESC
+                              ) AS rn
+                       FROM tdoa_attempt_nodes
+                   )
+                   WHERE rn > 1
+               )"""
+        )
+        try:
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tdoa_attempt_nodes_attempt_node "
+                "ON tdoa_attempt_nodes(attempt_id, node_id)"
+            )
+        except aiosqlite.OperationalError:
+            log.warning(
+                "Could not create idx_tdoa_attempt_nodes_attempt_node — "
+                "duplicate (attempt_id, node_id) rows may still exist despite "
+                "the cleanup above; insert_tdoa_attempt_node()'s INSERT OR "
+                "IGNORE still prevents new duplicates going forward even "
+                "without this index, just without a DB-level guarantee."
+            )
+
         # Index backing find_covering_audio_event's per-node window lookup —
         # same rationale as idx_trigger_events_t_us below: audio_events grows
         # large and this query runs on every TDOA planning pass.
@@ -1615,24 +1666,54 @@ async def insert_tdoa_attempt_node(
     audio_event_id: int | None = None,
 ) -> int:
     """Insert one per-neighbour pull execution record against a tdoa_attempts
-    row (milestone 2). Returns the inserted row's id. request_id is None when
-    the pull could never be issued (error holds why) or when status=
-    'reused_existing' — audio_event_id is set instead, pointing at the
-    already-known WAV (either the node's own detection that put it in the
-    same debounce cluster as the origin, or a prior push/pull whose window
-    already covered what this attempt needed). See detection-coalescing
-    notes in routes.py _plan_tdoa_attempt_inner."""
+    row (milestone 2). Returns the row's id — either newly inserted, or the
+    id of an already-existing row for this exact (attempt_id, node_id) pair.
+
+    Dedup-safe (added 2026-07-13): a node can only ever have one row per
+    attempt (idx_tdoa_attempt_nodes_attempt_node, a UNIQUE index — see
+    init_db()'s migration). This matters because the same node can reach
+    this function twice for one attempt: once from the concurrent
+    neighbour-pull fan-out (_pull_or_reuse_one), and again if it also
+    self-triggers slightly late and gets folded in as a straggler
+    (_plan_tdoa_attempt_inner's find_open_tdoa_attempt branch). Without this
+    guard, both inserts would succeed, giving one physical node two rows —
+    and if both ever reached status='arrived', the solver would be fed the
+    same sensor position twice with two different timestamps. INSERT OR
+    IGNORE silently drops the second attempt instead; the first row (whichever
+    arrived first) wins and callers get its id back rather than creating a
+    duplicate. This means a losing caller's status/audio_event_id/error are
+    NOT applied — acceptable here since every current call site either
+    doesn't touch the row again (the straggler branch) or immediately
+    overwrites via update_tdoa_attempt_node_result using its own data
+    regardless of which row id it got back (_pull_or_reuse_one's
+    reused_existing branch) — see routes.py.
+
+    request_id is None when the pull could never be issued (error holds why)
+    or when status='reused_existing' — audio_event_id is set instead,
+    pointing at the already-known WAV (either the node's own detection that
+    put it in the same debounce cluster as the origin, or a prior push/pull
+    whose window already covered what this attempt needed). See
+    detection-coalescing notes in routes.py _plan_tdoa_attempt_inner."""
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
         cursor = await conn.execute(
-            """INSERT INTO tdoa_attempt_nodes
+            """INSERT OR IGNORE INTO tdoa_attempt_nodes
                (attempt_id, node_id, request_id, status, error,
                 audio_event_id, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (attempt_id, node_id, request_id, status, error, audio_event_id, now, now),
         )
         await conn.commit()
-        return cursor.lastrowid
+        if cursor.rowcount:
+            return cursor.lastrowid
+        # Ignored — a row for this (attempt_id, node_id) pair already
+        # existed. Fetch and return its id instead of a fresh one.
+        cursor = await conn.execute(
+            "SELECT id FROM tdoa_attempt_nodes WHERE attempt_id = ? AND node_id = ?",
+            (attempt_id, node_id),
+        )
+        row = await cursor.fetchone()
+        return row[0]
 
 
 async def list_tdoa_attempt_nodes(attempt_id: int) -> list[dict]:
