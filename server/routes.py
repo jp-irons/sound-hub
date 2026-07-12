@@ -1629,11 +1629,21 @@ async def audio_push(
         without ever being asked. requestId is absent.
 
     The file is saved to the audio/ directory as
-    audio_{requestId or nodeId}_{srcMac}.wav.  BirdNET analysis then runs
-    against it in a thread pool (model inference is blocking) and any
-    detections are persisted tagged with this node.  Analysis failures are
-    logged, not raised — a node's push is the thing being acknowledged here,
-    not the success of analysis.
+    audio_{requestId}_{srcMac}.wav for a hub-initiated pull (requestId is an
+    effectively-unique random int per pull — see _issue_sample_pull), or
+    audio_{nodeId}_{tStartUs}_{srcMac}.wav for a node-initiated push, keyed
+    by the capture's actual start microsecond rather than bare nodeId.
+    Without tStartUs, every self-trigger from the same node would silently
+    overwrite the previous one's file on disk (found 2026-07-12) — the old
+    audio_events row would still point at that filename, but its contents
+    would now belong to a different, later capture window, corrupting any
+    later onset-detection/TDOA correlation or download against it. Falls
+    back to bare nodeId (today's collision-prone behavior, no worse than
+    before) only if tStartUs is absent — older firmware that doesn't send
+    it. BirdNET analysis then runs against the saved file in a thread pool
+    (model inference is blocking) and any detections are persisted tagged
+    with this node.  Analysis failures are logged, not raised — a node's
+    push is the thing being acknowledged here, not the success of analysis.
 
     Exception: a push whose requestId was issued by _plan_tdoa_attempt
     purely for TDOA corroboration (purpose="tdoa_corroboration" in
@@ -1646,7 +1656,12 @@ async def audio_push(
     """
     data = await request.body()
     os.makedirs(_AUDIO_DIR, exist_ok=True)
-    label = str(requestId) if requestId is not None else (nodeId or "untriggered")
+    if requestId is not None:
+        label = str(requestId)
+    elif tStartUs is not None:
+        label = f"{nodeId or 'unknown'}_{tStartUs}"
+    else:
+        label = nodeId or "untriggered"
     fname = f"audio_{label}_{srcMac.replace(':', '')}.wav"
     fpath = os.path.join(_AUDIO_DIR, fname)
     with open(fpath, "wb") as fh:
