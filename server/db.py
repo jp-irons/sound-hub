@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     hostname         TEXT NOT NULL,
     ip_address       TEXT,
     role             TEXT DEFAULT 'UNKNOWN',
-    discovery_method TEXT DEFAULT 'mdns',
+    discovery_method TEXT DEFAULT 'manual',
     discovered_at    TEXT NOT NULL,
     configured       INTEGER DEFAULT 0,
     approval_status  TEXT DEFAULT 'pending'
@@ -290,9 +290,9 @@ CREATE TABLE IF NOT EXISTS tdoa_attempt_nodes (
 );
 """
 
-# Values for `approval_status`. New nodes land as PENDING — discovery alone
-# (matching the soundcapture-* mDNS hostname pattern) is not enough to admit
-# a node into the active set; an operator decision is required. REJECTED
+# Values for `approval_status`. New nodes land as PENDING — being seen on the
+# network (self-registration or a manual add) is not enough to admit a node
+# into the active set; an operator decision is required. REJECTED
 # nodes are retained (not deleted) so a rejection can be reversed later
 # without the node needing to be re-discovered from scratch.
 PENDING = "pending"
@@ -388,6 +388,19 @@ async def init_db() -> None:
         await conn.execute(
             "UPDATE nodes SET approval_status = ? WHERE approval_status IS NULL",
             (APPROVED,),
+        )
+
+        # Migration: mDNS discovery was removed 2026-07-12 (see project memory
+        # `project-mdns-to-dns-migration`) — 'mdns' is no longer a valid
+        # discovery_method (NodeView's Literal type in models.py no longer
+        # includes it, so leaving old rows as 'mdns' would 500 on any endpoint
+        # that serializes them). Every node in this fleet self-registers on
+        # boot (has done since 2026-06-23), so relabel to 'self_registered'
+        # rather than the more noncommittal 'manual' — it reflects what these
+        # nodes actually do today, not just their original discovery history.
+        await conn.execute(
+            "UPDATE nodes SET discovery_method = 'self_registered' "
+            "WHERE discovery_method = 'mdns'"
         )
 
         # Migration: drop the old UNIQUE partial index that enforced a single

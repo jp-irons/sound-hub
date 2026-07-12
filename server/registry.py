@@ -39,13 +39,13 @@ def _now_iso() -> str:
 
 
 async def upsert_node(node_id: str, hostname: str, ip_address: Optional[str],
-                       discovery_method: str = "mdns") -> None:
+                       discovery_method: str) -> None:
     """Insert a newly-seen node, or refresh its hostname/IP if already known.
 
     New nodes land with `approval_status='pending'` (the column default) —
     being seen on the network is not the same as being trusted. The
     ON CONFLICT branch deliberately does NOT touch `approval_status`, so an
-    operator's approve/reject decision survives repeated mDNS re-discovery
+    operator's approve/reject decision survives repeated re-registration
     of the same node (e.g. after a reboot or Wi-Fi blip).
     """
     async with _write_lock:

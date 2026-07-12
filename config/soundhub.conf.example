@@ -25,20 +25,6 @@ BASE_STATION_IP   = "192.168.101.220"
 BASE_STATION_PORT = 8000
 
 # ---------------------------------------------------------------------------
-# mDNS discovery
-# ---------------------------------------------------------------------------
-
-# SCN nodes advertise over standard _http._tcp; filtered by hostname prefix.
-# Adjust if the node firmware advertises under a different service type or
-# hostname pattern.
-MDNS_SERVICE_TYPE    = "_http._tcp.local."
-MDNS_HOSTNAME_PREFIX = "soundcapture-"
-
-# How often (seconds) to restart the mDNS browser to force a fresh query
-# burst.  See server/discovery.py for the rationale.
-MDNS_RESCAN_INTERVAL_S = 180.0
-
-# ---------------------------------------------------------------------------
 # Status polling
 # ---------------------------------------------------------------------------
 

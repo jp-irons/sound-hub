@@ -300,6 +300,27 @@ export default function App() {
     await refresh()
   }, [refresh])
 
+  // Manual add — the fallback discovery path now that mDNS is retired (see
+  // project memory `project-mdns-to-dns-migration`). Hits the existing
+  // POST /api/nodes/manual, which only succeeds against a node that is
+  // reachable right now (it validates by calling the node's own status API).
+  const addManualNode = useCallback(async (host) => {
+    const res = await apiFetch('/nodes/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host }),
+    })
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch { /* not JSON */ }
+      throw new Error(detail)
+    }
+    await refresh()
+  }, [refresh])
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -485,6 +506,7 @@ export default function App() {
                   onSelect={(id) => { setSelectedId(id) }}
                   onApprove={approveNode}
                   onReject={rejectNode}
+                  onAddNode={addManualNode}
                   isAdmin={isAdmin}
                 />
               )}

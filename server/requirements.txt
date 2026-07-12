@@ -2,7 +2,6 @@ fastapi
 astral
 timezonefinder
 uvicorn[standard]
-zeroconf
 httpx
 aiosqlite
 numpy

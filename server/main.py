@@ -2,7 +2,9 @@
 
 Responsibilities (Phase 1/2 of the basestation plan):
   - Maintain a registry of known SCN nodes (SQLite-backed identity, in-memory live status)
-  - Discover nodes automatically via mDNS (discovery.py)
+  - Nodes find the hub via self-registration on boot (routes.py: /api/nodes/register) or a
+    manual add (/api/nodes/manual) — mDNS discovery was removed 2026-07-12 (see project
+    memory `project-mdns-to-dns-migration`); DNS (.irons.net.au) is now the sole path.
   - Poll known nodes for live status (poller.py)
   - Expose a REST API for the React frontend (routes.py)
 
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import birdnet_worker, db, discovery, poller, routes
+from . import birdnet_worker, db, poller, routes
 from .routes import router
 
 logging.basicConfig(
@@ -40,7 +42,6 @@ async def lifespan(app: FastAPI):
             "POST to http://%s:%s/api/auth/setup to create the admin account.",
             "localhost", 8000,
         )
-    await discovery.start()
     await routes.init_relay_client()
     _poller_task = asyncio.create_task(poller.run())
     # Load BirdNET model in a thread so the event loop is not blocked.

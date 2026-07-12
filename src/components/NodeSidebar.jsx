@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import NodeCard from './NodeCard.jsx'
+import NodeAddModal from './NodeAddModal.jsx'
 
 // Compact row for pending/rejected nodes.
 // Action buttons are only shown to admins.
@@ -58,8 +59,9 @@ function AdmissionRow({ node, onSelect, onApprove, onReject, variant, isAdmin })
   )
 }
 
-export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, onReject, isAdmin = false }) {
+export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, onReject, onAddNode, isAdmin = false }) {
   const [showRejected, setShowRejected] = useState(false)
+  const [addNodeOpen, setAddNodeOpen] = useState(false)
 
   const approved = nodes.filter(n => n.approvalStatus === 'approved')
   const pending  = nodes.filter(n => n.approvalStatus === 'pending')
@@ -85,10 +87,29 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
           Nodes
         </span>
-        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-          {approved.filter(n => n.status === 'online').length}/{approved.length} healthy
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+            {approved.filter(n => n.status === 'online').length}/{approved.length} healthy
+          </span>
+          {isAdmin && (
+            <button
+              className="btn"
+              style={{ fontSize: 10, padding: '2px 8px' }}
+              title="Manually add a node by hostname or IP — it must be reachable now"
+              onClick={() => setAddNodeOpen(true)}
+            >
+              + Add
+            </button>
+          )}
+        </div>
       </div>
+
+      {addNodeOpen && (
+        <NodeAddModal
+          onClose={() => setAddNodeOpen(false)}
+          onSubmit={onAddNode}
+        />
+      )}
 
       {/* Node list */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 6 }}>

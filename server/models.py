@@ -636,7 +636,7 @@ class NodeView(BaseModel):
     hostname: str
     ip_address: Optional[str] = Field(default=None, alias="ipAddress")
     role: str = "UNKNOWN"
-    discovery_method: Literal["mdns", "manual", "self_registered"] = Field(default="mdns", alias="discoveryMethod")
+    discovery_method: Literal["manual", "self_registered"] = Field(default="manual", alias="discoveryMethod")
     approval_status: Literal["pending", "approved", "rejected"] = Field(
         default="pending", alias="approvalStatus"
     )
