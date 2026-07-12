@@ -104,7 +104,6 @@ export default function NodeAddModal({ onClose, onSubmit }) {
                 type="text"
                 autoFocus
                 value={host}
-                placeholder="e.g. soundcapture172.int.irons.net.au"
                 onChange={e => setHost(e.target.value)}
                 style={inputStyle}
               />
