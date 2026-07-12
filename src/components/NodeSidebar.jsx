@@ -95,7 +95,7 @@ export default function NodeSidebar({ nodes, selectedId, onSelect, onApprove, on
             <button
               className="btn"
               style={{ fontSize: 10, padding: '2px 8px' }}
-              title="Manually add a node by hostname or IP — it must be reachable now"
+              title="Manually add a node by hostname or IP — works even if it isn't reachable yet"
               onClick={() => setAddNodeOpen(true)}
             >
               + Add

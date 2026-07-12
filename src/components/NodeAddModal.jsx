@@ -104,17 +104,14 @@ export default function NodeAddModal({ onClose, onSubmit }) {
                 type="text"
                 autoFocus
                 value={host}
-                placeholder="e.g. 192.168.101.150"
+                placeholder="e.g. soundcapture172.int.irons.net.au"
                 onChange={e => setHost(e.target.value)}
                 style={inputStyle}
               />
               <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                The hub will try reaching this node's own status API to seed its
-                live status. If it's not reachable right now — e.g. pre-provisioning
-                a node that isn't deployed yet — it's still added, keyed by whatever
-                you type here. Prefer its hostname over its IP if you know it: that's
-                what a future self-registration would use as its identity too, so
-                they'll converge into the same node instead of creating a duplicate.
+                Prefer its DNS name over a bare IP if you know it. Doesn't need to
+                be reachable now — pre-add a node ahead of it being deployed and
+                it'll pick up live status once it's actually online.
               </span>
             </label>
 
