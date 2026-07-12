@@ -612,6 +612,38 @@ async def push_hub_address_to_node(host: str, client: httpx.AsyncClient | None =
         return False
 
 
+@router.post("/nodes/repush-hub-address", dependencies=[Depends(require_admin)])
+async def repush_hub_address():
+    """Re-push the hub's address to every approved node with a known IP,
+    bypassing the `configured` gate that normally makes
+    push_hub_address_to_node a one-time thing per node (see add_manual_node
+    and poller._poll_one).
+
+    That gate is deliberate day-to-day — nodes shouldn't be re-POSTed every
+    5s poll tick — but it means a node that's already `configured` never
+    notices if BASE_STATION_IP itself changes (e.g. the hub moving to new
+    hardware). This is the manual trigger for that one-off event; wired to
+    the "Re-push hub address to all nodes" button in the Settings tab.
+    """
+    nodes = [n for n in await registry.list_nodes()
+             if n["approval_status"] == db.APPROVED and n["ip_address"]]
+
+    results = await asyncio.gather(
+        *(push_hub_address_to_node(n["ip_address"]) for n in nodes)
+    )
+
+    pushed: list[str] = []
+    failed: list[str] = []
+    for n, ok in zip(nodes, results):
+        if ok:
+            await registry.set_configured(n["id"], True)
+            pushed.append(n["id"])
+        else:
+            failed.append(n["id"])
+
+    return {"pushed": pushed, "failed": failed}
+
+
 # ---------------------------------------------------------------------------
 # Node position management (hub-owned, not proxied to node)
 # ---------------------------------------------------------------------------

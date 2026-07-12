@@ -140,6 +140,13 @@ export default function SettingsTab() {
   const [clearing, setClearing] = useState(false)
 
   // ---------------------------------------------------------------------
+  // Node network — re-push hub address
+  // ---------------------------------------------------------------------
+  const [repushBusy, setRepushBusy] = useState(false)
+  const [repushResult, setRepushResult] = useState(null) // { pushed: [], failed: [] }
+  const [repushError, setRepushError] = useState(null)
+
+  // ---------------------------------------------------------------------
   // Species TDOA params
   // ---------------------------------------------------------------------
   const [speciesParams, setSpeciesParams] = useState([])
@@ -453,6 +460,28 @@ export default function SettingsTab() {
     }
   }
 
+  // Bypasses the one-time `configured` gate server-side (see
+  // routes.push_hub_address_to_node / repush_hub_address) — for the rare
+  // case BASE_STATION_IP itself changes (e.g. hub moved to new hardware),
+  // since already-configured nodes won't notice that on their own.
+  async function handleRepushHubAddress() {
+    setRepushBusy(true)
+    setRepushError(null)
+    setRepushResult(null)
+    try {
+      const res = await apiFetch('/nodes/repush-hub-address', { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
+      }
+      setRepushResult(await res.json())
+    } catch (err) {
+      setRepushError(err.message ?? String(err))
+    } finally {
+      setRepushBusy(false)
+    }
+  }
+
   return (
     <div style={sty.root}>
       <div style={sty.wideSection}>
@@ -546,6 +575,43 @@ export default function SettingsTab() {
               </div>
             )}
           </>
+        )}
+      </div>
+
+      <div style={sty.wideSection}>
+        <div style={sty.label}>Node Network</div>
+        <div style={{ ...sty.hint, marginBottom: 10 }}>
+          Nodes are given the hub's current address automatically when added, or on
+          their first successful poll if added while unreachable. Use this if the
+          hub's own IP has changed (e.g. after moving it to new hardware) — nodes
+          that were already configured won't notice that on their own.
+        </div>
+        <div style={sty.row}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ fontSize: 12, padding: '6px 14px' }}
+            disabled={repushBusy}
+            onClick={handleRepushHubAddress}
+          >
+            {repushBusy ? 'Re-pushing…' : 'Re-push hub address to all nodes'}
+          </button>
+          {repushResult && (
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              Pushed to {repushResult.pushed.length} node{repushResult.pushed.length === 1 ? '' : 's'}
+              {repushResult.failed.length > 0 &&
+                ` — failed for ${repushResult.failed.join(', ')}`}
+            </span>
+          )}
+        </div>
+        {repushError && (
+          <div style={{
+            fontSize: 12, color: 'var(--red, #f44336)',
+            background: 'rgba(244,67,54,0.12)', borderRadius: 4, padding: '6px 8px',
+            marginTop: 10,
+          }}>
+            {repushError}
+          </div>
         )}
       </div>
 
