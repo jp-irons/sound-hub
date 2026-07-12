@@ -18,7 +18,8 @@ from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
-    NodeAudioSummary, NodeConfigRequest, NodePosition, PositionFromEma,
+    NodeAudioSummary, NodeConfigRequest, NodeHeartbeatRequest, NodePosition,
+    PositionFromEma,
     NodeRegisterRequest,
     NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
     SpeciesTdoaParamsRecord, TdoaAttemptNodeRecord, TdoaAttemptRecord,
@@ -498,6 +499,47 @@ async def register_node(req: NodeRegisterRequest, request: Request):
         if n["id"] == node_id:
             return _build_view(n, live, derived)
     raise HTTPException(status_code=500, detail="Node registered but not found")
+
+
+@router.post("/nodes/{node_id}/heartbeat", dependencies=[Depends(require_node)])
+async def node_heartbeat(node_id: str, req: NodeHeartbeatRequest, request: Request):
+    """Periodic plain-HTTP telemetry ping from an already-known node (see
+    firmware's HubHeartbeat, formerly HubRegistrar's registerOnce/register).
+
+    Not a discovery/self-registration path, unlike register_node above —
+    404s if node_id isn't already a known node. Identity/discovery is
+    entirely the hub's job now (see add_manual_node / the 2026-07-12
+    registration-architecture redesign); a node calling this before an
+    operator has added it has nothing to attach telemetry to.
+
+    Still records reachable=True unconditionally on arrival, independent of
+    the HTTPS poller — preserves the one behavior register_node() had that
+    the poller alone can't provide: a node can be plain-HTTP-reachable
+    while its HTTPS status server is specifically degraded (see the .150
+    TLS-reset investigation), and this heartbeat is that node's only
+    channel to still show as reachable during exactly that failure mode.
+
+    Also refreshes ip_address from the request's source IP (see
+    registry.update_node_ip) — a lightweight defence against a node's DHCP
+    lease changing without an operator re-adding it.
+    """
+    node = await registry.get_node(node_id)
+    if node is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown node — add it via POST /api/nodes/manual first",
+        )
+
+    registry.update_live_status(node_id, reachable=True, raw_status=None)
+    registry.update_registration_heap(
+        node_id, req.heap_free_bytes, req.heap_min_free_bytes,
+    )
+    registry.update_registration_sockets(
+        node_id, req.https_active_sockets, req.https_max_sockets,
+    )
+    await registry.update_node_ip(node_id, request.client.host)
+
+    return {"ok": True}
 
 
 @router.delete("/nodes/{node_id}", status_code=204, dependencies=[Depends(require_admin)])

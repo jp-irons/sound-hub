@@ -108,6 +108,23 @@ async def set_configured(node_id: str, configured: bool = True) -> None:
             await conn.commit()
 
 
+async def update_node_ip(node_id: str, ip_address: str) -> None:
+    """Refresh a known node's IP from an inbound heartbeat's source address
+    (see routes.node_heartbeat) — a lightweight defence against a node's
+    DHCP lease changing without an operator re-adding it.
+
+    UPDATE only, deliberately not upsert_node: this never creates a row
+    (heartbeat 404s for an unknown node_id before this is ever called) and
+    doesn't touch identity/approval_status/discovery_method, unlike
+    upsert_node's ON CONFLICT branch.
+    """
+    async with _write_lock:
+        async with db.connect() as conn:
+            await conn.execute("UPDATE nodes SET ip_address = ? WHERE id = ?",
+                               (ip_address, node_id))
+            await conn.commit()
+
+
 # --- Live status (in-memory, volatile) ---
 
 def update_live_status(node_id: str, reachable: bool, raw_status: Optional[dict]) -> None:

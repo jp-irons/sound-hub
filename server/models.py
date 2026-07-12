@@ -70,9 +70,35 @@ class NodeRegisterRequest(BaseModel):
 
     heap_free_bytes/heap_min_free_bytes are optional so older firmware
     builds that don't send them still register fine.
+
+    Superseded by NodeHeartbeatRequest / POST /api/nodes/{id}/heartbeat as
+    of the 2026-07-12 registration-architecture redesign (see
+    project_soundhub_registration_architecture memory) — new firmware
+    (HubHeartbeat, replacing HubRegistrar) no longer calls this route.
+    Left in place, unmodified, until every node in the fleet has been
+    reflashed; only then does removing this become safe cleanup.
     """
     hostname: str
     mac: str
+    heap_free_bytes: Optional[int] = Field(default=None, alias="heapFreeBytes")
+    heap_min_free_bytes: Optional[int] = Field(default=None, alias="heapMinFreeBytes")
+    https_active_sockets: Optional[int] = Field(default=None, alias="httpsActiveSockets")
+    https_max_sockets: Optional[int] = Field(default=None, alias="httpsMaxSockets")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class NodeHeartbeatRequest(BaseModel):
+    """Body for POST /api/nodes/{node_id}/heartbeat — periodic plain-HTTP
+    telemetry ping from an already-known node (firmware's HubHeartbeat,
+    formerly HubRegistrar's registerOnce/register).
+
+    Deliberately carries no identity fields (no hostname/mac, unlike
+    NodeRegisterRequest) — node_id comes from the URL path, and this is not
+    a discovery/self-registration path. See routes.node_heartbeat, which
+    404s for a node_id that isn't already known (added via
+    POST /api/nodes/manual).
+    """
     heap_free_bytes: Optional[int] = Field(default=None, alias="heapFreeBytes")
     heap_min_free_bytes: Optional[int] = Field(default=None, alias="heapMinFreeBytes")
     https_active_sockets: Optional[int] = Field(default=None, alias="httpsActiveSockets")
