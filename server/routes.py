@@ -402,10 +402,34 @@ async def get_node(node_id: str):
 
 @router.post("/nodes/manual", response_model=NodeView, dependencies=[Depends(require_admin)])
 async def add_manual_node(req: ManualNodeRequest):
-    """Fallback discovery path — add a node by hostname or bare IP."""
+    """Add a node by hostname or bare IP — the fallback (and, once
+    self-registration is eventually retired, the only) discovery path.
+
+    Reachability is best-effort, not required. If the node responds to its
+    own status API, its self-reported hostname becomes the canonical node
+    id and live status is seeded immediately — unchanged from before. If it
+    doesn't respond, the node is still added — keyed by whatever string was
+    typed here — so an operator can pre-provision a node that isn't
+    deployed/powered on yet. It picks up real status automatically the next
+    time the poller (or a self-registration, while that still exists)
+    successfully reaches it.
+
+    Trade-off vs the old hard-reachability requirement: a typo'd
+    hostname/IP no longer errors immediately — it just sits as a quiet,
+    permanently-unreachable pending node until noticed and removed (see
+    DELETE /nodes/{node_id} below). And identity only converges with a
+    later self-registration if the *hostname* (not the IP) is what's typed
+    here — self-registration keys nodes by their self-reported hostname, so
+    typing an IP creates a separate, stale row once the real node registers
+    under its own name.
+    """
     host = req.host.strip()
     if not host:
         raise HTTPException(status_code=400, detail="host must not be empty")
+
+    node_id = host
+    status_json = None
+    reachable = False
 
     url = f"{config.NODE_SCHEME}://{host}/app/api/status"
     try:
@@ -413,17 +437,15 @@ async def add_manual_node(req: ManualNodeRequest):
             resp = await client.get(url, timeout=config.STATUS_TIMEOUT_S)
             resp.raise_for_status()
             status_json = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not reach a node status API at '{host}': {exc}",
-        )
-
-    node_id = (status_json.get("node") or {}).get("hostname") or host
+        node_id = (status_json.get("node") or {}).get("hostname") or host
+        reachable = True
+    except (httpx.HTTPError, ValueError):
+        pass  # not reachable right now — still add it, see docstring above
 
     await registry.upsert_node(node_id=node_id, hostname=node_id, ip_address=host,
                                discovery_method="manual")
-    registry.update_live_status(node_id, reachable=True, raw_status=status_json)
+    if reachable:
+        registry.update_live_status(node_id, reachable=True, raw_status=status_json)
 
     for n, live, derived in await _mapped_nodes():
         if n["id"] == node_id:

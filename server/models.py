@@ -57,8 +57,12 @@ class AudioSampleRequest(BaseModel):
 
 
 class ManualNodeRequest(BaseModel):
-    """Body for POST /api/nodes/manual — fallback discovery path."""
-    host: str  # hostname or bare IP; we hit http://<host>/app/api/status to validate
+    """Body for POST /api/nodes/manual — fallback discovery path.
+
+    Reachability is best-effort — see routes.py:add_manual_node for the
+    hostname-vs-IP identity trade-off if the node isn't reachable yet.
+    """
+    host: str  # hostname or bare IP; used as node id verbatim if unreachable
 
 
 class NodeRegisterRequest(BaseModel):

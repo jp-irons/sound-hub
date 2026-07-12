@@ -15,13 +15,16 @@ const inputStyle = {
 
 // Manual add — the fallback discovery path now that mDNS is retired (see
 // project memory `project-mdns-to-dns-migration`). Hits the backend's
-// POST /api/nodes/manual, which reaches out to the node's own status API to
-// validate it before adding — so this only succeeds against a node that's
-// actually reachable right now.
+// POST /api/nodes/manual. Reachability is best-effort: the node is added
+// either way, so a node that isn't deployed/powered on yet can be
+// pre-provisioned — onSubmit resolves with the added node, and if it isn't
+// reachable yet we show a note instead of just closing, so it's clear the
+// add succeeded rather than silently doing nothing.
 export default function NodeAddModal({ onClose, onSubmit }) {
   const [host, setHost] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [addedOffline, setAddedOffline] = useState(false)
 
   useEffect(() => {
     function handleKey(e) {
@@ -38,8 +41,12 @@ export default function NodeAddModal({ onClose, onSubmit }) {
     setError(null)
     setSubmitting(true)
     try {
-      await onSubmit(trimmed)
-      onClose()
+      const node = await onSubmit(trimmed)
+      if (node && !node.reachable) {
+        setAddedOffline(true)
+      } else {
+        onClose()
+      }
     } catch (err) {
       setError(err.message ?? String(err))
     } finally {
@@ -75,44 +82,64 @@ export default function NodeAddModal({ onClose, onSubmit }) {
           >×</button>
         </div>
 
-        <form onSubmit={e => { e.preventDefault(); handleSubmit() }} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
-            <span style={{ color: 'var(--text-secondary)' }}>Hostname or IP</span>
-            <input
-              type="text"
-              autoFocus
-              value={host}
-              placeholder="e.g. 192.168.101.150"
-              onChange={e => setHost(e.target.value)}
-              style={inputStyle}
-            />
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              The hub will reach out to this node's own status API to confirm it's
-              there before adding it — it must be reachable right now.
-            </span>
-          </label>
-
-          {error && (
+        {addedOffline ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{
-              fontSize: 12, color: 'var(--red)',
-              background: 'var(--red-dim)', borderRadius: 4, padding: '6px 8px',
+              fontSize: 12, color: 'var(--yellow)',
+              background: 'var(--yellow-dim)', borderRadius: 4, padding: '8px 10px',
             }}>
-              {error}
+              Added — not yet reachable. It'll show live status once it comes online.
             </div>
-          )}
-
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button type="button" className="btn" onClick={onClose} disabled={submitting}>
-              Cancel
-            </button>
-            <button
-              type="submit" className="btn btn-primary"
-              disabled={submitting || !trimmed}
-            >
-              {submitting ? 'Adding…' : 'Add'}
-            </button>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-primary" onClick={onClose}>
+                Close
+              </button>
+            </div>
           </div>
-        </form>
+        ) : (
+          <form onSubmit={e => { e.preventDefault(); handleSubmit() }} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+              <span style={{ color: 'var(--text-secondary)' }}>Hostname or IP</span>
+              <input
+                type="text"
+                autoFocus
+                value={host}
+                placeholder="e.g. 192.168.101.150"
+                onChange={e => setHost(e.target.value)}
+                style={inputStyle}
+              />
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                The hub will try reaching this node's own status API to seed its
+                live status. If it's not reachable right now — e.g. pre-provisioning
+                a node that isn't deployed yet — it's still added, keyed by whatever
+                you type here. Prefer its hostname over its IP if you know it: that's
+                what a future self-registration would use as its identity too, so
+                they'll converge into the same node instead of creating a duplicate.
+              </span>
+            </label>
+
+            {error && (
+              <div style={{
+                fontSize: 12, color: 'var(--red)',
+                background: 'var(--red-dim)', borderRadius: 4, padding: '6px 8px',
+              }}>
+                {error}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn" onClick={onClose} disabled={submitting}>
+                Cancel
+              </button>
+              <button
+                type="submit" className="btn btn-primary"
+                disabled={submitting || !trimmed}
+              >
+                {submitting ? 'Adding…' : 'Add'}
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   )

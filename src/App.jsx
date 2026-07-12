@@ -302,8 +302,11 @@ export default function App() {
 
   // Manual add — the fallback discovery path now that mDNS is retired (see
   // project memory `project-mdns-to-dns-migration`). Hits the existing
-  // POST /api/nodes/manual, which only succeeds against a node that is
-  // reachable right now (it validates by calling the node's own status API).
+  // POST /api/nodes/manual. Reachability is best-effort on the backend —
+  // an unreachable node is still added (pre-provisioning ahead of it being
+  // deployed/powered on), so the returned node's `reachable` field is what
+  // tells the caller (NodeAddModal) whether to show a "not yet reachable"
+  // note instead of just closing silently.
   const addManualNode = useCallback(async (host) => {
     const res = await apiFetch('/nodes/manual', {
       method: 'POST',
@@ -318,7 +321,9 @@ export default function App() {
       } catch { /* not JSON */ }
       throw new Error(detail)
     }
+    const node = await res.json()
     await refresh()
+    return node
   }, [refresh])
 
   // -------------------------------------------------------------------------
