@@ -221,8 +221,16 @@ class NodeConfigRequest(BaseModel):
 
     All fields optional: the operator edits a subset and we forward only
     what they changed (exclude_unset), mirroring the node-side handler.
+
+    hub_address is also pushed automatically (not just via manual admin
+    edits) — see routes.push_hub_address_to_node, called from
+    add_manual_node and poller._poll_one so a node never needs hubAddress
+    configured by hand via its own web UI. It's kept here too so an admin
+    can manually re-push it (e.g. if BASE_STATION_IP ever changes) through
+    the same /configure route used for isBroker.
     """
     is_broker: Optional[bool] = Field(default=None, alias="isBroker")
+    hub_address: Optional[str] = Field(default=None, alias="hubAddress")
 
     model_config = ConfigDict(populate_by_name=True)
 

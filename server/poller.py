@@ -9,7 +9,7 @@ import logging
 
 import httpx
 
-from . import config, db, registry
+from . import config, db, registry, routes
 
 log = logging.getLogger("sound_hub.poller")
 
@@ -48,6 +48,13 @@ async def _poll_one(client: httpx.AsyncClient, node: dict) -> None:
         # whether the node's GPS is still locked, so the EMA/settle-timer
         # state is just left as-is rather than treated as a lock loss.
         registry.update_gps_ema(node_id, raw_status)
+        # First successful poll of a node that hasn't been given the hub's
+        # address yet (covers add_manual_node's pre-provisioned/unreachable-
+        # at-add-time path — see routes.push_hub_address_to_node). Reuses
+        # this poll's client rather than opening a new connection.
+        if not node["configured"]:
+            if await routes.push_hub_address_to_node(ip_address, client=client):
+                await registry.set_configured(node_id, True)
     except (httpx.HTTPError, ValueError) as exc:
         # Distinguish failure classes in the log — previously every cause
         # (timeout, connection refused, TLS error, non-2xx status, bad JSON)

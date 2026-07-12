@@ -446,6 +446,12 @@ async def add_manual_node(req: ManualNodeRequest):
                                discovery_method="manual")
     if reachable:
         registry.update_live_status(node_id, reachable=True, raw_status=status_json)
+        # Push the hub's own address so the node doesn't need hubAddress set
+        # by hand via its own web UI. Best-effort — a failure here just
+        # leaves `configured` unset and poller._poll_one retries it on the
+        # node's next successful poll.
+        if await push_hub_address_to_node(host):
+            await registry.set_configured(node_id, True)
 
     for n, live, derived in await _mapped_nodes():
         if n["id"] == node_id:
@@ -571,6 +577,39 @@ async def configure_node(node_id: str, req: NodeConfigRequest):
             status_code=502,
             detail=f"Could not push config to node: {exc}",
         )
+
+
+async def push_hub_address_to_node(host: str, client: httpx.AsyncClient | None = None) -> bool:
+    """POST the hub's own address to a node's /app/api/node-config, so the
+    node doesn't need hubAddress configured by hand via its own web UI.
+
+    Called from add_manual_node (right after a reachable add) and from
+    poller._poll_one (the first successful poll of a not-yet-configured
+    node — covers the pre-provisioned/unreachable-at-add-time case). Both
+    callers gate on registry's `configured` flag and only call this once
+    per node, so this deliberately does not get re-sent on every poll.
+
+    Best-effort, like the rest of this file's node-facing calls — returns
+    False rather than raising, so a failure just leaves `configured` unset
+    and the next successful reach retries it.
+
+    client lets poller.py pass its own long-lived AsyncClient instead of
+    paying for a fresh connection every 5s poll tick; omitted, a short-lived
+    one is opened here instead (matching add_manual_node/configure_node).
+    """
+    url = f"{config.NODE_SCHEME}://{host}/app/api/node-config"
+    body = {"hubAddress": config.BASE_STATION_IP}
+    try:
+        if client is not None:
+            resp = await client.post(url, json=body, timeout=config.STATUS_TIMEOUT_S)
+        else:
+            async with httpx.AsyncClient(verify=False) as one_off:
+                resp = await one_off.post(url, json=body, timeout=config.STATUS_TIMEOUT_S)
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        log.warning("push_hub_address_to_node: failed for %s: %s", host, exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
