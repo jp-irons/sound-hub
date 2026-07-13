@@ -66,3 +66,42 @@ prototype for the open question in `sound-capture-node/CLAUDE.md`: *"Can
 ESP32-S3 nodes adequately determine criteria for audio segments that should
 be sent to base station?"* The actual on-node trigger design (band-limited
 energy + spectral flux) is tracked separately and isn't implemented yet.
+
+## Species TDOA parameter portability
+
+`species_tdoa_params` (per-species onset threshold, bandpass band, pull
+window, etc. — see `docs/tdoa-correlation-design-notes.md`) only exists as
+live rows in `sound_hub.db`, which is git-ignored and local to whichever
+machine runs the hub. Since the acoustic-band portion of this tuning is a
+property of the species, not the deployment, it's worth keeping portable
+across instances rather than re-deriving it from scratch every time.
+`../config/species_tdoa_params.json` is the version-controlled snapshot for
+that — the DB stays the live working copy (edited via the Settings tab, or
+`PUT /species-tdoa-params/{key}`), and the JSON file is a checkpoint of it.
+
+### `export_species_params.py`
+
+Dumps every species row (except the `__default__` sentinel — that one's
+already owned by `FACTORY_DEFAULT_SPECIES_PARAMS` in `server/db.py`) from a
+local `sound_hub.db` to `config/species_tdoa_params.json` by default. Run
+this after tuning a species in the UI, then `git diff` the result before
+committing — this script is the "prepare a commit" step, not a live sync.
+
+### `import_species_params.py`
+
+Reads `config/species_tdoa_params.json` and upserts its rows into a target
+`sound_hub.db`. Existing species are skipped by default (so seeding a fresh
+instance, or backfilling species an instance hasn't configured yet, can't
+silently clobber local hand-tuning that's drifted from the tracked file) —
+pass `--overwrite` to force a species back to the tracked file's values.
+`--dry-run` previews changes; a y/N prompt guards the actual write.
+
+### Caveat: not everything in the file is equally portable
+
+`freq_band_low_hz`/`freq_band_high_hz` come from the reference recordings'
+own spectral content and should transfer well across properties.
+`onset_threshold_factor` is shaped by the *source recording's* background
+noise floor (close-mic'd Xeno-canto clips read very differently from a
+distant field mic) — treat the tracked file's threshold values as a
+starting point for a new deployment, not a validated one, until checked
+against that deployment's own pulled TDOA attempts.

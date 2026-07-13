@@ -1,0 +1,34 @@
+{
+  "notes": "freq_band_low_hz/freq_band_high_hz are derived from reference-recording acoustics and should transfer across deployments. onset_threshold_factor reflects the source recordings' own background noise, not any particular property's field SNR -- treat it as a starting point and re-validate against real pulled TDOA attempts before trusting it long-term. See tools/README.md.",
+  "schema_version": 1,
+  "species": {
+    "Noisy Miner": {
+      "correlation_method": "gcc_phat",
+      "enabled": true,
+      "freq_band_high_hz": 7500,
+      "freq_band_low_hz": 1500,
+      "min_corroborating_nodes": 4,
+      "notes": "Derived 2026-07-13 from 7 Xeno-canto samples via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. onset_threshold_factor not yet validated against real pulled attempts on this property.",
+      "onset_detection_method": "global_peak",
+      "onset_threshold_factor": 5.0,
+      "pull_window_s": 3.0,
+      "updated_at": "2026-07-13T00:00:00+00:00",
+      "window_margin_post_ms": 500.0,
+      "window_margin_pre_ms": 500.0
+    },
+    "Torresian Crow": {
+      "correlation_method": "gcc_phat",
+      "enabled": true,
+      "freq_band_high_hz": 6600,
+      "freq_band_low_hz": 1000,
+      "min_corroborating_nodes": 4,
+      "notes": "Derived 2026-07-13 from 9 Xeno-canto samples via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. onset_threshold_factor not yet validated against real pulled attempts on this property.",
+      "onset_detection_method": "global_peak",
+      "onset_threshold_factor": 5.0,
+      "pull_window_s": 3.0,
+      "updated_at": "2026-07-13T00:00:00+00:00",
+      "window_margin_post_ms": 500.0,
+      "window_margin_pre_ms": 500.0
+    }
+  }
+}
