@@ -170,14 +170,23 @@ class TdoaAttemptNodeRecord(BaseModel):
     inside TdoaAttemptRecord by GET /api/tdoa/attempts.
 
     status is one of 'requested' | 'request_failed' | 'push_failed' |
-    'reused_existing' | 'origin' | 'arrived' | 'onset_failed' — see
-    tdoa_attempt_nodes' schema comment in db.py for what each means at every
-    stage of milestones 2-3. push_failed (added 2026-07-13) is distinct from
-    request_failed: request_failed means the hub couldn't even issue the
-    pull (node unreachable, broker down); push_failed means the pull was
-    issued and the node acknowledged receiving it, but then explicitly
-    reported it couldn't deliver the audio (AckStatus ERROR/UNAVAILABLE via
-    POST /audio/ack) — see routes.py audio_ack().
+    'reused_existing' | 'origin' | 'pulled' | 'arrived' | 'onset_failed' —
+    see tdoa_attempt_nodes' schema comment in db.py for what each means at
+    every stage of milestones 2-3. push_failed (added 2026-07-13) is
+    distinct from request_failed: request_failed means the hub couldn't get
+    a real answer at all (node unreachable, timed out, not in registry
+    yet); push_failed means the node itself explicitly said no (window
+    unavailable / capture not running via direct pull's 404/503 — see
+    _fetch_audio_direct — or, for the still-extant ESP-NOW manual-sample
+    path, AckStatus ERROR/UNAVAILABLE via POST /audio/ack, see
+    routes.py audio_ack()). pulled (added 2026-07-13) is the direct-HTTP
+    counterpart of reused_existing/origin — a transient pre-correlation
+    label set the instant a direct pull's WAV is saved, immediately
+    overwritten by _correlate_attempt_node with 'arrived' or
+    'onset_failed'; requested/request_failed's ESP-NOW-only 'still waiting'
+    window doesn't apply to it, since a direct pull is synchronous — see
+    _fetch_audio_direct's docstring for the full ESP-NOW-vs-direct-pull
+    picture.
     """
     id: int
     node_id: str = Field(alias="nodeId")

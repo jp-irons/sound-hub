@@ -29,4 +29,5 @@ auth_secret.key
 config/soundhub.conf
 config/nginx.conf
 
-# 
+# sample files
+test/samples/

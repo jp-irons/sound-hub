@@ -1190,6 +1190,117 @@ async def _correlate_attempt_node(
     )
 
 
+async def _fetch_audio_direct(
+    node_id: str, t_start_us: int, t_end_us: int,
+) -> tuple[bytes, int, int]:
+    """Pull a WAV directly from a node's GET /app/api/audio/pull, bypassing
+    the ESP-NOW AudioRequest/broker-relay round trip entirely (see
+    AudioPullHandler.hpp on the node side, sound-capture-node).
+
+    Replaces _issue_sample_pull for TDOA corroboration pulls only (see
+    _pull_or_reuse_one below) — ESP-NOW's bare, no-retry broadcast for both
+    the request and the node's ack was the root cause of nodes silently
+    stuck at 'Pull requested' forever (172/174 incident, 2026-07-13); an
+    ordinary HTTP GET/response has none of that failure mode — a stuck node
+    now surfaces as a normal timeout. The manual POST /nodes/{id}/sample
+    admin route is untouched and still goes via _issue_sample_pull/ESP-NOW;
+    that route's own polling contract (GET /audio/requests/{id}) would need
+    a separate, deliberate migration.
+
+    Returns (wav_bytes, actual_start_us, actual_end_us). The actual* values
+    come from the node's X-Actual-Start-Us/X-Actual-End-Us response headers
+    — AudioStore may have clipped to whatever it actually retained, same
+    reason the old ESP-NOW push path carried these in its query string —
+    falling back to the requested window if a header is missing (older
+    firmware/unexpected response).
+
+    Raises HTTPException. status_code is deliberately partitioned so
+    callers can distinguish "the node told us no" from "we couldn't even
+    ask": 404/503 are the node's own response (window unavailable / capture
+    not running); everything else (424/502/504) means the request itself
+    never got a real answer from the node.
+      424 — node not in registry, no known IP yet, or relay client not
+            initialised (nothing was sent)
+      404 — node responded 404 (window unavailable — ring evicted, SD gap,
+            or snapshot slot busy)
+      503 — node responded 503 (capture not running — broker role, or
+            AudioCapture failed to start)
+      502 — node responded with any other unexpected status
+      504 — request timed out, or the node was unreachable (connection
+            refused/reset, DNS failure, etc.)
+    """
+    node = await registry.get_node(node_id)
+    if node is None or not node.get("ip_address"):
+        raise HTTPException(
+            status_code=424, detail="Node not found or IP not yet known",
+        )
+    if _relay_client is None:
+        raise HTTPException(status_code=424, detail="Relay client not initialised")
+
+    url = (
+        f"{config.NODE_SCHEME}://{node['ip_address']}/app/api/audio/pull"
+        f"?tStartUs={t_start_us}&tEndUs={t_end_us}"
+    )
+    try:
+        resp = await _relay_client.get(
+            url, timeout=getattr(config, "AUDIO_PULL_TIMEOUT_S", 15.0),
+        )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail=f"pull timed out: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=504, detail=f"node unreachable: {exc}") from exc
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=resp.text or "window unavailable")
+    if resp.status_code == 503:
+        raise HTTPException(status_code=503, detail=resp.text or "capture not running")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502, detail=f"node returned HTTP {resp.status_code}",
+        )
+
+    actual_start_us = int(resp.headers.get("X-Actual-Start-Us", t_start_us))
+    actual_end_us = int(resp.headers.get("X-Actual-End-Us", t_end_us))
+    return resp.content, actual_start_us, actual_end_us
+
+
+async def _save_direct_pull_audio(
+    node_id: str, wav_bytes: bytes, t_start_us: int, t_end_us: int,
+) -> dict:
+    """Save a directly-pulled WAV and record its audio_events row, mirroring
+    the purpose == "tdoa_corroboration" branch of audio_push() below.
+    BirdNET re-analysis is always skipped here — a direct pull exists
+    purely to corroborate a species the origin detection already
+    identified, so re-running the model on it would be wasted CPU (same
+    reasoning that branch documents).
+
+    Filenamed audio_pull_{node_id}_{t_start_us}.wav — tStartUs-keyed per
+    the 2026-07-12 filename-collision fix (see audio_push's docstring). No
+    srcMac component: a direct pull has no MAC anywhere in its path (one
+    fewer moving part than the ESP-NOW path needed — no wifiMac lookup, no
+    broker resolution).
+
+    Returns a dict shaped the way _correlate_attempt_node expects
+    (id/filename/t_start_us/t_end_us) — not a full audio_events DB row.
+    """
+    os.makedirs(_AUDIO_DIR, exist_ok=True)
+    fname = f"audio_pull_{node_id}_{t_start_us}.wav"
+    fpath = os.path.join(_AUDIO_DIR, fname)
+    with open(fpath, "wb") as fh:
+        fh.write(wav_bytes)
+
+    audio_event_id = await db.insert_audio_event(
+        node_id=node_id, triggered=False, received_at=_now_iso(),
+        bytes_=len(wav_bytes), analysis_status="skipped_birdnet_tdoa_pull",
+        t_start_us=t_start_us, t_end_us=t_end_us, filename=fname,
+    )
+    log.info("direct pull node=%s — %d bytes -> %s", node_id, len(wav_bytes), fname)
+    return {
+        "id": audio_event_id, "filename": fname,
+        "t_start_us": t_start_us, "t_end_us": t_end_us,
+    }
+
+
 async def _maybe_solve_tdoa_attempt(attempt_id: int) -> None:
     """TDOA orchestration milestone 4: check whether a tdoa_attempts row now
     has enough correlated arrivals to solve, and if so, solve + persist.
@@ -1592,25 +1703,49 @@ async def _plan_tdoa_attempt_inner(
                 freq_band_high_hz=params["freq_band_high_hz"],
             )
             return True
+        # Direct hub->node HTTP pull (see _fetch_audio_direct) — replaces the
+        # old ESP-NOW AudioRequest/broker-relay round trip for this path.
+        # Synchronous: the WAV is in hand (or the failure is known) by the
+        # time this returns, so there is no more 'requested' status waiting
+        # on a push/ack that may never arrive — every outcome below is
+        # terminal on the first attempt.
         try:
-            request_id = await _issue_sample_pull(
+            wav_bytes, actual_start_us, actual_end_us = await _fetch_audio_direct(
                 nid, pull_t_start_us, pull_t_end_us,
-                purpose="tdoa_corroboration",
             )
-        except Exception as exc:
-            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        except HTTPException as exc:
+            # 404/503 are the node's own response (it heard the request and
+            # explicitly said no) — push_failed. Everything else (424/502/
+            # 504) means the request never got a real answer from the node
+            # at all — request_failed. See _fetch_audio_direct's docstring.
+            node_status = "push_failed" if exc.status_code in (404, 503) else "request_failed"
             await db.insert_tdoa_attempt_node(
                 attempt_id=attempt_id, node_id=nid, request_id=None,
-                status="request_failed", error=str(detail),
+                status=node_status, error=str(exc.detail),
             )
             log.warning(
-                "tdoa attempt id=%s — pull to node=%s failed: %s",
-                attempt_id, nid, detail,
+                "tdoa attempt id=%s — direct pull to node=%s failed (%s): %s",
+                attempt_id, nid, exc.status_code, exc.detail,
             )
             return False
-        await db.insert_tdoa_attempt_node(
-            attempt_id=attempt_id, node_id=nid, request_id=request_id,
-            status="requested",
+
+        audio_event = await _save_direct_pull_audio(
+            nid, wav_bytes, actual_start_us, actual_end_us,
+        )
+        node_row_id = await db.insert_tdoa_attempt_node(
+            attempt_id=attempt_id, node_id=nid, request_id=None,
+            status="pulled", audio_event_id=audio_event["id"],
+        )
+        # WAV is already on disk — correlate immediately, same as the
+        # reused_existing/known_reporters/origin branches above, instead of
+        # waiting for a push that will never come.
+        await _correlate_attempt_node(
+            node_row_id=node_row_id, node_id=nid,
+            audio_event=audio_event,
+            onset_detection_method=params["onset_detection_method"],
+            onset_threshold_factor=params["onset_threshold_factor"],
+            freq_band_low_hz=params["freq_band_low_hz"],
+            freq_band_high_hz=params["freq_band_high_hz"],
         )
         return True
 

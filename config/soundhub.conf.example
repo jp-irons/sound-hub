@@ -37,6 +37,15 @@ STATUS_POLL_INTERVAL_S = 5.0
 # offline just because the poller's own outbound call was delayed.
 STATUS_TIMEOUT_S       = 7.0
 
+# Timeout for direct hub->node audio pulls (GET /app/api/audio/pull — see
+# _fetch_audio_direct in routes.py). Deliberately more generous than
+# STATUS_TIMEOUT_S: this call transfers an actual WAV payload over WiFi
+# (tens to a few hundred KB for a typical TDOA pull window), not a small
+# status JSON blob. routes.py falls back to 15.0 if this key is absent, so
+# adding it here is optional but recommended — tune based on observed pull
+# latency once direct pulls are live.
+AUDIO_PULL_TIMEOUT_S   = 15.0
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------

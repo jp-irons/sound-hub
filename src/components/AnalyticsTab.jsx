@@ -345,6 +345,7 @@ const TDOA_NODE_STATUS_LABEL = {
   push_failed: 'Node reported failure',
   reused_existing: 'Reused existing audio',
   origin: 'Origin (trigger)',
+  pulled: 'Pulled (direct)',
   arrived: 'Arrived',
   onset_failed: 'Onset detection failed',
 }
@@ -354,6 +355,7 @@ const TDOA_NODE_STATUS_COLOR = {
   push_failed: 'var(--red, #f44336)',
   reused_existing: 'var(--text-muted, #888)',
   origin: 'var(--text-muted, #888)',
+  pulled: 'var(--text-muted, #888)',
   arrived: 'var(--green, #4caf50)',
   onset_failed: 'var(--red, #f44336)',
 }
