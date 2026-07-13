@@ -276,7 +276,12 @@ CREATE TABLE IF NOT EXISTS tdoa_attempts (
 -- attempt's onset_detection_method against the file named by
 -- audio_events.filename. NULL until correlation succeeds. status reflects
 -- the outcome: 'arrived' (arrival_us set), 'onset_failed' (WAV present but
--- no usable transient found, or filename missing — error holds why).
+-- no usable transient found, or filename missing — error holds why),
+-- 'push_failed' (added 2026-07-13: the node acked the pull but explicitly
+-- reported it couldn't deliver the audio — uplink busy/transport failure,
+-- or the window had already aged out of its PSRAM ring buffer — see
+-- routes.py audio_ack(). Distinct from 'request_failed', which means the
+-- hub never got the pull out in the first place.)
 CREATE TABLE IF NOT EXISTS tdoa_attempt_nodes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     attempt_id  INTEGER NOT NULL REFERENCES tdoa_attempts(id) ON DELETE CASCADE,

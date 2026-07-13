@@ -169,9 +169,15 @@ class TdoaAttemptNodeRecord(BaseModel):
     """One node's contribution to a tdoa_attempts row — returned nested
     inside TdoaAttemptRecord by GET /api/tdoa/attempts.
 
-    status is one of 'requested' | 'request_failed' | 'reused_existing' |
-    'origin' | 'arrived' | 'onset_failed' — see tdoa_attempt_nodes' schema
-    comment in db.py for what each means at every stage of milestones 2-3.
+    status is one of 'requested' | 'request_failed' | 'push_failed' |
+    'reused_existing' | 'origin' | 'arrived' | 'onset_failed' — see
+    tdoa_attempt_nodes' schema comment in db.py for what each means at every
+    stage of milestones 2-3. push_failed (added 2026-07-13) is distinct from
+    request_failed: request_failed means the hub couldn't even issue the
+    pull (node unreachable, broker down); push_failed means the pull was
+    issued and the node acknowledged receiving it, but then explicitly
+    reported it couldn't deliver the audio (AckStatus ERROR/UNAVAILABLE via
+    POST /audio/ack) — see routes.py audio_ack().
     """
     id: int
     node_id: str = Field(alias="nodeId")

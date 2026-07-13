@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import birdnet_worker, config, db, onset_detection, registry, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
+    AckStatus,
     ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeAudioSummary, NodeConfigRequest, NodeHeartbeatRequest, NodePosition,
@@ -910,6 +911,21 @@ async def audio_ack(body: AudioAckBody):
     The broker calls this after hearing an AudioAckMsg from a node over ESP-NOW.
     Updates the in-memory request tracker so callers polling
     GET /audio/requests/{id} see the latest status.
+
+    ERROR/UNAVAILABLE also resolve this pull's tdoa_attempt_nodes row, if it
+    has one (found 2026-07-13 — until now this ack was logged and otherwise
+    discarded, so a node that correctly reported "uplink busy" or "not in my
+    ring buffer" looked identical in the Localisation UI to a node that never
+    responded at all: status stuck at 'requested' forever, no error text).
+    Both are genuine terminal signals from the node's own AckStatus doc
+    comments — UNAVAILABLE is "do not retry", ERROR is "hub may retry" but
+    won't be retried automatically today — so both end this pull the same
+    way here. DONE isn't handled specially: it arrives after the node's
+    actual audio POST has already landed (or is landing) via audio_push(),
+    which is what actually correlates and marks 'arrived' — this ack is
+    redundant with that for TDOA purposes. Dispatched via asyncio.create_task,
+    not awaited, matching audio_push()'s corroboration-pull pattern — a
+    broker's ack POST must never block on a DB write + solve-readiness check.
     """
     entry = _audio_requests.setdefault(body.request_id, {"acks": []})
     entry["acks"].append({
@@ -918,6 +934,24 @@ async def audio_ack(body: AudioAckBody):
         "at": _now_iso(),
     })
     log.info("audio ack id=%s status=%s from %s", body.request_id, body.status, body.src_mac)
+
+    if body.status in (AckStatus.ERROR, AckStatus.UNAVAILABLE):
+        async def _resolve_failed_pull() -> None:
+            node_row = await db.find_tdoa_attempt_node_by_request_id(body.request_id)
+            if node_row is None:
+                return  # not a TDOA-corroboration pull (e.g. a manual sample request)
+            if node_row["node_status"] != "requested":
+                return  # already resolved by another path — don't clobber it
+            await db.update_tdoa_attempt_node_result(
+                node_row["node_row_id"], status="push_failed",
+                error=f"node ack: {body.status.value}",
+            )
+            log.info(
+                "tdoa attempt id=%s — node=%s pull resolved as failed via ack: %s",
+                node_row["attempt_id"], node_row["node_id"], body.status.value,
+            )
+            await _maybe_solve_tdoa_attempt(node_row["attempt_id"])
+        asyncio.create_task(_resolve_failed_pull())
 
 
 async def _approved_positioned_nodes() -> dict[str, tuple[float, float, float]]:
@@ -1196,7 +1230,36 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
     # least-squares case — raise min_corroborating_nodes to 5 for that.
     min_corroborating_nodes = attempt["min_corroborating_nodes"]
     if len(arrived) < min_corroborating_nodes:
-        return  # still waiting on more nodes to correlate
+        # Not enough arrivals yet — but if enough of the *rest* have already
+        # terminally failed (request_failed/onset_failed/push_failed) that
+        # min_corroborating_nodes can no longer be reached even if every
+        # still-pending node comes good, this attempt is dead: fail it now
+        # instead of leaving it at 'pulling' forever waiting on corroborators
+        # that already told the hub they're never arriving (see audio_ack's
+        # push_failed handling, added 2026-07-13 alongside this check — the
+        # two are meant to work together: without this, marking individual
+        # nodes failed still left the attempt itself stuck).
+        terminal_failed = [
+            n for n in nodes
+            if n["status"] in ("request_failed", "onset_failed", "push_failed")
+        ]
+        still_possible = len(nodes) - len(terminal_failed)
+        if still_possible < min_corroborating_nodes:
+            await db.update_tdoa_attempt_status(
+                attempt_id, "failed",
+                failure_reason=(
+                    f"only {len(arrived)} node(s) arrived and {len(terminal_failed)} "
+                    f"failed — at most {still_possible} could still arrive, need "
+                    f">= {min_corroborating_nodes}"
+                ),
+            )
+            log.info(
+                "tdoa attempt id=%s — failed: %d arrived, %d failed, only %d "
+                "could still arrive < min_corroborating_nodes=%d",
+                attempt_id, len(arrived), len(terminal_failed), still_possible,
+                min_corroborating_nodes,
+            )
+        return  # still waiting on more nodes to correlate (or just failed above)
 
     positions = await db.list_node_positions()
     solver_nodes: list[TdoaNode] = []

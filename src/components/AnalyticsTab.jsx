@@ -342,6 +342,7 @@ const TDOA_STATUS_COLOR = {
 const TDOA_NODE_STATUS_LABEL = {
   requested: 'Pull requested',
   request_failed: 'Pull failed',
+  push_failed: 'Node reported failure',
   reused_existing: 'Reused existing audio',
   origin: 'Origin (trigger)',
   arrived: 'Arrived',
@@ -350,6 +351,7 @@ const TDOA_NODE_STATUS_LABEL = {
 const TDOA_NODE_STATUS_COLOR = {
   requested: 'var(--text-muted, #888)',
   request_failed: 'var(--red, #f44336)',
+  push_failed: 'var(--red, #f44336)',
   reused_existing: 'var(--text-muted, #888)',
   origin: 'var(--text-muted, #888)',
   arrived: 'var(--green, #4caf50)',
