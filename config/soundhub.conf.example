@@ -46,6 +46,14 @@ STATUS_TIMEOUT_S       = 7.0
 # latency once direct pulls are live.
 AUDIO_PULL_TIMEOUT_S   = 15.0
 
+# Port for direct hub->node audio pulls (see AUDIO_PULL_TIMEOUT_S above).
+# Plain HTTP, not NODE_SCHEME/443 — the node serves this on its own
+# dedicated, unauthenticated plain-HTTP server (AudioPullServer,
+# sound-capture-node), separate from its HTTPS UI server, so a long pull
+# can't block that node's UI page loads. routes.py falls back to 8080 if
+# this key is absent.
+NODE_AUDIO_PULL_PORT   = 8080
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------

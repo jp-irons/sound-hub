@@ -1237,8 +1237,14 @@ async def _fetch_audio_direct(
     if _relay_client is None:
         raise HTTPException(status_code=424, detail="Relay client not initialised")
 
+    # Plain HTTP, not config.NODE_SCHEME (https) — this endpoint runs on its
+    # own dedicated, unauthenticated plain-HTTP server (AudioPullServer,
+    # sound-capture-node) on a separate port, kept off the node's HTTPS UI
+    # server so a long pull can't block page loads there. See
+    # AudioPullServer's class comment (sound-capture-node/main/app).
+    pull_port = getattr(config, "NODE_AUDIO_PULL_PORT", 8080)
     url = (
-        f"{config.NODE_SCHEME}://{node['ip_address']}/app/api/audio/pull"
+        f"http://{node['ip_address']}:{pull_port}/app/api/audio/pull"
         f"?tStartUs={t_start_us}&tEndUs={t_end_us}"
     )
     try:
