@@ -521,7 +521,7 @@ export default function App() {
       )}
 
       {tab === 'detections' && <DetectionsTab />}
-      {tab === 'analytics' && authState === 'authenticated' && <AnalyticsTab />}
+      {tab === 'analytics' && authState === 'authenticated' && <AnalyticsTab isAdmin={isAdmin} />}
       {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}
       {tab === 'settings' && isAdmin && <SettingsTab />}

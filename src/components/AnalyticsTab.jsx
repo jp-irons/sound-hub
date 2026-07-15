@@ -364,7 +364,7 @@ const TDOA_NODE_STATUS_COLOR = {
 // units as trigger_events.t_us — reuses tUsToIso() below rather than a
 // second conversion helper.
 
-export default function AnalyticsTab() {
+export default function AnalyticsTab({ isAdmin = false }) {
   const [data, setData]   = useState(null)
   const [error, setError] = useState(null)
   const [nodeFilter, setNodeFilter] = useState('')
@@ -377,6 +377,15 @@ export default function AnalyticsTab() {
   const [tdoaAttempts, setTdoaAttempts] = useState(null)
   const [tdoaError, setTdoaError]       = useState(null)
   const [openAttemptId, setOpenAttemptId] = useState(null)
+  // Admin-only bulk-delete controls (clearing meaningless bench-test
+  // results — see the 2026-07-15 discussion). Separate from the Push
+  // events tab's customFrom/customTo above: those pick a *view* range,
+  // these pick a *delete* range and are never sent as part of the normal
+  // fetch — only from deleteTdoaRange() below, on explicit confirmation.
+  const [tdoaDeleteFrom, setTdoaDeleteFrom] = useState('')
+  const [tdoaDeleteTo, setTdoaDeleteTo]     = useState('')
+  const [tdoaDeleting, setTdoaDeleting]     = useState(false)
+  const [tdoaDeleteResult, setTdoaDeleteResult] = useState(null)
   const isMobile = useIsMobile()
 
   // Moment (Dawn/Dusk/etc.) is still shared with the Detections tab — same
@@ -526,6 +535,67 @@ export default function AnalyticsTab() {
       setTdoaError(err.message ?? String(err))
     }
   }, [])
+
+  // Admin-only: bulk-delete TDOA attempts (+ orphaned corroboration audio)
+  // created within [tdoaDeleteFrom, tdoaDeleteTo]. Mirrors the server's own
+  // "at least one bound required" rule client-side so the confirm dialog
+  // never fires for a request the backend would reject anyway.
+  const deleteTdoaRange = useCallback(async () => {
+    if (!tdoaDeleteFrom && !tdoaDeleteTo) {
+      setTdoaDeleteResult({ error: 'Enter a start date, end date, or both.' })
+      return
+    }
+    const fromIso = tdoaDeleteFrom ? new Date(tdoaDeleteFrom).toISOString() : null
+    const toIso   = tdoaDeleteTo ? new Date(tdoaDeleteTo).toISOString() : null
+    const label = fromIso && toIso ? `between ${tdoaDeleteFrom} and ${tdoaDeleteTo}`
+      : fromIso ? `from ${tdoaDeleteFrom} onward`
+      : `up to ${tdoaDeleteTo}`
+    if (!window.confirm(`Permanently delete all TDOA attempts ${label}? This cannot be undone.`)) {
+      return
+    }
+    setTdoaDeleting(true)
+    setTdoaDeleteResult(null)
+    try {
+      const params = new URLSearchParams()
+      if (fromIso) params.set('from', fromIso)
+      if (toIso) params.set('to', toIso)
+      const res = await apiFetch(`/tdoa/attempts?${params}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      const result = await res.json()
+      setTdoaDeleteResult({
+        message: `Deleted ${result.attemptsDeleted} attempt(s), ${result.audioFilesDeleted} audio file(s).`,
+      })
+      fetchTdoaAttempts()
+    } catch (err) {
+      setTdoaDeleteResult({ error: err.message ?? String(err) })
+    } finally {
+      setTdoaDeleting(false)
+    }
+  }, [tdoaDeleteFrom, tdoaDeleteTo, fetchTdoaAttempts])
+
+  // Admin-only: delete one attempt — the per-row counterpart to the range
+  // delete above, for pruning a single bad result without needing a date
+  // boundary that cleanly separates it from attempts worth keeping.
+  const deleteTdoaOne = useCallback(async (attempt) => {
+    if (!window.confirm(
+      `Permanently delete this TDOA attempt (${attempt.speciesKey}, ${formatDateTime(attempt.createdAt)})? This cannot be undone.`,
+    )) {
+      return
+    }
+    try {
+      const res = await apiFetch(`/tdoa/attempts/${attempt.id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      fetchTdoaAttempts()
+    } catch (err) {
+      setTdoaDeleteResult({ error: err.message ?? String(err) })
+    }
+  }, [fetchTdoaAttempts])
 
   // Downloads a TDOA node's WAV via apiFetch (so the Bearer token goes in
   // the Authorization header, same as every other request) rather than a
@@ -932,6 +1002,43 @@ export default function AnalyticsTab() {
           <div style={{ ...sty.sectionLabel, marginBottom: 8 }}>
             Recent TDOA attempts
           </div>
+
+          {isAdmin && (
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8,
+              marginBottom: 12, padding: '8px 10px', borderRadius: 6,
+              background: 'var(--surface1, #1e1e1e)', border: '1px solid var(--border, #333)',
+            }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted, #888)' }}>Delete attempts:</span>
+              <input
+                type="datetime-local" value={tdoaDeleteFrom}
+                onChange={e => setTdoaDeleteFrom(e.target.value)}
+                style={sty.input} title="From (optional if To is set)"
+              />
+              <span style={{ fontSize: 11, color: 'var(--text-muted, #888)' }}>to</span>
+              <input
+                type="datetime-local" value={tdoaDeleteTo}
+                onChange={e => setTdoaDeleteTo(e.target.value)}
+                style={sty.input} title="To (optional if From is set)"
+              />
+              <button
+                className="btn"
+                disabled={tdoaDeleting || (!tdoaDeleteFrom && !tdoaDeleteTo)}
+                onClick={deleteTdoaRange}
+              >
+                {tdoaDeleting ? 'Deleting…' : 'Delete range'}
+              </button>
+              {tdoaDeleteResult && (
+                <span style={{
+                  fontSize: 11,
+                  color: tdoaDeleteResult.error ? 'var(--red, #f44336)' : 'var(--text-muted, #888)',
+                }}>
+                  {tdoaDeleteResult.error ?? tdoaDeleteResult.message}
+                </span>
+              )}
+            </div>
+          )}
+
           {tdoaError ? (
             <div style={{
               fontSize: 12, padding: '6px 10px', borderRadius: 4,
@@ -954,6 +1061,7 @@ export default function AnalyticsTab() {
                     <th style={sty.th}>Status</th>
                     <th style={sty.th}>Nodes arrived</th>
                     <th style={sty.th}>Result</th>
+                    {isAdmin && <th style={sty.th}></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -990,13 +1098,27 @@ export default function AnalyticsTab() {
                               ? (a.failureReason ?? '—')
                               : '—'}
                         </td>
+                        {isAdmin && (
+                          <td style={sty.td}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteTdoaOne(a) }}
+                              title="Delete this attempt"
+                              style={{
+                                background: 'none', border: 'none', padding: '2px 6px',
+                                color: 'var(--red, #f44336)', cursor: 'pointer', fontSize: 12,
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     )
                     if (!isOpen) return mainRow
                     return [
                       mainRow,
                       <tr key={`${a.id}-detail`}>
-                        <td colSpan={6} style={{ padding: 0, borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
+                        <td colSpan={isAdmin ? 7 : 6} style={{ padding: 0, borderBottom: '1px solid var(--border-faint, #2a2a2a)' }}>
                           <div style={{ padding: '8px 10px 12px 30px', background: 'var(--surface1, #1e1e1e)' }}>
                             {a.status === 'solved' && a.solveAmbiguousRoot && (
                               <div style={{ fontSize: 11, color: 'var(--yellow, #ffc107)', marginBottom: 8 }}>

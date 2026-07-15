@@ -2599,6 +2599,71 @@ async def get_tdoa_audio(filename: str):
     return FileResponse(fpath, media_type="audio/wav", filename=safe_name)
 
 
+async def _delete_tdoa_attempts_and_files(attempt_ids: list[int]) -> dict:
+    """Shared core for both delete routes below: removes the given
+    tdoa_attempts/tdoa_attempt_nodes rows (+ orphaned corroboration
+    audio_events, see db.delete_tdoa_attempts's docstring for exactly what
+    counts as safe to drop), then unlinks the corresponding WAV files from
+    disk. DB deletion and file unlinking are deliberately two separate
+    steps — a file already gone (or a permissions hiccup) shouldn't be
+    treated as a reason to fail the whole request; the DB is the source of
+    truth here, so a partial-file-cleanup outcome is logged, not raised.
+    """
+    result = await db.delete_tdoa_attempts(attempt_ids)
+    audio_files_deleted = 0
+    for fname in result["filenames_deleted"]:
+        fpath = os.path.join(_AUDIO_DIR, fname)
+        try:
+            os.remove(fpath)
+            audio_files_deleted += 1
+        except OSError as exc:
+            log.warning("tdoa attempt cleanup — failed to remove %s: %s", fpath, exc)
+    log.info(
+        "tdoa attempts deleted: %d attempt(s), %d audio file(s) — ids=%s",
+        result["attempts_deleted"], audio_files_deleted, attempt_ids,
+    )
+    return {
+        "attemptsDeleted": result["attempts_deleted"],
+        "audioFilesDeleted": audio_files_deleted,
+    }
+
+
+@router.delete("/tdoa/attempts", dependencies=[Depends(require_admin)])
+async def delete_tdoa_attempts_in_range(
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+):
+    """Bulk-delete TDOA attempts (+ their corroboration-only audio) with
+    created_at in [from, to]. Both bounds are optional but at least one is
+    required — an unbounded "delete everything" is almost certainly a
+    mistake, not an intended bulk action, so it's rejected outright rather
+    than silently doing the maximal thing.
+
+    Built for clearing bench-test noise (nodes physically co-located but
+    configured with their eventual field positions, producing 'solved'
+    attempts with meaningless coordinates — see the 2026-07-15 discussion)
+    without losing real BirdNET detection history from the same period —
+    see _delete_tdoa_attempts_and_files/db.delete_tdoa_attempts for exactly
+    what is and isn't touched.
+    """
+    if from_ts is None and to_ts is None:
+        raise HTTPException(
+            status_code=422,
+            detail="At least one of 'from' or 'to' is required",
+        )
+    attempt_ids = await db.resolve_tdoa_attempt_ids_in_range(from_ts, to_ts)
+    return await _delete_tdoa_attempts_and_files(attempt_ids)
+
+
+@router.delete("/tdoa/attempts/{attempt_id}", dependencies=[Depends(require_admin)])
+async def delete_tdoa_attempt(attempt_id: int):
+    """Delete a single TDOA attempt (+ its corroboration-only audio) —
+    the per-row counterpart to the bulk range-delete above, for pruning one
+    bad result without needing a date boundary that cleanly separates it
+    from attempts you want to keep."""
+    return await _delete_tdoa_attempts_and_files([attempt_id])
+
+
 # ---------------------------------------------------------------------------
 # Species TDOA params (CRUDable — see SpeciesTdoaParams docstring for why)
 # ---------------------------------------------------------------------------

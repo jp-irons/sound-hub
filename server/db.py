@@ -1589,6 +1589,106 @@ async def list_tdoa_attempts(limit: int = 200) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+async def resolve_tdoa_attempt_ids_in_range(
+    from_ts: str | None, to_ts: str | None,
+) -> list[int]:
+    """Return tdoa_attempts.id values with created_at in [from_ts, to_ts]
+    (either bound may be omitted — the route layer enforces that at least
+    one is given; this function itself has no opinion on that). Feeds
+    delete_tdoa_attempts() for the bulk "delete attempts in this range"
+    admin action."""
+    clauses: list[str] = []
+    params: list[str] = []
+    if from_ts:
+        clauses.append("created_at >= ?")
+        params.append(from_ts)
+    if to_ts:
+        clauses.append("created_at <= ?")
+        params.append(to_ts)
+    where = " AND ".join(clauses) if clauses else "1=1"
+    async with connect() as conn:
+        cursor = await conn.execute(
+            f"SELECT id FROM tdoa_attempts WHERE {where}", params,
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+
+async def delete_tdoa_attempts(attempt_ids: list[int]) -> dict:
+    """Delete the given tdoa_attempts rows and their tdoa_attempt_nodes,
+    used by the admin "clear meaningless TDOA results" action (e.g. bench
+    testing with nodes sitting together but configured with their intended
+    field positions, producing solved-but-nonsensical coordinates).
+
+    Also deletes any audio_events row that exists purely for TDOA
+    corroboration (analysis_status == 'skipped_birdnet_tdoa_pull' — see
+    _save_direct_pull_audio in routes.py) and, after this deletion, is no
+    longer referenced by any remaining tdoa_attempt_nodes row from a
+    *different* attempt (a corroboration WAV can be reused across attempts
+    via find_covering_audio_event's 'reused_existing' path, so it isn't
+    automatically safe to drop just because the attempt that first pulled
+    it is being deleted).
+
+    Deliberately does NOT touch the audio_events/detections rows an origin
+    node's own trigger created (analysis_status == 'analyzed' etc.), even
+    though they're linked to a deleted attempt via a status='origin' row —
+    those are real BirdNET detection history, independent of whether the
+    TDOA solve made sense, and must survive this cleanup.
+
+    Returns {"attempts_deleted": int, "filenames_deleted": list[str]} — the
+    caller (routes.py) is responsible for actually unlinking those
+    filenames from disk; this function only touches the database.
+    """
+    if not attempt_ids:
+        return {"attempts_deleted": 0, "filenames_deleted": []}
+
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        placeholders = ",".join("?" for _ in attempt_ids)
+
+        cursor = await conn.execute(
+            f"""SELECT DISTINCT tan.audio_event_id AS id
+                FROM tdoa_attempt_nodes tan
+                JOIN audio_events ae ON ae.id = tan.audio_event_id
+                WHERE tan.attempt_id IN ({placeholders})
+                  AND ae.analysis_status = 'skipped_birdnet_tdoa_pull'""",
+            attempt_ids,
+        )
+        candidate_ids = [row["id"] for row in await cursor.fetchall()]
+
+        await conn.execute(
+            f"DELETE FROM tdoa_attempt_nodes WHERE attempt_id IN ({placeholders})",
+            attempt_ids,
+        )
+        cursor = await conn.execute(
+            f"DELETE FROM tdoa_attempts WHERE id IN ({placeholders})", attempt_ids,
+        )
+        attempts_deleted = cursor.rowcount
+
+        filenames_deleted: list[str] = []
+        for audio_event_id in candidate_ids:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM tdoa_attempt_nodes WHERE audio_event_id = ?",
+                (audio_event_id,),
+            )
+            (still_referenced,) = await cursor.fetchone()
+            if still_referenced:
+                continue
+            cursor = await conn.execute(
+                "SELECT filename FROM audio_events WHERE id = ?", (audio_event_id,),
+            )
+            row = await cursor.fetchone()
+            await conn.execute(
+                "DELETE FROM audio_events WHERE id = ?", (audio_event_id,),
+            )
+            if row and row["filename"]:
+                filenames_deleted.append(row["filename"])
+
+        await conn.commit()
+
+    return {"attempts_deleted": attempts_deleted, "filenames_deleted": filenames_deleted}
+
+
 async def get_tdoa_attempt(attempt_id: int) -> dict | None:
     """Return one tdoa_attempts row by id, or None. Used by milestone 4's
     solve-readiness check (routes.py _maybe_solve_tdoa_attempt_inner) to
