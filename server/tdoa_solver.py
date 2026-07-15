@@ -42,6 +42,24 @@ import numpy as np
 DEFAULT_SPEED_OF_SOUND = 343.0  # m/s
 
 
+def speed_of_sound_c(temp_celsius: float) -> float:
+    """Speed of sound in dry air (m/s) at the given temperature (°C), sea
+    level, via the standard linear approximation 331.3 + 0.606*T. Humidity
+    effects (~0.1-0.6 m/s over realistic range) are ignored as negligible
+    next to Brisbane's seasonal temperature swing."""
+    return 331.3 + 0.606 * temp_celsius
+
+
+# Conservative (slowest-plausible) speed of sound, used ONLY for flooring the
+# TDOA pull-window travel-time margin (see routes.py's travel_time_floor_s) —
+# never for the actual solve, which should use a realistic-for-conditions
+# value (DEFAULT_SPEED_OF_SOUND above) since biasing that cold would degrade
+# everyday solve accuracy. -10°C is a deliberately conservative floor past
+# Brisbane's realistic overnight minimum; a slower assumed speed only ever
+# widens the pull window (safe), never narrows it.
+WORST_CASE_SPEED_OF_SOUND = speed_of_sound_c(-10.0)  # m/s, ~325.2
+
+
 @dataclass(frozen=True)
 class Node:
     """A receiver node at a known position.

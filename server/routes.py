@@ -29,7 +29,12 @@ from .models import (
     RatioHistogram, RatioHistogramBucket, TriggerHistogramResponse,
     TriggerRollupBucket, TriggerRollupResponse,
 )
-from .tdoa_solver import DEFAULT_SPEED_OF_SOUND, Node as TdoaNode, solve as tdoa_solve
+from .tdoa_solver import (
+    DEFAULT_SPEED_OF_SOUND,
+    WORST_CASE_SPEED_OF_SOUND,
+    Node as TdoaNode,
+    solve as tdoa_solve,
+)
 
 # Directory for saved audio files (created on first push).
 _AUDIO_DIR = os.path.join(os.path.dirname(__file__), "..", "audio")
@@ -1507,7 +1512,11 @@ async def _plan_tdoa_attempt_inner(
     params, used_default = await db.get_effective_species_tdoa_params(species_key)
 
     candidates = await _approved_positioned_nodes()
-    travel_time_floor_s = _max_pairwise_distance_m(candidates) / DEFAULT_SPEED_OF_SOUND
+    # Worst-case (slowest-plausible, cold-day) speed of sound here, not the
+    # solver's DEFAULT_SPEED_OF_SOUND — this floor only ever needs to widen
+    # the pull window to be safe, never to be accurate. See tdoa_solver.py's
+    # WORST_CASE_SPEED_OF_SOUND docstring.
+    travel_time_floor_s = _max_pairwise_distance_m(candidates) / WORST_CASE_SPEED_OF_SOUND
     min_corroborating_nodes = params["min_corroborating_nodes"]
 
     margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
