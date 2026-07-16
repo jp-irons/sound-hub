@@ -1031,11 +1031,17 @@ def _register_detection_for_tdoa(
     confidence: float,
     t_start_us: int,
     t_end_us: int,
+    filename: str,
 ) -> None:
     """Entry point called from audio_push() for every persisted detection.
     Buffers the detection into a same-species, overlapping-window cluster
     rather than planning a TDOA attempt immediately — see the module-level
     coalescing comment above _pending_clusters for why.
+
+    filename is stashed on the member so _fire_cluster_after_delay can run
+    onset detection directly against this node's own WAV (same file
+    _correlate_attempt_node would later open) without an extra DB round
+    trip back to audio_events at fire time.
 
     Synchronous: only mutates the in-memory cluster dict and, for a new
     cluster, schedules the debounce task. Never touches the DB directly —
@@ -1047,6 +1053,7 @@ def _register_detection_for_tdoa(
         "confidence": confidence,
         "t_start_us": t_start_us,
         "t_end_us": t_end_us,
+        "filename": filename,
     }
     tolerance_us = TDOA_CLUSTER_OVERLAP_TOLERANCE_MS * 1000
     clusters = _pending_clusters.setdefault(species_key, [])
@@ -1079,7 +1086,33 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
     """Waits out the debounce, then plans one TDOA attempt covering every
     detection that joined this cluster. Fire-and-forget, like
     _plan_tdoa_attempt — wrapped in its own try/except since nothing awaits
-    this task either."""
+    this task either.
+
+    Origin selection requires BOTH a BirdNET detection (true of every member
+    here already) AND a passing onset check — a member winning purely on
+    BirdNET confidence is no longer enough to become origin, so a tdoa_attempt
+    row is never created for a cluster whose members are all onset-less
+    (background noise crossing the species threshold, e.g. the soundcapture171
+    case this replaced: onset_failed origin that still burned 4 corroboration
+    pulls). Members are tried in descending-confidence order so the
+    highest-confidence *passer* wins, preserving the old tie-break behaviour
+    among members that actually qualify.
+
+    A member that fails onset here isn't discarded — it still joins
+    known_reporters same as before, and gets (redundantly) onset-checked
+    again inside _plan_tdoa_attempt_inner's own correlation step. That
+    redundancy (and the duplicate get_effective_species_tdoa_params call) is
+    accepted for now rather than threading precomputed results through
+    _plan_tdoa_attempt — see conversation notes if this needs tightening.
+
+    If nobody in the cluster passes onset, the cluster is simply dropped —
+    no attempt, no pulls. There is deliberately no extended/reopened debounce
+    here: a later straggler with an overlapping window won't find this
+    (already-removed) cluster to join, so it opens its own fresh cluster and,
+    if it independently qualifies, originates its own attempt — see
+    find_open_tdoa_attempt's status filter (only 'planned'/'pulling'), which
+    means a cluster that never produced a row can never be folded into.
+    """
     try:
         await asyncio.sleep(TDOA_COALESCE_DEBOUNCE_MS / 1000)
 
@@ -1090,14 +1123,45 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
                 _pending_clusters.pop(species_key, None)
 
         members = cluster["members"]
-        origin = max(members, key=lambda m: m["confidence"])
+        params, _ = await db.get_effective_species_tdoa_params(species_key)
+
+        origin = None
+        origin_arrival_us = None
+        for m in sorted(members, key=lambda m: m["confidence"], reverse=True):
+            fpath = os.path.join(_AUDIO_DIR, m["filename"])
+            try:
+                origin_arrival_us = onset_detection.detect_onset_us(
+                    params["onset_detection_method"], fpath, m["t_start_us"],
+                    threshold_factor=params["onset_threshold_factor"],
+                    freq_band_low_hz=params["freq_band_low_hz"],
+                    freq_band_high_hz=params["freq_band_high_hz"],
+                )
+            except Exception as exc:
+                log.info(
+                    "tdoa cluster species=%s candidate node=%s failed onset "
+                    "check, trying next candidate (if any): %s",
+                    species_key, m["node_id"], exc,
+                )
+                continue
+            origin = m
+            break
+
+        if origin is None:
+            log.info(
+                "tdoa cluster species=%s fired: none of %d member(s) passed "
+                "onset check — dropping cluster, no attempt created",
+                species_key, len(members),
+            )
+            return
+
         known_reporters = {
             m["node_id"]: m["audio_event_id"] for m in members if m is not origin
         }
         log.info(
-            "tdoa cluster species=%s fired: origin=%s confidence=%.3f, "
-            "%d known reporter(s)",
-            species_key, origin["node_id"], origin["confidence"], len(known_reporters),
+            "tdoa cluster species=%s fired: origin=%s confidence=%.3f "
+            "arrival_us=%.1f, %d known reporter(s)",
+            species_key, origin["node_id"], origin["confidence"],
+            origin_arrival_us, len(known_reporters),
         )
         await _plan_tdoa_attempt(
             audio_event_id=origin["audio_event_id"],
@@ -2006,6 +2070,7 @@ async def audio_push(
             confidence=top.get("confidence", 0.0),
             t_start_us=tStartUs,
             t_end_us=tEndUs,
+            filename=fname,
         )
 
 
