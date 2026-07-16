@@ -17,7 +17,8 @@ from . import birdnet_worker, config, db, onset_detection, registry, status_mapp
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     AckStatus,
-    ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioEventRecord,
+    ArrayOrigin, ArrayOriginManual, AudioAnalytics, AudioCleanupSettings,
+    AudioCleanupSettingsUpdate, AudioEventRecord,
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeAudioSummary, NodeConfigRequest, NodeHeartbeatRequest, NodePosition,
     PositionFromEma,
@@ -906,6 +907,41 @@ async def clear_origin():
     """
     await db.clear_array_origin()
     await db.clear_origin()
+
+
+# ---------------------------------------------------------------------------
+# Audio cleanup settings  (governs audio_cleanup.py's periodic sweep)
+# ---------------------------------------------------------------------------
+
+@router.get("/audio-cleanup-settings", response_model=AudioCleanupSettings,
+            dependencies=[Depends(require_viewer)])
+async def get_audio_cleanup_settings():
+    """Return the current audio cleanup settings. Always available — the row
+    is seeded with defaults by init_db()."""
+    settings = await db.get_audio_cleanup_settings()
+    return AudioCleanupSettings(
+        retention_hours=settings["retention_hours"],
+        max_size_bytes=settings["max_size_bytes"],
+        updated_at=settings["updated_at"],
+    )
+
+
+@router.put("/audio-cleanup-settings", response_model=AudioCleanupSettings,
+            dependencies=[Depends(require_admin)])
+async def set_audio_cleanup_settings(req: AudioCleanupSettingsUpdate):
+    """Update the audio cleanup settings. Takes effect on audio_cleanup.py's
+    next hourly sweep — not immediately."""
+    updated_at = _now_iso()
+    await db.set_audio_cleanup_settings(
+        retention_hours=req.retention_hours,
+        max_size_bytes=req.max_size_bytes,
+        updated_at=updated_at,
+    )
+    return AudioCleanupSettings(
+        retention_hours=req.retention_hours,
+        max_size_bytes=req.max_size_bytes,
+        updated_at=updated_at,
+    )
 
 
 # ---------------------------------------------------------------------------

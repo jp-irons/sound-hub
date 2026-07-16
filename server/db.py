@@ -95,6 +95,21 @@ CREATE TABLE IF NOT EXISTS array_origin (
     set_at   TEXT NOT NULL
 );
 
+-- Governs audio_cleanup.py's periodic sweep of the audio/ directory (TDOA
+-- pull segments) — age-based and absolute-size pruning, oldest files first.
+-- Always a single row (id=1 enforced by CHECK constraint), seeded by
+-- init_db() with AUDIO_RETENTION_HOURS_DEFAULT/AUDIO_MAX_SIZE_BYTES_DEFAULT
+-- below so audio_cleanup.py never has to handle a missing-row case.
+-- Minimums (3h / 1GB) are enforced at the API boundary (models.py's Field
+-- constraints), not here — this table stays a dumb value store, same
+-- convention as species_tdoa_params.
+CREATE TABLE IF NOT EXISTS audio_cleanup_settings (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    retention_hours REAL NOT NULL,
+    max_size_bytes  INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
 -- One row per audio push received at POST /api/audio/push, regardless of
 -- BirdNET outcome.  This is the diagnostic record that list_detections()
 -- can't provide: detections are only written when BirdNET clears the
@@ -614,6 +629,18 @@ async def init_db() -> None:
             "ON trigger_events(t_us DESC, id DESC)"
         )
 
+        # Seed audio_cleanup_settings with defaults on first run — INSERT OR
+        # IGNORE is a no-op once the row exists, so this is safe to run on
+        # every startup. Keeps get_audio_cleanup_settings() simple (row is
+        # always present, no lazy-create branch needed at the route layer).
+        await conn.execute(
+            """INSERT OR IGNORE INTO audio_cleanup_settings
+               (id, retention_hours, max_size_bytes, updated_at)
+               VALUES (1, ?, ?, ?)""",
+            (AUDIO_RETENTION_HOURS_DEFAULT, AUDIO_MAX_SIZE_BYTES_DEFAULT,
+             datetime.now(timezone.utc).isoformat()),
+        )
+
         await conn.commit()
 
 
@@ -732,6 +759,42 @@ async def clear_array_origin() -> None:
     """Remove the hub array origin row."""
     async with connect() as conn:
         await conn.execute("DELETE FROM array_origin WHERE id = 1")
+        await conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# audio_cleanup_settings CRUD  (governs audio_cleanup.py's periodic sweep)
+# ---------------------------------------------------------------------------
+
+# Used both to seed the row in init_db() and as the values a fresh install
+# starts with. Minimums (3h / 1GB) live in models.py's Field constraints,
+# not here — see audio_cleanup_settings table comment above.
+AUDIO_RETENTION_HOURS_DEFAULT = 24.0
+AUDIO_MAX_SIZE_BYTES_DEFAULT = 5 * 1024 ** 3  # 5 GB
+
+
+async def get_audio_cleanup_settings() -> dict:
+    """Return the audio cleanup settings. Always returns a row — init_db()
+    seeds it on first run, and there is no delete endpoint for this
+    singleton (unlike species_tdoa_params rows)."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM audio_cleanup_settings WHERE id = 1")
+        row = await cursor.fetchone()
+        return dict(row)
+
+
+async def set_audio_cleanup_settings(
+    *, retention_hours: float, max_size_bytes: int, updated_at: str,
+) -> None:
+    """Insert or replace the audio cleanup settings (always row id=1)."""
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT OR REPLACE INTO audio_cleanup_settings
+               (id, retention_hours, max_size_bytes, updated_at)
+               VALUES (1, ?, ?, ?)""",
+            (retention_hours, max_size_bytes, updated_at),
+        )
         await conn.commit()
 
 

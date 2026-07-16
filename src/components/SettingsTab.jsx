@@ -147,6 +147,77 @@ export default function SettingsTab() {
   const [repushError, setRepushError] = useState(null)
 
   // ---------------------------------------------------------------------
+  // Audio cleanup settings
+  // ---------------------------------------------------------------------
+  const AUDIO_RETENTION_HOURS_MIN = 3
+  const AUDIO_MAX_SIZE_GB_MIN = 1
+  const GB = 1024 ** 3
+
+  const [audioUpdatedAt, setAudioUpdatedAt] = useState(null)
+  const [audioLoading, setAudioLoading] = useState(true)
+  const [audioError, setAudioError] = useState(null)
+  const [retentionHours, setRetentionHours] = useState('')
+  const [maxSizeGb, setMaxSizeGb] = useState('')
+  const [audioSaving, setAudioSaving] = useState(false)
+  const [audioSaveMessage, setAudioSaveMessage] = useState(null)
+
+  const loadAudioSettings = () => {
+    setAudioLoading(true)
+    setAudioError(null)
+    apiFetch('/audio-cleanup-settings')
+      .then(async res => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+        const data = await res.json()
+        setRetentionHours(String(data.retentionHours))
+        setMaxSizeGb(String(data.maxSizeBytes / GB))
+        setAudioUpdatedAt(data.updatedAt)
+      })
+      .catch(err => setAudioError(err.message ?? String(err)))
+      .finally(() => setAudioLoading(false))
+  }
+
+  useEffect(() => { loadAudioSettings() }, [])
+
+  async function handleSaveAudioSettings() {
+    setAudioError(null)
+    setAudioSaveMessage(null)
+    const parsedHours = parseFloat(retentionHours)
+    const parsedGb = parseFloat(maxSizeGb)
+    if (Number.isNaN(parsedHours) || parsedHours < AUDIO_RETENTION_HOURS_MIN) {
+      setAudioError(`Retention must be a number >= ${AUDIO_RETENTION_HOURS_MIN} hours.`)
+      return
+    }
+    if (Number.isNaN(parsedGb) || parsedGb < AUDIO_MAX_SIZE_GB_MIN) {
+      setAudioError(`Max size must be a number >= ${AUDIO_MAX_SIZE_GB_MIN} GB.`)
+      return
+    }
+    setAudioSaving(true)
+    try {
+      const res = await apiFetch('/audio-cleanup-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          retentionHours: parsedHours,
+          maxSizeBytes: Math.round(parsedGb * GB),
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
+      }
+      const data = await res.json()
+      setRetentionHours(String(data.retentionHours))
+      setMaxSizeGb(String(data.maxSizeBytes / GB))
+      setAudioUpdatedAt(data.updatedAt)
+      setAudioSaveMessage('Audio cleanup settings saved — takes effect on the next hourly sweep.')
+    } catch (err) {
+      setAudioError(err.message ?? String(err))
+    } finally {
+      setAudioSaving(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Species TDOA params
   // ---------------------------------------------------------------------
   const [speciesParams, setSpeciesParams] = useState([])
@@ -612,6 +683,66 @@ export default function SettingsTab() {
           }}>
             {repushError}
           </div>
+        )}
+      </div>
+
+      <div style={sty.section}>
+        <div style={sty.label}>Audio Cleanup</div>
+        <div style={{ ...sty.hint, marginBottom: 10 }}>
+          Pulled TDOA audio segments (audio/) are pruned on an hourly sweep: files older than
+          retention are deleted first, then oldest files are removed until the directory is back
+          under the max size, if it still isn't.
+        </div>
+
+        {audioLoading ? (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+        ) : (
+          <>
+            <div style={sty.grid}>
+              <label style={{ ...sty.fieldLabel, ...sty.gridField }}>
+                <span style={sty.fieldLabelText}>Retention (hours)</span>
+                <input type="number" step="any" min={AUDIO_RETENTION_HOURS_MIN} value={retentionHours}
+                  onChange={e => setRetentionHours(e.target.value)} style={sty.input} />
+              </label>
+              <label style={{ ...sty.fieldLabel, ...sty.gridField }}>
+                <span style={sty.fieldLabelText}>Max size (GB)</span>
+                <input type="number" step="any" min={AUDIO_MAX_SIZE_GB_MIN} value={maxSizeGb}
+                  onChange={e => setMaxSizeGb(e.target.value)} style={sty.input} />
+              </label>
+            </div>
+
+            <div style={sty.row}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ fontSize: 12, padding: '6px 14px' }}
+                disabled={audioSaving}
+                onClick={handleSaveAudioSettings}
+              >
+                {audioSaving ? 'Saving…' : 'Save'}
+              </button>
+              {audioUpdatedAt && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Last updated {new Date(audioUpdatedAt).toLocaleString()}
+                </span>
+              )}
+            </div>
+
+            {audioSaveMessage && (
+              <div style={{ fontSize: 12, color: 'var(--green, #4caf50)', marginTop: 10 }}>
+                {audioSaveMessage}
+              </div>
+            )}
+            {audioError && (
+              <div style={{
+                fontSize: 12, color: 'var(--red, #f44336)',
+                background: 'rgba(244,67,54,0.12)', borderRadius: 4, padding: '6px 8px',
+                marginTop: 10,
+              }}>
+                {audioError}
+              </div>
+            )}
+          </>
         )}
       </div>
 

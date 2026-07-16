@@ -345,6 +345,39 @@ class ArrayOriginManual(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AudioCleanupSettings(BaseModel):
+    """Response body for GET/PUT /api/audio-cleanup-settings
+    (audio_cleanup_settings table).
+
+    Governs audio_cleanup.py's periodic sweep of the audio/ directory (TDOA
+    pull segments) — age-based (retention_hours) and absolute-size
+    (max_size_bytes) pruning, oldest files first. Singleton row, always
+    present after init_db()'s seed — see db.get_audio_cleanup_settings().
+    """
+    retention_hours: float = Field(
+        ge=3.0, alias="retentionHours",
+        description="Files older than this are deleted on the next sweep. "
+                     "Floor of 3h — the sweep runs hourly, so anything "
+                     "tighter leaves too little margin to be meaningful.",
+    )
+    max_size_bytes: int = Field(
+        ge=1_073_741_824, alias="maxSizeBytes",
+        description="If audio/ still exceeds this after age-based pruning, "
+                     "oldest files are deleted until it doesn't. Floor of 1GB.",
+    )
+    updated_at: str = Field(alias="updatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AudioCleanupSettingsUpdate(BaseModel):
+    """Body for PUT /api/audio-cleanup-settings."""
+    retention_hours: float = Field(ge=3.0, alias="retentionHours")
+    max_size_bytes: int = Field(ge=1_073_741_824, alias="maxSizeBytes")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DetectionRecord(BaseModel):
     """One BirdNET detection row — returned by GET /api/detections."""
     id: int
