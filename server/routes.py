@@ -38,6 +38,9 @@ from .tdoa_solver import (
 
 # Directory for saved audio files (created on first push).
 _AUDIO_DIR = os.path.join(os.path.dirname(__file__), "..", "audio")
+# Public alias — audio_cleanup.py prunes this directory on a retention timer
+# and needs the path without reaching into a private module attribute.
+AUDIO_DIR = _AUDIO_DIR
 
 log = logging.getLogger("sound_hub.routes")
 router = APIRouter()

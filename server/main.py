@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import birdnet_worker, db, poller, routes
+from . import audio_cleanup, birdnet_worker, db, poller, routes
 from .routes import router
 
 logging.basicConfig(
@@ -30,11 +30,12 @@ logging.basicConfig(
 log = logging.getLogger("sound_hub.main")
 
 _poller_task: asyncio.Task | None = None
+_audio_cleanup_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _poller_task
+    global _poller_task, _audio_cleanup_task
     await db.init_db()
     if await db.count_users() == 0:
         log.warning(
@@ -44,12 +45,15 @@ async def lifespan(app: FastAPI):
         )
     await routes.init_relay_client()
     _poller_task = asyncio.create_task(poller.run())
+    _audio_cleanup_task = asyncio.create_task(audio_cleanup.run())
     # Load BirdNET model in a thread so the event loop is not blocked.
     await asyncio.get_running_loop().run_in_executor(None, birdnet_worker.init)
     log.info("BirdNET model loaded")
     yield
     if _poller_task:
         _poller_task.cancel()
+    if _audio_cleanup_task:
+        _audio_cleanup_task.cancel()
     await routes.close_relay_client()
 
 
