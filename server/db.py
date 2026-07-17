@@ -446,7 +446,6 @@ async def init_db() -> None:
             row = await cursor.fetchone()
             if row:
                 node_id, lat, lon, alt = row
-                from datetime import datetime, timezone
                 await conn.execute(
                     """INSERT OR IGNORE INTO array_origin
                        (id, lat, lon, alt_m, set_from, set_at)
