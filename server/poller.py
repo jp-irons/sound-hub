@@ -126,6 +126,28 @@ async def _poll_trigger_diag(client: httpx.AsyncClient, node: dict) -> None:
         log.debug("trigger-diag poll failed for %s @ %s: %s", node_id, ip_address, exc)
 
 
+async def _poll_node(client: httpx.AsyncClient, node: dict) -> None:
+    """Poll one node's status, then its trigger-diag ring buffer — sequentially.
+
+    Deliberately NOT concurrent with each other. Both hit the same node's
+    HTTPS status server (esp_https_server), which serializes handshakes one
+    at a time (see project_bird_https_handshake_slowness notes on the
+    node170/171 CONN_EOF investigation). Firing _poll_one and
+    _poll_trigger_diag for the same node at the same instant meant the hub's
+    own poller was routinely the second connection racing against its own
+    first one — a structural, self-inflicted contributor to those handshake
+    failures, independent of anything else going on. Running them back to
+    back here removes that self-collision; different nodes are still polled
+    concurrently (see run()'s gather over _poll_node below) — only the two
+    calls against the *same* node are serialized. Status runs first since
+    it's the one that actually drives reachability/registry state;
+    trigger-diag is best-effort regardless of whether status succeeded, same
+    as before this change.
+    """
+    await _poll_one(client, node)
+    await _poll_trigger_diag(client, node)
+
+
 async def run() -> None:
     log.info("Status poller started — interval %.1fs", config.STATUS_POLL_INTERVAL_S)
     loop = asyncio.get_event_loop()
@@ -143,10 +165,7 @@ async def run() -> None:
                 nodes = [n for n in await registry.list_nodes()
                          if n["approval_status"] == db.APPROVED]
                 if nodes:
-                    await asyncio.gather(
-                        *(_poll_one(client, n) for n in nodes),
-                        *(_poll_trigger_diag(client, n) for n in nodes),
-                    )
+                    await asyncio.gather(*(_poll_node(client, n) for n in nodes))
 
                 now = loop.time()
 
