@@ -2048,66 +2048,78 @@ async def audio_push(
         )
         return
 
-    try:
-        loop = asyncio.get_event_loop()
-        # analyze_wav_full runs at min_conf=0.0 so we can see the best
-        # candidate even if it falls below the persisted-detection
-        # threshold — see audio_events.top_confidence/top_species.
-        raw = await loop.run_in_executor(
-            None, functools.partial(birdnet_worker.analyze_wav_full, fpath, use_geo=True),
-        )
-    except Exception:
-        log.exception("audio push id=%s node=%s — BirdNET analysis failed", requestId, nodeId)
-        await db.insert_audio_event(
+    # BirdNET analysis (and everything downstream of it) is dispatched as a
+    # detached background task so the node's push response returns right
+    # after the file is saved, instead of blocking on model inference —
+    # see project_soundhub_congestion notes. Mirrors the tdoa_corroboration
+    # branch above, which already does this for its own (skipped-analysis)
+    # path. Exceptions must be caught inside the task itself — same
+    # reasoning as _plan_tdoa_attempt's wrapper split: once detached,
+    # nothing awaits this coroutine to propagate an error.
+    async def _analyze_and_register() -> None:
+        try:
+            loop = asyncio.get_event_loop()
+            # analyze_wav_full runs at min_conf=0.0 so we can see the best
+            # candidate even if it falls below the persisted-detection
+            # threshold — see audio_events.top_confidence/top_species.
+            raw = await loop.run_in_executor(
+                None, functools.partial(birdnet_worker.analyze_wav_full, fpath, use_geo=True),
+            )
+        except Exception:
+            log.exception("audio push id=%s node=%s — BirdNET analysis failed", requestId, nodeId)
+            await db.insert_audio_event(
+                node_id=nodeId, triggered=triggered, received_at=_now_iso(),
+                bytes_=len(data), analysis_status="error",
+                t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
+            )
+            return
+
+        persisted = [d for d in raw if d.get("confidence", 0.0) >= birdnet_worker.DEFAULT_MIN_CONF]
+        top = max(raw, key=lambda d: d.get("confidence", 0.0)) if raw else None
+
+        if persisted:
+            await db.insert_detections(fname, _now_iso(), persisted, node_id=nodeId)
+            log.info("audio push id=%s node=%s — %d detection(s) registered",
+                      requestId, nodeId, len(persisted))
+
+        audio_event_id = await db.insert_audio_event(
             node_id=nodeId, triggered=triggered, received_at=_now_iso(),
-            bytes_=len(data), analysis_status="error",
+            bytes_=len(data), analysis_status="analyzed",
+            detection_count=len(persisted),
+            top_confidence=top.get("confidence") if top else None,
+            top_species=top.get("common_name") if top else None,
             t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
         )
-        return
 
-    persisted = [d for d in raw if d.get("confidence", 0.0) >= birdnet_worker.DEFAULT_MIN_CONF]
-    top = max(raw, key=lambda d: d.get("confidence", 0.0)) if raw else None
+        # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
+        # sound-hub/DESIGN.md): a persisted top-species detection with a
+        # known capture window and node identity registers into the
+        # detection-coalescing buffer. tStartUs/tEndUs absent means older
+        # firmware that doesn't send the actual capture window yet —
+        # nothing to anchor a pull window on. nodeId absent means the push
+        # couldn't be attributed to a known node — nothing to record as
+        # origin/reporter. Either way, planning is skipped for this push.
+        #
+        # _register_detection_for_tdoa does not plan immediately: it
+        # buffers into a short debounce (TDOA_COALESCE_DEBOUNCE_MS) so that
+        # several nodes detecting the same call within milliseconds of each
+        # other collapse into one planned attempt instead of each firing
+        # its own — see the module-level coalescing comment near
+        # _pending_clusters and project_soundhub_tdoa_dedup notes. This
+        # used to call asyncio.create_task(_plan_tdoa_attempt(...)) directly
+        # here.
+        if persisted and tStartUs is not None and tEndUs is not None and nodeId is not None:
+            _register_detection_for_tdoa(
+                audio_event_id=audio_event_id,
+                node_id=nodeId,
+                species_key=top["common_name"],
+                confidence=top.get("confidence", 0.0),
+                t_start_us=tStartUs,
+                t_end_us=tEndUs,
+                filename=fname,
+            )
 
-    if persisted:
-        await db.insert_detections(fname, _now_iso(), persisted, node_id=nodeId)
-        log.info("audio push id=%s node=%s — %d detection(s) registered",
-                  requestId, nodeId, len(persisted))
-
-    audio_event_id = await db.insert_audio_event(
-        node_id=nodeId, triggered=triggered, received_at=_now_iso(),
-        bytes_=len(data), analysis_status="analyzed",
-        detection_count=len(persisted),
-        top_confidence=top.get("confidence") if top else None,
-        top_species=top.get("common_name") if top else None,
-        t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
-    )
-
-    # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
-    # sound-hub/DESIGN.md): a persisted top-species detection with a known
-    # capture window and node identity registers into the detection-
-    # coalescing buffer. tStartUs/tEndUs absent means older firmware that
-    # doesn't send the actual capture window yet — nothing to anchor a pull
-    # window on. nodeId absent means the push couldn't be attributed to a
-    # known node — nothing to record as origin/reporter. Either way,
-    # planning is skipped for this push.
-    #
-    # _register_detection_for_tdoa does not plan immediately: it buffers
-    # into a short debounce (TDOA_COALESCE_DEBOUNCE_MS) so that several
-    # nodes detecting the same call within milliseconds of each other
-    # collapse into one planned attempt instead of each firing its own —
-    # see the module-level coalescing comment near _pending_clusters and
-    # project_soundhub_tdoa_dedup notes. This used to call
-    # asyncio.create_task(_plan_tdoa_attempt(...)) directly here.
-    if persisted and tStartUs is not None and tEndUs is not None and nodeId is not None:
-        _register_detection_for_tdoa(
-            audio_event_id=audio_event_id,
-            node_id=nodeId,
-            species_key=top["common_name"],
-            confidence=top.get("confidence", 0.0),
-            t_start_us=tStartUs,
-            t_end_us=tEndUs,
-            filename=fname,
-        )
+    asyncio.create_task(_analyze_and_register())
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])

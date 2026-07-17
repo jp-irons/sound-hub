@@ -9,10 +9,24 @@ but occurs only once during init().
 """
 import contextlib
 import os
+import threading
 from datetime import date
 
 # Populated by init() — None until the lifespan startup has completed.
 _analyzer = None
+
+# Serializes calls into the shared _analyzer/TFLite interpreter across
+# threads. Recording.analyze() is not documented as safe for concurrent
+# invocation. Previously this was serialized incidentally — every caller
+# awaited its own HTTP response before returning, so only one analysis was
+# ever in flight per node's blocked request. Since routes.py's audio_push()
+# now dispatches ordinary (non-corroboration) analysis as a detached
+# asyncio.create_task (2026-07-17, see project_soundhub_congestion notes),
+# a multi-node trigger burst can genuinely schedule two analyses into the
+# executor at once — this lock keeps that guarantee explicit instead of
+# accidental. Only blocks the executor's worker thread, never the event
+# loop, so it doesn't reintroduce the blocking-response problem being fixed.
+_analyzer_lock = threading.Lock()
 
 
 def init() -> None:
@@ -46,10 +60,11 @@ def _analyze(path: str, *, use_geo: bool, min_conf: float) -> list[dict]:
         today = date.today()
         kwargs.update(lat=-27.5, lon=153.0, date=today)
 
-    recording = Recording(_analyzer, path, **kwargs)
-    with open(os.devnull, "w") as devnull:
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            recording.analyze()
+    with _analyzer_lock:
+        recording = Recording(_analyzer, path, **kwargs)
+        with open(os.devnull, "w") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                recording.analyze()
 
     return recording.detections or []
 
