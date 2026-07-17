@@ -363,7 +363,15 @@ DEFAULT_SPECIES_KEY = "__default__"
 # (minus species_key/updated_at).
 FACTORY_DEFAULT_SPECIES_PARAMS = {
     "enabled": True,
-    "correlation_method": "gcc_phat",
+    # "plain" (not "gcc_phat") since 2026-07-17: correlation_method used to
+    # be stored/snapshotted but never actually read by any correlation
+    # function (dead config) — now that correlation.py's leading-edge
+    # refinement reads it for real, default to what
+    # docs/tdoa-correlation-design-notes.md section 7 found: plain
+    # correlation clearly beats GCC-PHAT once bandpass filtering is already
+    # applied upstream (PHAT's per-bin normalization re-amplifies the
+    # filter's residual stopband back to full weight).
+    "correlation_method": "plain",
     "onset_detection_method": "global_peak",
     "onset_threshold_factor": 8.0,
     "freq_band_low_hz": None,
@@ -510,6 +518,21 @@ async def init_db() -> None:
         if "arrival_us" not in tdoa_attempt_node_columns:
             await conn.execute(
                 "ALTER TABLE tdoa_attempt_nodes ADD COLUMN arrival_us REAL"
+            )
+
+        # Migration: add peak_corr_coef/quality_ratio to tdoa_attempt_nodes
+        # (milestone 5 — leading-edge cross-correlation refinement, see
+        # correlation.py / project_bird_tdoa_correlation_gap memory) if they
+        # don't exist yet. NULL for any row correlation wasn't attempted on
+        # (origin rows, rows still on the independent-detector fallback with
+        # no origin available) — see update_tdoa_attempt_node_result.
+        if "peak_corr_coef" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN peak_corr_coef REAL"
+            )
+        if "quality_ratio" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN quality_ratio REAL"
             )
 
         # Migration: add filename to audio_events (milestone 3 — needed to
@@ -1765,6 +1788,39 @@ async def get_tdoa_attempt(attempt_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+async def get_tdoa_attempt_origin(attempt_id: int) -> dict | None:
+    """Milestone 5: return the origin node's filename/t_start_us/arrival_us
+    for a tdoa_attempts row, plus origin_node_id itself (so callers can
+    skip correlating a node against itself). Used by routes.py
+    _correlate_attempt_node's leading-edge cross-correlation refinement —
+    see project_bird_tdoa_correlation_gap memory / correlation.py's module
+    docstring for why this exists.
+
+    Joins on node_id (not status='origin') because that row's status is
+    overwritten to 'arrived' once _plan_tdoa_attempt_inner records its
+    arrival — see tdoa_attempt_nodes' table comment above. Returns None if
+    the attempt has no origin_node_id, the origin never got a
+    tdoa_attempt_nodes row (unpositioned/unapproved origin — see
+    origin_counts in _plan_tdoa_attempt_inner), or its arrival_us isn't
+    recorded yet."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT ta.origin_node_id AS origin_node_id,
+                      tan.arrival_us AS origin_arrival_us,
+                      ae.filename AS origin_filename,
+                      ae.t_start_us AS origin_t_start_us
+               FROM tdoa_attempts ta
+               JOIN tdoa_attempt_nodes tan
+                 ON tan.attempt_id = ta.id AND tan.node_id = ta.origin_node_id
+               JOIN audio_events ae ON ae.id = tan.audio_event_id
+               WHERE ta.id = ? AND tan.arrival_us IS NOT NULL""",
+            (attempt_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def update_tdoa_attempt_status(
     attempt_id: int, status: str, failure_reason: str | None = None
 ) -> None:
@@ -1912,6 +1968,8 @@ async def update_tdoa_attempt_node_result(
     arrival_us: float | None = None,
     error: str | None = None,
     audio_event_id: int | None = None,
+    peak_corr_coef: float | None = None,
+    quality_ratio: float | None = None,
 ) -> None:
     """Milestone 3: record one node's correlation outcome against its
     tdoa_attempt_nodes row — status='arrived' with arrival_us set on
@@ -1921,23 +1979,36 @@ async def update_tdoa_attempt_node_result(
     time (the audio_event is only created once the WAV lands — see
     insert_tdoa_attempt_node's 'requested' rows); left untouched (not
     overwritten with NULL) when not given, matching
-    update_tdoa_attempt_status's failure_reason convention."""
+    update_tdoa_attempt_status's failure_reason convention.
+
+    peak_corr_coef/quality_ratio (milestone 5): the leading-edge
+    cross-correlation refinement's confidence numbers — see
+    routes.py _correlate_attempt_node and correlation.py. Unlike
+    audio_event_id, these ARE always written (including as NULL) rather
+    than left untouched: they describe THIS call's outcome (no correlation
+    attempted, correlation attempted but not trusted, or a trusted
+    correlation), same always-overwritten treatment as arrival_us/error
+    above, not a value that only some callers happen to know."""
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
         if audio_event_id is not None:
             await conn.execute(
                 """UPDATE tdoa_attempt_nodes
                    SET status = ?, arrival_us = ?, error = ?,
-                       audio_event_id = ?, updated_at = ?
+                       audio_event_id = ?, peak_corr_coef = ?,
+                       quality_ratio = ?, updated_at = ?
                    WHERE id = ?""",
-                (status, arrival_us, error, audio_event_id, now, node_row_id),
+                (status, arrival_us, error, audio_event_id,
+                 peak_corr_coef, quality_ratio, now, node_row_id),
             )
         else:
             await conn.execute(
                 """UPDATE tdoa_attempt_nodes
-                   SET status = ?, arrival_us = ?, error = ?, updated_at = ?
+                   SET status = ?, arrival_us = ?, error = ?,
+                       peak_corr_coef = ?, quality_ratio = ?, updated_at = ?
                    WHERE id = ?""",
-                (status, arrival_us, error, now, node_row_id),
+                (status, arrival_us, error, peak_corr_coef, quality_ratio,
+                 now, node_row_id),
             )
         await conn.commit()
 
@@ -1947,7 +2018,7 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
     tagged with, find the tdoa_attempt_nodes row it corresponds to, joined
     with the fields from its parent tdoa_attempts row that correlation
     needs (species_key, onset_detection_method, onset_threshold_factor,
-    freq_band_low_hz/high_hz, min_corroborating_nodes).
+    correlation_method, freq_band_low_hz/high_hz, min_corroborating_nodes).
     Returns None if no attempt ever issued this requestId (e.g. a manual
     /nodes/{id}/sample pull, purpose='manual')."""
     async with connect() as conn:
@@ -1956,7 +2027,8 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
             """SELECT tan.id AS node_row_id, tan.attempt_id, tan.node_id,
                       tan.status AS node_status,
                       ta.species_key, ta.onset_detection_method,
-                      ta.onset_threshold_factor, ta.freq_band_low_hz,
+                      ta.onset_threshold_factor, ta.correlation_method,
+                      ta.freq_band_low_hz,
                       ta.freq_band_high_hz, ta.min_corroborating_nodes
                FROM tdoa_attempt_nodes tan
                JOIN tdoa_attempts ta ON ta.id = tan.attempt_id

@@ -3,7 +3,7 @@
   "schema_version": 1,
   "species": {
     "Gray Butcherbird": {
-      "correlation_method": "gcc_phat",
+      "correlation_method": "plain",
       "enabled": true,
       "freq_band_high_hz": 3000,
       "freq_band_low_hz": 900,
@@ -17,7 +17,7 @@
       "window_margin_pre_ms": 500.0
     },
     "Noisy Miner": {
-      "correlation_method": "gcc_phat",
+      "correlation_method": "plain",
       "enabled": true,
       "freq_band_high_hz": 7500,
       "freq_band_low_hz": 1500,
@@ -31,7 +31,7 @@
       "window_margin_pre_ms": 500.0
     },
     "Pied Currawong": {
-      "correlation_method": "gcc_phat",
+      "correlation_method": "plain",
       "enabled": true,
       "freq_band_high_hz": 3000,
       "freq_band_low_hz": 800,
@@ -45,7 +45,7 @@
       "window_margin_pre_ms": 500.0
     },
     "Torresian Crow": {
-      "correlation_method": "gcc_phat",
+      "correlation_method": "plain",
       "enabled": true,
       "freq_band_high_hz": 6600,
       "freq_band_low_hz": 1000,

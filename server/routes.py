@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import birdnet_worker, config, db, onset_detection, registry, status_mapper, suntimes
+from . import birdnet_worker, config, correlation, db, onset_detection, registry, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     AckStatus,
@@ -1216,22 +1216,27 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
 
 async def _correlate_attempt_node(
     *,
+    attempt_id: int,
     node_row_id: int,
     node_id: str,
     audio_event: dict,
     onset_detection_method: str,
     onset_threshold_factor: float,
+    correlation_method: str,
     freq_band_low_hz: float | None = None,
     freq_band_high_hz: float | None = None,
 ) -> None:
-    """TDOA orchestration milestone 3: run onset detection against one
-    node's WAV and record the outcome on its tdoa_attempt_nodes row.
+    """TDOA orchestration milestone 3 (+ milestone 5 refinement): run onset
+    detection against one node's WAV, then refine that estimate against the
+    origin's WAV via leading-edge cross-correlation when possible, and
+    record the outcome on its tdoa_attempt_nodes row.
 
-    onset_threshold_factor/freq_band_low_hz/freq_band_high_hz should always
-    be the values snapshotted onto the attempt's tdoa_attempts row at plan
-    time (see _plan_tdoa_attempt_inner), not re-read live from
-    species_tdoa_params — same "already-planned attempts keep the params
-    they were planned with" rationale as onset_detection_method itself.
+    onset_threshold_factor/correlation_method/freq_band_low_hz/
+    freq_band_high_hz should always be the values snapshotted onto the
+    attempt's tdoa_attempts row at plan time (see _plan_tdoa_attempt_inner),
+    not re-read live from species_tdoa_params — same "already-planned
+    attempts keep the params they were planned with" rationale as
+    onset_detection_method itself.
 
     audio_event is the full audio_events row for this node's contribution —
     needs 'filename' (to re-open the WAV) and 't_start_us' (to anchor the
@@ -1251,6 +1256,21 @@ async def _correlate_attempt_node(
     pull time doesn't have it yet (the audio_event didn't exist until the
     push landed), so without this the row would never end up linked to the
     WAV it was actually correlated against.
+
+    Milestone 5 (2026-07-17, see project_bird_tdoa_correlation_gap memory):
+    detect_onset_us() above is run independently per node — an amplitude/
+    energy-threshold detector exposed to loudness/SNR differences between
+    nodes at different distances from the same call (see
+    docs/tdoa-correlation-design-notes.md). After it succeeds (still the
+    gate — a node with no detectable transient at all is still
+    'onset_failed', unchanged), this node's estimate is refined by
+    cross-correlating a short leading-edge window of its WAV against the
+    origin's own WAV (correlation.correlate_leading_edge) — waveform-shape
+    matching is far less sensitive to which channel is louder or carries
+    more "active" signal than an independent amplitude-based detector.
+    Falls back to the independent detect_onset_us() value whenever the
+    origin isn't available to correlate against yet, or the correlation
+    isn't trustworthy (correlation.py's peak_corr_coef/quality_ratio gate).
     """
     audio_event_id = audio_event.get("id")
     filename = audio_event.get("filename")
@@ -1289,13 +1309,76 @@ async def _correlate_attempt_node(
         )
         return
 
+    # Milestone 5: refine against the origin's WAV via leading-edge
+    # cross-correlation when possible (see this function's docstring and
+    # project_bird_tdoa_correlation_gap memory). final_arrival_us starts as
+    # the independent detector's estimate and is only overwritten if a
+    # trusted correlated value comes back.
+    final_arrival_us = arrival_us
+    peak_corr_coef = None
+    quality_ratio = None
+    origin = await db.get_tdoa_attempt_origin(attempt_id)
+    if origin is None:
+        log.info(
+            "tdoa correlation — node=%s: no correlated origin available for "
+            "this attempt yet, using independent onset arrival_us=%.1f",
+            node_id, arrival_us,
+        )
+    elif origin["origin_node_id"] == node_id:
+        # Shouldn't happen — _plan_tdoa_attempt_inner never calls this
+        # function for the origin's own row — but guard against ever
+        # correlating a node's WAV against itself.
+        pass
+    else:
+        try:
+            origin_rate, origin_data = onset_detection._load_mono(
+                os.path.join(_AUDIO_DIR, origin["origin_filename"])
+            )
+            neighbor_rate, neighbor_data = onset_detection._load_mono(fpath)
+            if freq_band_low_hz is not None and freq_band_high_hz is not None:
+                origin_data = onset_detection.bandpass_filter(
+                    origin_data, origin_rate, freq_band_low_hz, freq_band_high_hz
+                )
+                neighbor_data = onset_detection.bandpass_filter(
+                    neighbor_data, neighbor_rate, freq_band_low_hz, freq_band_high_hz
+                )
+            corr_result = correlation.correlate_leading_edge(
+                origin_data=origin_data, origin_rate=origin_rate,
+                origin_t_start_us=origin["origin_t_start_us"],
+                origin_arrival_us=origin["origin_arrival_us"],
+                neighbor_data=neighbor_data, neighbor_rate=neighbor_rate,
+                neighbor_t_start_us=t_start_us,
+                method=correlation_method,
+            )
+        except Exception:
+            corr_result = None
+            log.exception(
+                "tdoa correlation — node=%s leading-edge correlation crashed, "
+                "keeping independent onset arrival_us=%.1f",
+                node_id, arrival_us,
+            )
+
+        if corr_result is not None:
+            peak_corr_coef = corr_result["peak_corr_coef"]
+            quality_ratio = corr_result["quality_ratio"]
+            log.info(
+                "tdoa correlation — node=%s independent=%.1fus correlated=%.1fus "
+                "delta=%.1fus coef=%.2f ratio=%.2f trusted=%s",
+                node_id, arrival_us, corr_result["arrival_us"],
+                corr_result["arrival_us"] - arrival_us, peak_corr_coef,
+                quality_ratio, corr_result["trusted"],
+            )
+            if corr_result["trusted"]:
+                final_arrival_us = corr_result["arrival_us"]
+
     await db.update_tdoa_attempt_node_result(
-        node_row_id, status="arrived", arrival_us=arrival_us,
+        node_row_id, status="arrived", arrival_us=final_arrival_us,
         audio_event_id=audio_event_id,
+        peak_corr_coef=peak_corr_coef, quality_ratio=quality_ratio,
     )
     log.info(
         "tdoa correlation — node=%s arrival_us=%.1f (method=%s)",
-        node_id, arrival_us, onset_detection_method,
+        node_id, final_arrival_us, onset_detection_method,
     )
 
 
@@ -1773,10 +1856,12 @@ async def _plan_tdoa_attempt_inner(
         known_audio_event = await db.get_audio_event(aeid)
         if known_audio_event is not None:
             await _correlate_attempt_node(
+                attempt_id=attempt_id,
                 node_row_id=node_row_id, node_id=nid,
                 audio_event=known_audio_event,
                 onset_detection_method=params["onset_detection_method"],
                 onset_threshold_factor=params["onset_threshold_factor"],
+                correlation_method=params["correlation_method"],
                 freq_band_low_hz=params["freq_band_low_hz"],
                 freq_band_high_hz=params["freq_band_high_hz"],
             )
@@ -1834,10 +1919,12 @@ async def _plan_tdoa_attempt_inner(
             # events whose window fully contains what this attempt needs) —
             # correlate now instead of waiting on a push that won't come.
             await _correlate_attempt_node(
+                attempt_id=attempt_id,
                 node_row_id=node_row_id, node_id=nid,
                 audio_event=existing_event,
                 onset_detection_method=params["onset_detection_method"],
                 onset_threshold_factor=params["onset_threshold_factor"],
+                correlation_method=params["correlation_method"],
                 freq_band_low_hz=params["freq_band_low_hz"],
                 freq_band_high_hz=params["freq_band_high_hz"],
             )
@@ -1879,10 +1966,12 @@ async def _plan_tdoa_attempt_inner(
         # reused_existing/known_reporters/origin branches above, instead of
         # waiting for a push that will never come.
         await _correlate_attempt_node(
+            attempt_id=attempt_id,
             node_row_id=node_row_id, node_id=nid,
             audio_event=audio_event,
             onset_detection_method=params["onset_detection_method"],
             onset_threshold_factor=params["onset_threshold_factor"],
+            correlation_method=params["correlation_method"],
             freq_band_low_hz=params["freq_band_low_hz"],
             freq_band_high_hz=params["freq_band_high_hz"],
         )
@@ -2057,6 +2146,7 @@ async def audio_push(
             if node_row is not None:
                 async def _correlate_and_maybe_solve() -> None:
                     await _correlate_attempt_node(
+                        attempt_id=node_row["attempt_id"],
                         node_row_id=node_row["node_row_id"], node_id=nodeId,
                         audio_event={
                             "id": audio_event_id, "filename": fname,
@@ -2064,6 +2154,7 @@ async def audio_push(
                         },
                         onset_detection_method=node_row["onset_detection_method"],
                         onset_threshold_factor=node_row["onset_threshold_factor"],
+                        correlation_method=node_row["correlation_method"],
                         freq_band_low_hz=node_row["freq_band_low_hz"],
                         freq_band_high_hz=node_row["freq_band_high_hz"],
                     )
