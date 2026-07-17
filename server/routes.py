@@ -1728,8 +1728,25 @@ async def _plan_tdoa_attempt_inner(
     travel_time_floor_s = _max_pairwise_distance_m(candidates) / WORST_CASE_SPEED_OF_SOUND
     min_corroborating_nodes = params["min_corroborating_nodes"]
 
-    margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
-    margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
+    # Additive, not max() (changed 2026-07-17 — see
+    # project_bird_tdoa_correlation_gap memory). The two terms mean different
+    # things: window_margin_pre/post_ms is slop around the origin's own onset
+    # detection (algorithmic/SNR uncertainty in *where* the transient is),
+    # while travel_time_floor_s is the geometric worst case for *how far* a
+    # neighbour's true arrival can sit from the origin's. max()-combining them
+    # meant that once travel_time_floor_s exceeded the configured margin, the
+    # margin was entirely superseded rather than adding any real slop — on
+    # this property travel_time_floor_s is usually the larger of the two, so
+    # the species-tunable margin was silently doing nothing most of the time.
+    # Adding them guarantees both are respected simultaneously. There is
+    # deliberately no separate pull_window_s floor on top of this anymore —
+    # removed the same day (see [[feedback_prefers_clean_removal]]): a fixed
+    # 3.0s minimum was pulling roughly 2x more audio than this property's
+    # geometry (~3Ha, worst-case diagonal travel time well under 1s) ever
+    # required, and it silently overrode the margin+floor computation below
+    # whenever that computation came out smaller than 3.0s total.
+    margin_pre_s = (params["window_margin_pre_ms"] / 1000.0) + travel_time_floor_s
+    margin_post_s = (params["window_margin_post_ms"] / 1000.0) + travel_time_floor_s
     # Recentred on the origin's onset arrival instant rather than its raw
     # (BirdNET-classification-driven) t_start_us/t_end_us span — the span
     # can be a second or more wide and off-center from the actual transient,
@@ -1737,20 +1754,6 @@ async def _plan_tdoa_attempt_inner(
     # the same acoustic event should cluster around.
     pull_t_start_us = int(origin_arrival_us - margin_pre_s * 1e6)
     pull_t_end_us = int(origin_arrival_us + margin_post_s * 1e6)
-
-    # Fix: pull_window_s (species_tdoa_params) was stored/returned by the API
-    # but never actually read here — the pulled window came only from the
-    # margins above. pull_window_s sets a floor on the *total* pulled
-    # duration (see its Field description in models.py); expand symmetrically
-    # around the already-computed window if it falls short, so the origin's
-    # onset arrival stays centered rather than skewing pre/post. Only ever
-    # expands — never shrinks below the travel-time floor already applied.
-    pull_window_us = int(params["pull_window_s"] * 1e6)
-    span_us = pull_t_end_us - pull_t_start_us
-    if span_us < pull_window_us:
-        deficit_us = pull_window_us - span_us
-        pull_t_start_us -= deficit_us // 2
-        pull_t_end_us += deficit_us - deficit_us // 2
 
     # Straggler safety net: this detection's own debounce cluster
     # (_register_detection_for_tdoa) already fired and reached here without
@@ -2941,7 +2944,6 @@ def _species_tdoa_params_record_from_row(row: dict) -> SpeciesTdoaParamsRecord:
         onset_threshold_factor=row["onset_threshold_factor"],
         freq_band_low_hz=row["freq_band_low_hz"],
         freq_band_high_hz=row["freq_band_high_hz"],
-        pull_window_s=row["pull_window_s"],
         window_margin_pre_ms=row["window_margin_pre_ms"],
         window_margin_post_ms=row["window_margin_post_ms"],
         min_corroborating_nodes=row["min_corroborating_nodes"],
@@ -3022,7 +3024,6 @@ async def set_species_tdoa_params(species_key: str, req: SpeciesTdoaParams):
         onset_threshold_factor=req.onset_threshold_factor,
         freq_band_low_hz=req.freq_band_low_hz,
         freq_band_high_hz=req.freq_band_high_hz,
-        pull_window_s=req.pull_window_s,
         window_margin_pre_ms=req.window_margin_pre_ms,
         window_margin_post_ms=req.window_margin_post_ms,
         min_corroborating_nodes=req.min_corroborating_nodes,

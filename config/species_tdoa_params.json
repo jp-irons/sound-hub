@@ -11,7 +11,6 @@
       "notes": "Derived 2026-07-13 from 7 unique Xeno-canto samples (8 downloaded, XC640428 excluded -- same underlying recording as XC635936, re-listed under a different catalog number/subspecies tag) via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. Named 'Gray' (not 'Grey') to match BirdNET's species_key spelling. Replaces an earlier single-sample-derived value entered directly via the Settings UI. onset_threshold_factor not yet validated against real pulled attempts on this property; median observed ratio here (8.9) was notably higher than Noisy Miner/Torresian Crow's, so this is a smaller reduction from the 8.0 factory default than those two got.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 6.0,
-      "pull_window_s": 3.0,
       "updated_at": "2026-07-13T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0
@@ -25,7 +24,6 @@
       "notes": "Derived 2026-07-13 from 7 Xeno-canto samples via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. onset_threshold_factor not yet validated against real pulled attempts on this property.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 5.0,
-      "pull_window_s": 3.0,
       "updated_at": "2026-07-13T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0
@@ -39,7 +37,6 @@
       "notes": "Derived 2026-07-13 from 8 unique Xeno-canto samples (10 downloaded, 2 exact-duplicate '(1)' files dropped) via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. One file (XC580877) was excluded from the band estimate as a likely wind/rustle contaminated outlier (derived band 50-337Hz, inconsistent with the other 7 files' 700-3000Hz cluster). onset_threshold_factor not yet validated against real pulled attempts on this property; observed median ratio (6.0) was between Noisy Miner/Torresian Crow's (~5.1-5.2) and Gray Butcherbird's (8.9), so this is a moderate reduction from the 8.0 factory default.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 5.5,
-      "pull_window_s": 3.0,
       "updated_at": "2026-07-13T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0
@@ -53,7 +50,6 @@
       "notes": "Derived 2026-07-13 from 9 Xeno-canto samples via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. onset_threshold_factor not yet validated against real pulled attempts on this property.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 5.0,
-      "pull_window_s": 3.0,
       "updated_at": "2026-07-13T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0

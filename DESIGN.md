@@ -67,11 +67,17 @@ got committed until now.
 - **No requestId → attempt linkage**: `request_sample`'s `_audio_requests`
   dict is in-memory and per-request; nothing currently associates multiple
   outstanding `requestId`s with a single originating detection.
-- **No runtime travel-time floor**: with nodes up to ~150m apart, max
-  inter-node sound travel time is ~0.44s. `pull_window_s`/margins from
-  `species_tdoa_params` should be floored at runtime to cover this,
-  computed from `node_positions` geometry — not hardcoded, since geometry
-  changes as nodes are added/moved. Not yet implemented anywhere.
+- **Runtime travel-time floor**: *Done (2026-07-17).* Margins from
+  `species_tdoa_params` are floored per-attempt from live `node_positions`
+  geometry, not hardcoded — see `_max_pairwise_distance_m` /
+  `travel_time_floor_s` in `_plan_tdoa_attempt_inner`. Additive with the
+  species' configured margin (not `max()`'d against it) as of the same
+  date — the two represent different things (onset-detection slop vs.
+  propagation-delay worst case) and should both apply, not whichever is
+  larger. `pull_window_s` (a separate fixed-minimum-total-duration knob)
+  was removed the same day — it silently overrode this computation
+  whenever the fixed 3.0s floor it enforced came out larger, and on this
+  ~3Ha property that was most of the time.
 - **No neighbour-selection logic**: "initially: all" was the agreed starting
   point, but there's no code that lists "all nodes with known positions and
   `approval_status == active`" as a single helper yet.
@@ -91,11 +97,12 @@ large change:
 
 1. **`tdoa_attempts` table + species-lookup hook.** *Done.* On a persisted
    top-species detection in `audio_push()`, calls
-   `get_effective_species_tdoa_params()`, computes the pull window (margins
-   floored by max inter-node travel time, **and now also floored by
-   `pull_window_s` — fixed 2026-07-11, it was read from the species config
-   but never actually applied**), picks neighbour nodes, and writes a
-   `tdoa_attempts` row recording the plan.
+   `get_effective_species_tdoa_params()`, computes the pull window (species
+   margin plus max inter-node travel time, additive — see "Runtime
+   travel-time floor" above; `pull_window_s` briefly existed as a separate
+   fixed-minimum-duration knob from 2026-07-11 but was removed 2026-07-17),
+   picks neighbour nodes, and writes a `tdoa_attempts` row recording the
+   plan.
 2. **Wire the actual pull.** *Done.* Issues `request_sample` to each planned
    neighbour, stores their `requestId`s against the attempt row
    (`tdoa_attempt_nodes`).

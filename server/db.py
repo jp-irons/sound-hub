@@ -207,7 +207,6 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
     onset_threshold_factor  REAL NOT NULL DEFAULT 8.0,
     freq_band_low_hz        REAL,
     freq_band_high_hz       REAL,
-    pull_window_s           REAL NOT NULL DEFAULT 3.0,
     window_margin_pre_ms    REAL NOT NULL DEFAULT 500.0,
     window_margin_post_ms   REAL NOT NULL DEFAULT 500.0,
     min_corroborating_nodes INTEGER NOT NULL DEFAULT 4,
@@ -376,7 +375,6 @@ FACTORY_DEFAULT_SPECIES_PARAMS = {
     "onset_threshold_factor": 8.0,
     "freq_band_low_hz": None,
     "freq_band_high_hz": None,
-    "pull_window_s": 3.0,
     "window_margin_pre_ms": 500.0,
     "window_margin_post_ms": 500.0,
     "min_corroborating_nodes": 4,
@@ -563,6 +561,27 @@ async def init_db() -> None:
                 "ALTER TABLE species_tdoa_params "
                 "ADD COLUMN onset_threshold_factor REAL NOT NULL DEFAULT 8.0"
             )
+
+        # Migration: drop pull_window_s from species_tdoa_params (removed
+        # 2026-07-17 — see project_bird_tdoa_correlation_gap memory /
+        # _plan_tdoa_attempt_inner's comment on the margin+floor computation
+        # it used to silently override). Per feedback_prefers_clean_removal,
+        # fully dropped rather than left as an inert unused column. Requires
+        # SQLite >= 3.35 (2021) for ALTER TABLE ... DROP COLUMN; guarded
+        # rather than left to crash init_db() on an older system package —
+        # the column becomes harmless dead data (nothing reads/writes it any
+        # more either way) if the drop can't run here.
+        if "pull_window_s" in species_param_columns:
+            try:
+                await conn.execute(
+                    "ALTER TABLE species_tdoa_params DROP COLUMN pull_window_s"
+                )
+            except Exception:
+                log.warning(
+                    "species_tdoa_params: could not drop pull_window_s column "
+                    "(likely SQLite < 3.35) — leaving it in place, unused",
+                    exc_info=True,
+                )
 
         # Migration: add onset_threshold_factor/freq_band_low_hz/
         # freq_band_high_hz snapshot columns to tdoa_attempts (same per-
@@ -1511,7 +1530,6 @@ async def upsert_species_tdoa_params(
     onset_threshold_factor: float,
     freq_band_low_hz: float | None,
     freq_band_high_hz: float | None,
-    pull_window_s: float,
     window_margin_pre_ms: float,
     window_margin_post_ms: float,
     min_corroborating_nodes: int,
@@ -1526,12 +1544,12 @@ async def upsert_species_tdoa_params(
             """INSERT OR REPLACE INTO species_tdoa_params
                (species_key, enabled, correlation_method, onset_detection_method,
                 onset_threshold_factor, freq_band_low_hz, freq_band_high_hz,
-                pull_window_s, window_margin_pre_ms, window_margin_post_ms,
+                window_margin_pre_ms, window_margin_post_ms,
                 min_corroborating_nodes, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (species_key, 1 if enabled else 0, correlation_method,
              onset_detection_method, onset_threshold_factor, freq_band_low_hz,
-             freq_band_high_hz, pull_window_s, window_margin_pre_ms,
+             freq_band_high_hz, window_margin_pre_ms,
              window_margin_post_ms, min_corroborating_nodes, notes, updated_at),
         )
         await conn.commit()

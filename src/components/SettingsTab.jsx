@@ -26,7 +26,6 @@ function fieldsFromRow(row) {
     onsetThresholdFactor: String(row.onsetThresholdFactor),
     freqBandLowHz: row.freqBandLowHz != null ? String(row.freqBandLowHz) : '',
     freqBandHighHz: row.freqBandHighHz != null ? String(row.freqBandHighHz) : '',
-    pullWindowS: String(row.pullWindowS),
     windowMarginPreMs: String(row.windowMarginPreMs),
     windowMarginPostMs: String(row.windowMarginPostMs),
     minCorroboratingNodes: String(row.minCorroboratingNodes),
@@ -34,11 +33,21 @@ function fieldsFromRow(row) {
   }
 }
 
-// Known implementations as of 2026-06-29 (see models.py field docstrings).
-// Both fields are plain strings server-side (not enums) so new methods can be
-// added without a redeploy — the "Custom…" option keeps that escape hatch
-// available in the UI instead of hard-locking the operator to this list.
-const CORRELATION_METHOD_OPTIONS = ['gcc_phat', 'onset_envelope']
+// Known implementations as of 2026-07-17 (see correlation.py — the only two
+// methods it actually implements; 'onset_envelope' was removed from this
+// list, see below). Both fields are plain strings server-side (not enums) so
+// new methods can be added without a redeploy — the "Custom…" option keeps
+// that escape hatch available in the UI instead of hard-locking the operator
+// to this list.
+//
+// 'onset_envelope' was here as a placeholder for a DESIGN.md-anticipated
+// third method (better for tonal/cycle-slip-prone calls) but was never
+// implemented in correlation.py — selecting it made every correlation
+// attempt for that species throw internally, get silently caught, and fall
+// back to the independent (bias-exposed) onset-detector estimate every
+// time, with no visible error in the UI. Removed rather than left selectable
+// until it's a real implementation — re-add here if/when it is.
+const CORRELATION_METHOD_OPTIONS = ['plain', 'gcc_phat']
 const ONSET_DETECTION_METHOD_OPTIONS = ['global_peak']
 const CUSTOM_OPTION = '__custom__'
 
@@ -74,12 +83,11 @@ function MethodSelect({ options, value, onChange, disabled, inputStyle }) {
 
 const BLANK_ADD_FIELDS = {
   enabled: true,
-  correlationMethod: 'gcc_phat',
+  correlationMethod: 'plain',
   onsetDetectionMethod: 'global_peak',
   onsetThresholdFactor: '8.0',
   freqBandLowHz: '',
   freqBandHighHz: '',
-  pullWindowS: '3.0',
   windowMarginPreMs: '500',
   windowMarginPostMs: '500',
   minCorroboratingNodes: '4',
@@ -90,7 +98,6 @@ const BLANK_ADD_FIELDS = {
 // into the JSON body shape the PUT endpoint expects. Returns [body, null] or
 // [null, errorMessage].
 function buildSpeciesParamsBody(fields) {
-  const pullWindowS = parseFloat(fields.pullWindowS)
   const windowMarginPreMs = parseFloat(fields.windowMarginPreMs)
   const windowMarginPostMs = parseFloat(fields.windowMarginPostMs)
   const minCorroboratingNodes = parseInt(fields.minCorroboratingNodes, 10)
@@ -98,7 +105,6 @@ function buildSpeciesParamsBody(fields) {
   const freqBandLowHz = fields.freqBandLowHz.trim() === '' ? null : parseFloat(fields.freqBandLowHz)
   const freqBandHighHz = fields.freqBandHighHz.trim() === '' ? null : parseFloat(fields.freqBandHighHz)
 
-  if (Number.isNaN(pullWindowS) || pullWindowS <= 0) return [null, 'Pull window must be a positive number of seconds.']
   if (Number.isNaN(windowMarginPreMs) || windowMarginPreMs < 0) return [null, 'Pre-margin must be a non-negative number of ms.']
   if (Number.isNaN(windowMarginPostMs) || windowMarginPostMs < 0) return [null, 'Post-margin must be a non-negative number of ms.']
   if (!Number.isInteger(minCorroboratingNodes) || minCorroboratingNodes < 4) return [null, 'Min corroborating nodes must be an integer >= 4 (the solver requires at least 4).']
@@ -119,7 +125,7 @@ function buildSpeciesParamsBody(fields) {
     onsetDetectionMethod: fields.onsetDetectionMethod.trim(),
     onsetThresholdFactor,
     freqBandLowHz, freqBandHighHz,
-    pullWindowS, windowMarginPreMs, windowMarginPostMs, minCorroboratingNodes,
+    windowMarginPreMs, windowMarginPostMs, minCorroboratingNodes,
     notes: fields.notes.trim() === '' ? null : fields.notes.trim(),
   }, null]
 }
@@ -776,7 +782,7 @@ export default function SettingsTab() {
                 <th style={sty.th}>Methods</th>
                 <th style={sty.th}>Freq band</th>
                 <th style={sty.th}>Onset threshold</th>
-                <th style={sty.th}>Pull / margins</th>
+                <th style={sty.th}>Margins</th>
                 <th style={sty.th}>Min nodes</th>
                 <th style={sty.th}>Updated</th>
                 <th style={{ ...sty.th, textAlign: 'right' }}>Actions</th>
@@ -797,7 +803,7 @@ export default function SettingsTab() {
                       <td style={sty.td}>{row.correlationMethod} / {row.onsetDetectionMethod}</td>
                       <td style={sty.td}>{fmtFreqBand(row.freqBandLowHz, row.freqBandHighHz)}</td>
                       <td style={sty.td}>{row.onsetThresholdFactor}×</td>
-                      <td style={sty.td}>{row.pullWindowS}s / ±{row.windowMarginPreMs}–{row.windowMarginPostMs}ms</td>
+                      <td style={sty.td}>±{row.windowMarginPreMs}–{row.windowMarginPostMs}ms</td>
                       <td style={sty.td}>{row.minCorroboratingNodes}</td>
                       <td style={{ ...sty.td, color: 'var(--text-muted, #888)', fontSize: 11 }}>
                         {row.updatedAt ? new Date(row.updatedAt).toLocaleString() : '—'}
@@ -877,12 +883,6 @@ export default function SettingsTab() {
                               <input style={sty.smallInput} type="number" step="any" min={2}
                                 value={editFields.onsetThresholdFactor}
                                 onChange={e => setEditField('onsetThresholdFactor', e.target.value)} />
-                            </label>
-                            <label style={sty.fieldGroup}>
-                              <span style={sty.fieldLabelText}>Pull window (s)</span>
-                              <input style={sty.smallInput} type="number" step="any" min={0}
-                                value={editFields.pullWindowS}
-                                onChange={e => setEditField('pullWindowS', e.target.value)} />
                             </label>
                             <label style={sty.fieldGroup}>
                               <span style={sty.fieldLabelText}>Margin pre (ms)</span>
@@ -974,12 +974,6 @@ export default function SettingsTab() {
               <input style={sty.smallInput} type="number" step="any" min={2} disabled={addBusy}
                 value={addFields.onsetThresholdFactor}
                 onChange={e => setAddField('onsetThresholdFactor', e.target.value)} />
-            </label>
-            <label style={sty.fieldGroup}>
-              <span style={sty.fieldLabelText}>Pull window (s)</span>
-              <input style={sty.smallInput} type="number" step="any" min={0} disabled={addBusy}
-                value={addFields.pullWindowS}
-                onChange={e => setAddField('pullWindowS', e.target.value)} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Margin pre (ms)</span>

@@ -39,7 +39,7 @@ DEFAULT_SPECIES_KEY = "__default__"
 COLUMNS = [
     "enabled", "correlation_method", "onset_detection_method",
     "onset_threshold_factor", "freq_band_low_hz", "freq_band_high_hz",
-    "pull_window_s", "window_margin_pre_ms", "window_margin_post_ms",
+    "window_margin_pre_ms", "window_margin_post_ms",
     "min_corroborating_nodes", "notes", "updated_at",
 ]
 

@@ -464,13 +464,23 @@ class SpeciesTdoaParams(BaseModel):
     """
     enabled: bool = Field(default=True)
     correlation_method: str = Field(
-        default="gcc_phat",
+        default="plain",
         alias="correlationMethod",
-        description="'gcc_phat' (broadband, sharp-onset calls) or "
-                     "'onset_envelope' (periodic/narrowband calls at risk of "
-                     "cycle-slip/phase ambiguity with plain cross-correlation, "
-                     "e.g. Pheasant Coucal). Plain string rather than an enum "
-                     "so new methods can be added without a redeploy once the "
+        description="'plain' (time-domain cross-correlation, weighted by "
+                     "actual signal energy) or 'gcc_phat' (per-bin phase "
+                     "normalization). docs/tdoa-correlation-design-notes.md "
+                     "section 7 found 'plain' clearly better once bandpass "
+                     "filtering is already applied, so it's the default as "
+                     "of 2026-07-17 — see correlation.py. An "
+                     "'onset_envelope' method (periodic/narrowband calls at "
+                     "risk of cycle-slip/phase ambiguity, e.g. Pheasant "
+                     "Coucal) was anticipated in DESIGN.md but was never "
+                     "implemented and has been removed from the UI's "
+                     "options — do not set this to 'onset_envelope', "
+                     "correlation.py doesn't implement it and every attempt "
+                     "will silently fall back to the independent onset "
+                     "detector. Plain string rather than an enum so new "
+                     "methods can be added without a redeploy once the "
                      "orchestration code implements them.",
     )
     onset_detection_method: str = Field(
@@ -509,16 +519,21 @@ class SpeciesTdoaParams(BaseModel):
         default=None, alias="freqBandHighHz",
         description="Bandpass high edge (Hz) — see freq_band_low_hz.",
     )
-    pull_window_s: float = Field(
-        default=3.0, alias="pullWindowS",
-        description="Duration requested from neighbour nodes for this "
-                     "species. The orchestration layer floors this (and the "
-                     "margins below) to cover the array's max inter-node "
-                     "sound travel time regardless of this value — at 150m "
-                     "baseline, ~0.44s — so the real arrival at a far node "
-                     "is never clipped by an under-tuned species row.",
+    window_margin_pre_ms: float = Field(
+        default=500.0, alias="windowMarginPreMs",
+        description="Slop (ms) around the origin's own onset-detected "
+                     "instant, added on top of the array's geometric "
+                     "worst-case inter-node travel time (not maxed against "
+                     "it — see _plan_tdoa_attempt_inner) to get the actual "
+                     "pull window requested from neighbours. Represents "
+                     "uncertainty in the origin's own onset detection "
+                     "(algorithmic/SNR), not propagation delay — the travel "
+                     "time term handles that separately and automatically, "
+                     "which is why there is no separate pull_window_s "
+                     "floor on top of this anymore (removed 2026-07-17 — "
+                     "it silently overrode this margin+floor computation "
+                     "whenever the fixed 3.0s minimum came out larger).",
     )
-    window_margin_pre_ms: float = Field(default=500.0, alias="windowMarginPreMs")
     window_margin_post_ms: float = Field(default=500.0, alias="windowMarginPostMs")
     min_corroborating_nodes: int = Field(
         default=4, ge=4, alias="minCorroboratingNodes",
