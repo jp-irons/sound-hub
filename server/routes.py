@@ -1205,6 +1205,7 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
             species_key=species_key,
             t_start_us=origin["t_start_us"],
             t_end_us=origin["t_end_us"],
+            origin_arrival_us=origin_arrival_us,
             known_reporter_audio_events=known_reporters,
         )
     except Exception:
@@ -1553,6 +1554,7 @@ async def _plan_tdoa_attempt(
     species_key: str,
     t_start_us: int,
     t_end_us: int,
+    origin_arrival_us: float,
     known_reporter_audio_events: dict[str, int] | None = None,
 ) -> None:
     """TDOA orchestration milestones 1+2: on a persisted top-species
@@ -1565,6 +1567,14 @@ async def _plan_tdoa_attempt(
     _plan_tdoa_attempt_inner, since those WAVs already exist by planning
     time; freshly-*pulled* WAVs are correlated later, from audio_push(),
     when they land.
+
+    origin_arrival_us is the onset arrival time _fire_cluster_after_delay
+    already established for this origin (a passing onset check is now a
+    precondition for calling this function at all — see that function's
+    docstring). The pull window sent to neighbours is centered on this
+    instant, not on the origin's raw t_start_us/t_end_us detection span —
+    t_start_us/t_end_us are kept only to log/sanity-check that arrival
+    actually falls inside the capture window it was found in.
 
     known_reporter_audio_events maps node_id -> audio_event_id for other
     nodes that detection-coalescing (_register_detection_for_tdoa /
@@ -1591,6 +1601,7 @@ async def _plan_tdoa_attempt(
             species_key=species_key,
             t_start_us=t_start_us,
             t_end_us=t_end_us,
+            origin_arrival_us=origin_arrival_us,
             known_reporter_audio_events=known_reporter_audio_events or {},
         )
     except Exception:
@@ -1607,12 +1618,24 @@ async def _plan_tdoa_attempt_inner(
     species_key: str,
     t_start_us: int,
     t_end_us: int,
+    origin_arrival_us: float,
     known_reporter_audio_events: dict[str, int],
 ) -> None:
     """Actual planning logic for _plan_tdoa_attempt — see that function's
     docstring. Split out so the outer function can wrap this in a single
     try/except without an extra indent level across the whole body."""
     params, used_default = await db.get_effective_species_tdoa_params(species_key)
+
+    if not (t_start_us <= origin_arrival_us <= t_end_us):
+        # Shouldn't happen — arrival_us came from detect_onset_us searching
+        # exactly this capture window in _fire_cluster_after_delay — but a
+        # bogus arrival silently recentering the pull window on the wrong
+        # instant would be far worse than a loud warning here.
+        log.warning(
+            "tdoa planning — species=%s origin=%s arrival_us=%.1f falls "
+            "outside its own capture window [%d,%d]us — proceeding anyway",
+            species_key, origin_node_id, origin_arrival_us, t_start_us, t_end_us,
+        )
 
     candidates = await _approved_positioned_nodes()
     # Worst-case (slowest-plausible, cold-day) speed of sound here, not the
@@ -1624,16 +1647,20 @@ async def _plan_tdoa_attempt_inner(
 
     margin_pre_s = max(params["window_margin_pre_ms"] / 1000.0, travel_time_floor_s)
     margin_post_s = max(params["window_margin_post_ms"] / 1000.0, travel_time_floor_s)
-    pull_t_start_us = t_start_us - int(margin_pre_s * 1e6)
-    pull_t_end_us = t_end_us + int(margin_post_s * 1e6)
+    # Recentred on the origin's onset arrival instant rather than its raw
+    # (BirdNET-classification-driven) t_start_us/t_end_us span — the span
+    # can be a second or more wide and off-center from the actual transient,
+    # whereas arrival_us is the precise instant every other node's copy of
+    # the same acoustic event should cluster around.
+    pull_t_start_us = int(origin_arrival_us - margin_pre_s * 1e6)
+    pull_t_end_us = int(origin_arrival_us + margin_post_s * 1e6)
 
     # Fix: pull_window_s (species_tdoa_params) was stored/returned by the API
     # but never actually read here — the pulled window came only from the
-    # trigger's own detected span plus the travel-time-floored margins
-    # above. pull_window_s sets a floor on the *total* pulled duration
-    # (see its Field description in models.py); expand symmetrically around
-    # the already-computed window if it falls short, so the origin's
-    # detected event stays centered rather than skewing pre/post. Only ever
+    # margins above. pull_window_s sets a floor on the *total* pulled
+    # duration (see its Field description in models.py); expand symmetrically
+    # around the already-computed window if it falls short, so the origin's
+    # onset arrival stays centered rather than skewing pre/post. Only ever
     # expands — never shrinks below the travel-time floor already applied.
     pull_window_us = int(params["pull_window_s"] * 1e6)
     span_us = pull_t_end_us - pull_t_start_us
@@ -1710,35 +1737,29 @@ async def _plan_tdoa_attempt_inner(
 
     # Milestone 3: the origin's own WAV (the push that triggered planning)
     # already exists — give it a tdoa_attempt_nodes row too (status='origin'
-    # initially) and correlate it immediately, rather than only ever
-    # recording origin_node_id on the attempt row itself. Folding the origin
-    # into this table means milestone 4's corroborating-node count is one
-    # uniform query over tdoa_attempt_nodes instead of origin/known/pulled
-    # being counted three different ways. Only if the origin is itself
+    # initially) and record its arrival, rather than only ever recording
+    # origin_node_id on the attempt row itself. Folding the origin into this
+    # table means milestone 4's corroborating-node count is one uniform
+    # query over tdoa_attempt_nodes instead of origin/known/pulled being
+    # counted three different ways. Only if the origin is itself
     # approved+positioned (origin_counts==1) — an unpositioned origin can
     # never contribute a usable arrival time to the solve.
+    #
+    # No _correlate_attempt_node call here (unlike known_reporters/pulled
+    # neighbours below): origin_arrival_us was already established by
+    # _fire_cluster_after_delay as the precondition for planning this attempt
+    # at all, so re-running onset detection against the same WAV here would
+    # just repeat work for the same deterministic answer. Recorded directly
+    # as 'arrived' rather than re-deriving it.
     if origin_counts and origin_node_id is not None:
-        origin_audio_event = await db.get_audio_event(audio_event_id)
         origin_row_id = await db.insert_tdoa_attempt_node(
             attempt_id=attempt_id, node_id=origin_node_id, request_id=None,
             status="origin", audio_event_id=audio_event_id,
         )
-        if origin_audio_event is not None:
-            await _correlate_attempt_node(
-                node_row_id=origin_row_id, node_id=origin_node_id,
-                audio_event=origin_audio_event,
-                onset_detection_method=params["onset_detection_method"],
-                onset_threshold_factor=params["onset_threshold_factor"],
-                freq_band_low_hz=params["freq_band_low_hz"],
-                freq_band_high_hz=params["freq_band_high_hz"],
-            )
-        else:
-            # Shouldn't happen — audio_event_id came from the very push that
-            # triggered this attempt — but guard rather than crash planning.
-            await db.update_tdoa_attempt_node_result(
-                origin_row_id, status="onset_failed",
-                error="origin audio_event not found",
-            )
+        await db.update_tdoa_attempt_node_result(
+            origin_row_id, status="arrived", arrival_us=origin_arrival_us,
+            audio_event_id=audio_event_id,
+        )
 
     for nid, aeid in known_reporters.items():
         node_row_id = await db.insert_tdoa_attempt_node(
