@@ -90,9 +90,9 @@ near-simultaneously from different locations will both show up as the same
 to know it's looking at two distinct sources rather than one ambiguous one.
 Flagged, not scoped.
 
-## Milestones (proposed 2026-06-29, all four implemented 2026-07-11)
+## Milestones (proposed 2026-06-29, milestones 1-4 implemented 2026-07-11, milestone 5 added 2026-07-17)
 
-Splitting steps 3-6 into four independently-shippable pieces rather than one
+Splitting steps 3-6 into independently-shippable pieces rather than one
 large change:
 
 1. **`tdoa_attempts` table + species-lookup hook.** *Done.* On a persisted
@@ -121,6 +121,59 @@ large change:
    result — solved position + residual + method, or a mirror root, or a
    `failed` status with reason — back onto the `tdoa_attempts` row
    (`db.persist_tdoa_solution`).
+5. **Leading-edge cross-correlation refinement.** *Implemented 2026-07-17,
+   deployed 2026-07-19.* Milestone 3's `arrival_us` came from each node's
+   `detect_onset_us()` running independently — an amplitude/energy-threshold
+   detector exposed to loudness/SNR differences between nodes at different
+   distances from the same call (a real, measured effect —
+   `docs/tdoa-correlation-design-notes.md` §§1-3). `server/correlation.py`
+   (ported from `tools/clap_sync_check.py`'s `trim_to_leading_edge()`/
+   `_score_correlation()`, implementing both `plain` and `gcc_phat`) now
+   refines each non-origin node's estimate by cross-correlating a short
+   leading-edge window of its WAV against the origin's own WAV, both
+   anchored on `origin_arrival_us` via each buffer's own `t_start_us` (the
+   two WAVs do not share a sample-index timebase — origin's is a raw
+   trigger capture, not pulled against the shared window). `_correlate_attempt_node`
+   (`routes.py`) uses the correlated value only when it clears a confidence
+   gate (`peak_corr_coef`/`quality_ratio`, thresholds carried over unchanged
+   from `clap_sync_check.py`'s clap-test-validated values); otherwise it
+   keeps the independent-detector estimate, so this can only ever make a
+   corroborating node's arrival more accurate, never worse than pre-
+   milestone-5 behaviour. `species_tdoa_params.correlation_method` was
+   previously stored/snapshotted but never read by anything (dead config,
+   defaulted to `gcc_phat`) — it's now actually consumed, and the default
+   changed to `plain` per §7 below. See `project_bird_tdoa_correlation_gap`
+   memory for the full investigation and a same-day follow-up (pull-margin
+   formula changed to additive, `pull_window_s` removed, Settings UI
+   dropdown fixed).
+6. **Node-reported noise floor.** *Implemented 2026-07-19, not yet
+   deployed/field-validated.* Milestone 3's onset detection estimates each
+   clip's background as `np.median(rms)` over the clip itself — unreliable
+   for TDOA corroboration pulls specifically, since their pre/post margins
+   are narrow by design (geometry-driven, see §"Runtime travel-time floor"
+   above) and can leave too little genuine quiet background in the clip to
+   median over. `sound-capture-node`'s `NoiseFloorTracker` (new class,
+   `main/audio/`) tracks a broadband time-domain RMS ambient floor
+   continuously on the node (fast/floor EMA with freeze-above-ratio, same
+   shape as `AudioTrigger`'s gates but a much longer ~180s tau — deliberately
+   decoupled from `AudioTrigger`'s own 30s, since this is meant to track a
+   slower-moving property). `AudioPullHandler` reports it on every pull via
+   a new `X-Noise-Floor-Rms` response header (plus `X-Noise-Floor-Energy-
+   High`/`-Low`, `AudioTrigger`'s existing FFT-band floors, exposed for
+   future use but not yet consumed). `_fetch_audio_direct` reads the header
+   and threads it through `_save_direct_pull_audio` → `_correlate_attempt_node`
+   → `onset_detection.detect_onset_us`'s new `node_noise_floor_rms` param,
+   which converts int16 scale to soundfile's normalized `[-1.0, 1.0)` scale
+   and substitutes it for the clip-derived median when present.
+   Deliberately does **not** yet change any per-species margins — every call
+   logs the clip-derived and node-reported values side by side
+   (`onset_detection.py`'s `detect_onset`) so real pull data accumulates for
+   comparison before the tau or the override itself is trusted, same
+   validate-before-trust discipline as `AudioTrigger`'s own gate tuning (see
+   `project_bird_audio_event_trigger_design` memory). Only origin/known-
+   reporter/reused-existing WAVs still fall back to the clip-derived median
+   (no pull-response header exists for those paths) — unchanged behaviour.
+   See `project_bird_noise_floor_reporting` memory.
 
 UI surfacing of results is **done** (2026-07-11, separate follow-on session)
 — `GET /api/tdoa/attempts` (viewer-level) returns recent attempts with their
@@ -143,21 +196,36 @@ they're visible rather than discovered by surprise later:
   arrival timestamps — that's the 4-node **quadratic** solve, which is
   mirror-root ambiguous (`tdoa_solver.py`). The unambiguous 5+-node
   least-squares case needs `min_corroborating_nodes=5`, not 4.
-- **Bandpass filtering + onset threshold are now tunable, but no species has
-  characterized values yet (updated 2026-07-11).** `docs/tdoa-correlation-
-  design-notes.md` found bandpass filtering recovers a 71-78%
-  onset-detection miss rate down to ~10% for real bird calls at realistic
-  SNR — that finding is now wired into `onset_detection.py`
+- **Bandpass filtering + onset threshold are tunable (updated 2026-07-11,
+  bands populated 2026-07-13 — this bullet was stale, corrected 2026-07-17).**
+  `docs/tdoa-correlation-design-notes.md` found bandpass filtering recovers a
+  71-78% onset-detection miss rate down to ~10% for real bird calls at
+  realistic SNR — that finding is wired into `onset_detection.py`
   (`bandpass_filter()`, ported from `tools/synthetic_snr_feasibility.py`),
   and `onset_threshold_factor` (previously a hardcoded 8.0, tuned only for
   hand-clap validation tests) is a per-species DB column alongside
   `freq_band_low_hz`/`freq_band_high_hz`, editable from the Settings tab.
   Both are snapshotted onto `tdoa_attempts` at plan time like
-  `onset_detection_method`. Still a gap in practice: every species defaults
-  to `onset_threshold_factor=8.0` / no bandpass (NULL band), since no
-  species — including the Grey Butcherbird case that surfaced this — has
-  had its call band derived from a reference recording yet. The plumbing
-  exists; the per-species values still need deriving.
+  `onset_detection_method`. All 4 currently-configured species (Gray
+  Butcherbird, Noisy Miner, Pied Currawong, Torresian Crow) have derived
+  bands and tuned thresholds as of 2026-07-13 — see
+  `config/species_tdoa_params.json` / `tools/README.md`. Bandpass is now
+  also applied ahead of milestone 5's leading-edge correlation, not just
+  onset detection (`tdoa-correlation-design-notes.md` §7-8 found it helps
+  correlation directly). Still open: `onset_threshold_factor`/band values
+  were derived from reference recordings, not validated against real pulled
+  attempts on this property yet (each species' `notes` field says so).
+- **`species_tdoa_params.correlation_method` was dead config until
+  2026-07-17.** Stored, snapshotted onto attempts, exposed via the API/UI,
+  but nothing read it to actually run a correlation — the field described a
+  choice that had no effect. Fixed alongside milestone 5 above (now
+  consumed by `correlation.py`); the UI dropdown's `onset_envelope` option
+  — anticipated as a future third method in `sound-capture-node/DESIGN.md`'s
+  "Per-species correlation mechanism" section (better for periodic/
+  narrowband calls at risk of cycle-slip/phase ambiguity, e.g. Pheasant
+  Coucal) but never actually implemented here — was removed from the
+  dropdown the same day since selecting it silently degraded a species to
+  always-fallback with no visible error. Re-add once (if) it's built.
 - **No `hint_point` wired into the automatic solve.** Nothing in production
   config defines one (only the manual `POST /api/tdoa/solve` route accepts
   one ad-hoc per-request). A 4-node solve's mirror root is stored

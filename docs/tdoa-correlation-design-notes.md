@@ -286,19 +286,43 @@ detected at all). No change to its status as a separate, unsolved problem (§6).
   (MAC `_97230`); broader noise diversity (wind days, rain, different times of
   day) hasn't been tested.
 - A quality-gating step (e.g. `peak_corr_coef` thresholding to reject/flag bad
-  correlation estimates) hasn't been built or tested — needed before
-  wide+bandpass (§8) could be considered as a production option.
+  correlation estimates) is now built for the narrow-window production path
+  (`server/correlation.py`'s `MIN_PEAK_CORR_COEF`/`AMBIGUOUS_RATIO_THRESHOLD`,
+  2026-07-17 — same threshold values validated here and in
+  `clap_sync_check.py` against real hand-clap tests, not independently
+  re-derived for bird calls). Still not built or tested for wide+bandpass
+  specifically — §8's recommendation ("do not switch to wide+bandpass
+  without also implementing a quality-gating step") is therefore still
+  open; the gate that exists guards the narrow-window path only.
 
 ## 10. Recommended next steps for hub TDOA implementation
 
 1. Build a per-species band lookup (derive once per target species from clean
-   reference recordings, store in the hub).
+   reference recordings, store in the hub). **Done 2026-07-13** for the 4
+   currently-configured species (Gray Butcherbird, Noisy Miner, Pied
+   Currawong, Torresian Crow) — see `config/species_tdoa_params.json` /
+   `tools/README.md`.
 2. Implement the bandpass step in the hub's correlation pipeline, ahead of
    the existing leading-edge trim + correlation, keeping the leading-edge
    window at its current narrow (clap-tuned) defaults, scored with plain
-   cross-correlation (not GCC-PHAT — see §7).
+   cross-correlation (not GCC-PHAT — see §7). **Done 2026-07-17, not yet
+   deployed** — `server/correlation.py` (leading-edge trim + scoring,
+   confidence gate) wired into `routes.py`'s `_correlate_attempt_node`;
+   bandpass applied to both channels ahead of correlation when a species has
+   a configured band; `correlation_method` defaulted to `plain` for all 4
+   species per this section's finding. See `project_bird_tdoa_correlation_gap`
+   memory for the full implementation writeup — production's version differs
+   from this doc's tooling in one structural way worth knowing: the origin
+   and neighbour WAVs don't share a common sample-index timebase (the origin
+   is a raw trigger capture, not pulled against the shared window), so each
+   buffer's leading-edge trim center is computed independently from its own
+   `t_start_us` against the shared `origin_arrival_us` anchor, rather than
+   trimming both buffers around one shared index the way
+   `clap_sync_check.py`'s `trim_to_leading_edge()` does.
 3. Decide how to handle species known to fail this approach (Coucal-class
    calls): exclude from auto-localization, surface a low-confidence flag, or
-   build a separate matched-filter path.
+   build a separate matched-filter path. **Still open** — none of the 4
+   currently-configured species are Coucal-class, so not yet urgent, but
+   unresolved if/when one is added.
 4. Broaden the noise corpus used for validation (currently two recording runs
-   from one node).
+   from one node). **Still open.**

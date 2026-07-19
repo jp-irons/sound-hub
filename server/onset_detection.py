@@ -35,9 +35,13 @@ why lowering it isn't a substitute for bandpass filtering.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfiltfilt
+
+log = logging.getLogger("sound_hub.onset_detection")
 
 # Onset detector tuning — short-time energy envelope, refined to the
 # steepest-rise sample. Copied from tools/clap_sync_check.py; keep in sync
@@ -113,6 +117,7 @@ def detect_onset(
     window_ms: float = _ONSET_WINDOW_MS,
     threshold_factor: float = _ONSET_THRESHOLD_FACTOR,
     margin_ms: float = _ONSET_REFINE_MARGIN_MS,
+    background_override: float | None = None,
 ) -> int:
     """Return the sample index of the most prominent short-time-energy
     transient in `data`, refined to the steepest-rise sample within
@@ -123,6 +128,23 @@ def detect_onset(
     tools/clap_sync_check.py's detect_onset docstring for the full
     rationale (a real outdoor buffer often has other transients ahead of
     the one that matters).
+
+    background_override (added 2026-07-19, node-reported noise floor
+    design): when given, used as the background level instead of
+    np.median(rms) of this clip. Motivation: TDOA corroboration pulls are
+    deliberately narrow (pre/post margins around a known arrival — see
+    routes.py _plan_tdoa_attempt_inner), so a clip can be mostly "active
+    signal" with too little genuine quiet background left for the
+    clip-derived median to be reliable — the node tracks its own ambient
+    level continuously (NoiseFloorTracker, sound-capture-node) and reports
+    it on every pull. Must already be in the same normalized [-1.0, 1.0)
+    scale soundfile uses here — see detect_onset_us's node_noise_floor_rms
+    param for where the int16->normalized conversion happens. The
+    clip-derived median is still computed and logged alongside the
+    override every time one is given, so real pull data accumulates for
+    comparison before anything downstream (e.g. per-species margins) is
+    tuned against the override value — see project_bird_tdoa_correlation_gap
+    memory. Not yet used to change any margins itself.
 
     Raises ValueError if even the loudest point in the buffer doesn't look
     like a real transient. The message includes enough detail (background/
@@ -135,7 +157,17 @@ def detect_onset(
     onset detector when it was actually a real near-silent buffer.
     """
     rms = _energy_envelope(data, rate, window_ms)
-    background = np.median(rms)
+    clip_background = np.median(rms)
+    if background_override is not None:
+        background = background_override
+        log.info(
+            "onset background: clip_derived=%.5f node_reported=%.5f "
+            "delta=%.5f (using node_reported)",
+            clip_background, background_override,
+            background_override - clip_background,
+        )
+    else:
+        background = clip_background
     threshold = max(background * threshold_factor, 1e-6)
 
     peak_idx = int(np.argmax(rms))
@@ -160,6 +192,7 @@ def detect_onset_us(
     threshold_factor: float = _ONSET_THRESHOLD_FACTOR,
     freq_band_low_hz: float | None = None,
     freq_band_high_hz: float | None = None,
+    node_noise_floor_rms: float | None = None,
 ) -> float:
     """Run the species' configured onset_detection_method against a node's
     WAV and return the absolute (node-clock) microsecond timestamp of the
@@ -180,6 +213,17 @@ def detect_onset_us(
     freq_band_high_hz are given — either one alone (or neither) leaves the
     buffer unfiltered, matching today's default no-filtering behavior.
 
+    node_noise_floor_rms (added 2026-07-19): raw int16-scale broadband RMS
+    noise floor as reported by the node on this pull (AudioPullHandler's
+    X-Noise-Floor-Rms header, NoiseFloorTracker on the node side — see that
+    class's doc for what it measures). None for callers that don't have a
+    pull response to read a header from (origin/known-reporter WAVs, or
+    older node firmware) — see detect_onset's background_override doc for
+    what happens in that case. The conversion from this raw int16 scale to
+    the normalized [-1.0, 1.0) scale soundfile loads WAVs into lives here,
+    not in the caller, so routes.py never needs to know soundfile's
+    normalization convention.
+
     Raises ValueError if the method is unknown or no transient is found;
     callers should catch this and record 'onset_failed' rather than let it
     propagate (see routes.py _correlate_attempt_node).
@@ -190,5 +234,11 @@ def detect_onset_us(
     rate, data = _load_mono(filepath)
     if freq_band_low_hz is not None and freq_band_high_hz is not None:
         data = bandpass_filter(data, rate, freq_band_low_hz, freq_band_high_hz)
-    onset_idx = detect_onset(data, rate, threshold_factor=threshold_factor)
+    background_override = (
+        node_noise_floor_rms / 32768.0 if node_noise_floor_rms is not None else None
+    )
+    onset_idx = detect_onset(
+        data, rate, threshold_factor=threshold_factor,
+        background_override=background_override,
+    )
     return t_start_us + (onset_idx / rate) * 1e6

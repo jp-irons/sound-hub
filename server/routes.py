@@ -1291,12 +1291,19 @@ async def _correlate_attempt_node(
         return
 
     fpath = os.path.join(_AUDIO_DIR, filename)
+    # Milestone 6 (2026-07-19, node-reported noise floor): only present when
+    # audio_event came from a fresh direct pull (_save_direct_pull_audio) —
+    # None for origin/known-reporter/reused_existing WAVs, which have no
+    # pull-response header to read from. detect_onset_us treats None as
+    # "fall back to the clip-derived median", unchanged behavior.
+    node_noise_floor_rms = audio_event.get("noise_floor_rms")
     try:
         arrival_us = onset_detection.detect_onset_us(
             onset_detection_method, fpath, t_start_us,
             threshold_factor=onset_threshold_factor,
             freq_band_low_hz=freq_band_low_hz,
             freq_band_high_hz=freq_band_high_hz,
+            node_noise_floor_rms=node_noise_floor_rms,
         )
     except Exception as exc:
         await db.update_tdoa_attempt_node_result(
@@ -1384,7 +1391,7 @@ async def _correlate_attempt_node(
 
 async def _fetch_audio_direct(
     node_id: str, t_start_us: int, t_end_us: int,
-) -> tuple[bytes, int, int]:
+) -> tuple[bytes, int, int, float | None]:
     """Pull a WAV directly from a node's GET /app/api/audio/pull, bypassing
     the ESP-NOW AudioRequest/broker-relay round trip entirely (see
     AudioPullHandler.hpp on the node side, sound-capture-node).
@@ -1399,12 +1406,16 @@ async def _fetch_audio_direct(
     that route's own polling contract (GET /audio/requests/{id}) would need
     a separate, deliberate migration.
 
-    Returns (wav_bytes, actual_start_us, actual_end_us). The actual* values
-    come from the node's X-Actual-Start-Us/X-Actual-End-Us response headers
-    — AudioStore may have clipped to whatever it actually retained, same
-    reason the old ESP-NOW push path carried these in its query string —
-    falling back to the requested window if a header is missing (older
-    firmware/unexpected response).
+    Returns (wav_bytes, actual_start_us, actual_end_us, noise_floor_rms).
+    The actual* values come from the node's X-Actual-Start-Us/
+    X-Actual-End-Us response headers — AudioStore may have clipped to
+    whatever it actually retained, same reason the old ESP-NOW push path
+    carried these in its query string — falling back to the requested
+    window if a header is missing (older firmware/unexpected response).
+    noise_floor_rms comes from X-Noise-Floor-Rms (added 2026-07-19, see
+    AudioPullHandler.hpp/NoiseFloorTracker.hpp) — raw int16-scale RMS, None
+    if the node's firmware predates this header. See onset_detection.py's
+    detect_onset_us for where this gets unit-converted and consumed.
 
     Raises HTTPException. status_code is deliberately partitioned so
     callers can distinguish "the node told us no" from "we couldn't even
@@ -1459,11 +1470,14 @@ async def _fetch_audio_direct(
 
     actual_start_us = int(resp.headers.get("X-Actual-Start-Us", t_start_us))
     actual_end_us = int(resp.headers.get("X-Actual-End-Us", t_end_us))
-    return resp.content, actual_start_us, actual_end_us
+    noise_floor_raw = resp.headers.get("X-Noise-Floor-Rms")
+    noise_floor_rms = float(noise_floor_raw) if noise_floor_raw is not None else None
+    return resp.content, actual_start_us, actual_end_us, noise_floor_rms
 
 
 async def _save_direct_pull_audio(
     node_id: str, wav_bytes: bytes, t_start_us: int, t_end_us: int,
+    noise_floor_rms: float | None = None,
 ) -> dict:
     """Save a directly-pulled WAV and record its audio_events row, mirroring
     the purpose == "tdoa_corroboration" branch of audio_push() below.
@@ -1478,8 +1492,15 @@ async def _save_direct_pull_audio(
     fewer moving part than the ESP-NOW path needed — no wifiMac lookup, no
     broker resolution).
 
+    noise_floor_rms (added 2026-07-19) — the node's reported floor for this
+    pull (see _fetch_audio_direct), threaded through in-memory only, not
+    persisted to the audio_events table: the only current consumer is the
+    _correlate_attempt_node call this dict feeds straight into, and nothing
+    else needs it later (see project_bird_tdoa_correlation_gap memory).
+
     Returns a dict shaped the way _correlate_attempt_node expects
-    (id/filename/t_start_us/t_end_us) — not a full audio_events DB row.
+    (id/filename/t_start_us/t_end_us/noise_floor_rms) — not a full
+    audio_events DB row.
     """
     os.makedirs(_AUDIO_DIR, exist_ok=True)
     fname = f"audio_pull_{node_id}_{t_start_us}.wav"
@@ -1492,10 +1513,12 @@ async def _save_direct_pull_audio(
         bytes_=len(wav_bytes), analysis_status="skipped_birdnet_tdoa_pull",
         t_start_us=t_start_us, t_end_us=t_end_us, filename=fname,
     )
-    log.info("direct pull node=%s — %d bytes -> %s", node_id, len(wav_bytes), fname)
+    log.info("direct pull node=%s — %d bytes -> %s (noise_floor_rms=%s)",
+              node_id, len(wav_bytes), fname, noise_floor_rms)
     return {
         "id": audio_event_id, "filename": fname,
         "t_start_us": t_start_us, "t_end_us": t_end_us,
+        "noise_floor_rms": noise_floor_rms,
     }
 
 
@@ -1939,7 +1962,7 @@ async def _plan_tdoa_attempt_inner(
         # on a push/ack that may never arrive — every outcome below is
         # terminal on the first attempt.
         try:
-            wav_bytes, actual_start_us, actual_end_us = await _fetch_audio_direct(
+            wav_bytes, actual_start_us, actual_end_us, noise_floor_rms = await _fetch_audio_direct(
                 nid, pull_t_start_us, pull_t_end_us,
             )
         except HTTPException as exc:
@@ -1960,6 +1983,7 @@ async def _plan_tdoa_attempt_inner(
 
         audio_event = await _save_direct_pull_audio(
             nid, wav_bytes, actual_start_us, actual_end_us,
+            noise_floor_rms=noise_floor_rms,
         )
         node_row_id = await db.insert_tdoa_attempt_node(
             attempt_id=attempt_id, node_id=nid, request_id=None,
