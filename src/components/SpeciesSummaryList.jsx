@@ -182,11 +182,19 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
     },
     count: (mobile) => ({
       fontSize: 12, color: 'var(--text-muted, #888)',
-      width: mobile ? 24 : 70, flexShrink: 0, textAlign: 'right',
+      // Wide enough for "9999 detections" without wrapping — the earlier
+      // fixed-width fix (minWidth -> width, for column alignment) exposed
+      // this: at width:70 with no whiteSpace set, "10 detections"/"140
+      // detections" no longer had room to grow and wrapped onto two lines
+      // instead. nowrap is a belt-and-braces backstop in case a count ever
+      // exceeds even this width — better to spill a few px than wrap.
+      width: mobile ? 24 : 90, flexShrink: 0, textAlign: 'right',
+      whiteSpace: 'nowrap',
     }),
     lastSeen: {
       fontSize: 12, color: 'var(--text-muted, #888)',
       width: 110, flexShrink: 0, textAlign: 'right',
+      whiteSpace: 'nowrap',
     },
     detailWrap: { padding: '0 12px 10px 34px' },
     detailHeader: { marginBottom: 8 },
