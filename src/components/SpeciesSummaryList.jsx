@@ -182,11 +182,11 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
     },
     count: (mobile) => ({
       fontSize: 12, color: 'var(--text-muted, #888)',
-      minWidth: mobile ? 24 : 70, textAlign: 'right',
+      width: mobile ? 24 : 70, flexShrink: 0, textAlign: 'right',
     }),
     lastSeen: {
       fontSize: 12, color: 'var(--text-muted, #888)',
-      minWidth: 110, textAlign: 'right',
+      width: 110, flexShrink: 0, textAlign: 'right',
     },
     detailWrap: { padding: '0 12px 10px 34px' },
     detailHeader: { marginBottom: 8 },
