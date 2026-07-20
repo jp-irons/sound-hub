@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import birdnet_worker, config, correlation, db, onset_detection, registry, status_mapper, suntimes
+from . import birdnet_worker, config, correlation, db, onset_detection, registry, species_links, status_mapper, suntimes
 from .auth import get_current_user, require_admin, require_node, require_viewer
 from .models import (
     AckStatus,
@@ -23,7 +23,8 @@ from .models import (
     NodeAudioSummary, NodeConfigRequest, NodeHeartbeatRequest, NodePosition,
     PositionFromEma,
     NodeRegisterRequest,
-    NodeTriggerSummary, NodeView, SpeciesSummary, SpeciesTdoaParams,
+    NodeTriggerSummary, NodeView, SpeciesLinksResolveResult, SpeciesSummary,
+    SpeciesTdoaParams,
     SpeciesTdoaParamsRecord, TdoaAttemptNodeRecord, TdoaAttemptRecord,
     TdoaRequest, TdoaResponse,
     LatLon, TriggerDiagAnalytics, TriggerEventRecord,
@@ -2246,6 +2247,10 @@ async def audio_push(
                 await db.insert_detections(fname, _now_iso(), persisted, node_id=nodeId)
                 log.info("audio push id=%s node=%s — %d detection(s) registered",
                           requestId, nodeId, len(persisted))
+                # Fire-and-forget: resolve Wikipedia/eBird links for any
+                # species in this batch never seen before. Never blocks this
+                # request — see species_links.maybe_resolve_new().
+                species_links.maybe_resolve_new(persisted)
 
             audio_event_id = await db.insert_audio_event(
                 node_id=nodeId, triggered=triggered, received_at=_now_iso(),
@@ -3130,6 +3135,27 @@ async def list_detections(
     return [DetectionRecord(**row) for row in rows]
 
 
+@router.post(
+    "/species-links/resolve-missing",
+    response_model=SpeciesLinksResolveResult,
+    dependencies=[Depends(require_admin)],
+)
+async def resolve_missing_species_links():
+    """Resolve Wikipedia/eBird links for every species in `detections` that
+    has no species_links row yet, or whose row previously failed to
+    resolve. Idempotent and safe to re-run — species already resolved
+    ('ok' status) are left untouched.
+
+    Backs the Settings tab's "Resolve missing species links" button. Also
+    serves as the one-time backfill for species detected before this
+    feature existed: species_links.maybe_resolve_new() (called after every
+    detection insert going forward) only ever sees species as they're
+    newly persisted, so anything already in `detections` before this table
+    was added needs this sweep at least once.
+    """
+    return SpeciesLinksResolveResult(**await species_links.resolve_missing())
+
+
 @router.get("/detections/species-summary", response_model=list[SpeciesSummary])
 async def species_summary(
     min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
@@ -3189,6 +3215,14 @@ async def species_summary(
         if r["analyzed_at"] > entry["last_seen"]:
             entry["last_seen"] = r["analyzed_at"]
 
+    # This path builds SpeciesSummary rows from raw detections in Python
+    # rather than db.list_species_summary()'s SQL join, so wikipedia_url/
+    # ebird_code have to be merged in separately here too — otherwise a
+    # time_of_day-filtered view would silently lose the links every other
+    # view of the species list has. links is small (one row per species ever
+    # detected), cheap to fetch in full rather than filtering per-key.
+    links = {row["species_key"]: row for row in await db.list_species_links()}
+
     summaries = [
         SpeciesSummary(
             common_name=v["common_name"],
@@ -3196,6 +3230,8 @@ async def species_summary(
             count=v["count"],
             last_seen=v["last_seen"],
             avg_confidence=v["_conf_sum"] / v["count"],
+            wikipedia_url=links.get(v["scientific_name"], {}).get("wikipedia_url"),
+            ebird_code=links.get(v["scientific_name"], {}).get("ebird_code"),
         )
         for v in agg.values()
     ]
@@ -3232,6 +3268,7 @@ async def analyze_wav(file: UploadFile = File(...)):
     analyzed_at = datetime.now(timezone.utc).isoformat()
     source = file.filename or "upload"
     await db.insert_detections(source, analyzed_at, raw)
+    species_links.maybe_resolve_new(raw)
 
     rows = await db.list_detections(limit=len(raw))
     return [DetectionRecord(**row) for row in rows[:len(raw)]]

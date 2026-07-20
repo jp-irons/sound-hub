@@ -176,6 +176,10 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
       flex: '0 1 auto', minWidth: 0,
       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
     },
+    wikiLink: {
+      fontSize: 11, color: 'var(--accent, #4da6ff)', textDecoration: 'none',
+      flex: '0 0 auto', whiteSpace: 'nowrap',
+    },
     count: (mobile) => ({
       fontSize: 12, color: 'var(--text-muted, #888)',
       minWidth: mobile ? 24 : 70, textAlign: 'right',
@@ -194,6 +198,10 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
       display: 'block', fontStyle: 'italic', fontSize: 12,
       color: 'var(--text-muted, #888)',
       whiteSpace: 'normal', overflowWrap: 'break-word',
+    },
+    detailWikiLink: {
+      display: 'inline-block', marginTop: 4, fontSize: 11,
+      color: 'var(--accent, #4da6ff)', textDecoration: 'none',
     },
     table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
     th: {
@@ -224,6 +232,15 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
           <span style={sty.chevron(open)}>▶</span>
           <span style={sty.name}>{s.commonName}</span>
           {!isMobile && <span style={sty.sci}>{s.scientificName}</span>}
+          {!isMobile && s.wikipediaUrl && (
+            <a
+              href={s.wikipediaUrl} target="_blank" rel="noopener noreferrer"
+              style={sty.wikiLink} title="View on Wikipedia"
+              onClick={e => e.stopPropagation()}
+            >
+              Wikipedia ↗
+            </a>
+          )}
           <span style={sty.count(isMobile)}>
             {isMobile ? s.count : `${s.count} detection${s.count !== 1 ? 's' : ''}`}
           </span>
@@ -235,6 +252,15 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
               <div style={sty.detailHeader}>
                 <span style={sty.detailName}>{s.commonName}</span>
                 <span style={sty.detailSci}>{s.scientificName}</span>
+                {s.wikipediaUrl && (
+                  <a
+                    href={s.wikipediaUrl} target="_blank" rel="noopener noreferrer"
+                    style={sty.detailWikiLink} title="View on Wikipedia"
+                    onClick={e => e.stopPropagation()}
+                  >
+                    Wikipedia ↗
+                  </a>
+                )}
               </div>
             )}
             {detail === 'loading' && (

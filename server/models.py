@@ -401,6 +401,23 @@ class SpeciesSummary(BaseModel):
     count: int
     last_seen: str = Field(alias="lastSeen")
     avg_confidence: float = Field(alias="avgConfidence")
+    # Resolved by species_links.py, keyed on scientific_name — see db.py's
+    # species_links table. None until resolved (lazily on first detection,
+    # or via POST /api/species-links/resolve-missing). wikipedia_url is
+    # rendered in the UI; ebird_code isn't yet (kept for a possible future
+    # Macaulay Library/eBird media link) but costs nothing to include here
+    # since it's a pure local lookup alongside the Wikipedia resolution.
+    wikipedia_url: Optional[str] = Field(default=None, alias="wikipediaUrl")
+    ebird_code: Optional[str] = Field(default=None, alias="ebirdCode")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SpeciesLinksResolveResult(BaseModel):
+    """Response for POST /api/species-links/resolve-missing."""
+    resolved: int
+    failed: int
+    total: int
 
     model_config = ConfigDict(populate_by_name=True)
 

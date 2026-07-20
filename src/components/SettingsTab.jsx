@@ -387,6 +387,32 @@ export default function SettingsTab() {
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Species links (Wikipedia / eBird — see species_links.py, db.py's
+  // species_links table)
+  // ---------------------------------------------------------------------
+  const [resolveBusy, setResolveBusy] = useState(false)
+  const [resolveError, setResolveError] = useState(null)
+  const [resolveResult, setResolveResult] = useState(null)
+
+  async function handleResolveMissing() {
+    setResolveBusy(true)
+    setResolveError(null)
+    setResolveResult(null)
+    try {
+      const res = await apiFetch('/species-links/resolve-missing', { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? `${res.status} ${res.statusText}`)
+      }
+      setResolveResult(await res.json())
+    } catch (err) {
+      setResolveError(err.message ?? String(err))
+    } finally {
+      setResolveBusy(false)
+    }
+  }
+
   const loadOrigin = () => {
     setLoading(true)
     setError(null)
@@ -1003,6 +1029,34 @@ export default function SettingsTab() {
             <div style={{ fontSize: 11, color: 'var(--red, #f44336)', marginTop: 8 }}>{addError}</div>
           )}
         </div>
+      </div>
+
+      <div style={sty.wideSection}>
+        <div style={sty.label}>Species Links</div>
+        <div style={{ ...sty.hint, marginBottom: 10 }}>
+          Wikipedia links shown next to each species in the Detections tab are resolved once
+          per species and cached — a new species is resolved automatically the first time it's
+          detected. Species detected before this feature existed, or a species whose lookup
+          failed (e.g. a transient Wikipedia API error), need this sweep to pick them up.
+          Safe to re-run any time — already-resolved species are left untouched.
+        </div>
+        <button
+          style={{ ...sty.actionBtn, ...sty.primaryBtn, padding: '7px 16px', marginLeft: 0 }}
+          onClick={handleResolveMissing} disabled={resolveBusy}
+        >
+          {resolveBusy ? 'Resolving…' : 'Resolve missing species links'}
+        </button>
+        {resolveResult && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted, #888)', marginTop: 8 }}>
+            {resolveResult.total === 0
+              ? 'Nothing to resolve — every detected species already has a link.'
+              : `Resolved ${resolveResult.resolved} of ${resolveResult.total}` +
+                (resolveResult.failed > 0 ? ` (${resolveResult.failed} failed — try again later)` : '.')}
+          </div>
+        )}
+        {resolveError && (
+          <div style={{ fontSize: 12, color: 'var(--red, #f44336)', marginTop: 8 }}>{resolveError}</div>
+        )}
       </div>
     </div>
   )

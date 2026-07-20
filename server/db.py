@@ -307,6 +307,31 @@ CREATE TABLE IF NOT EXISTS tdoa_attempt_nodes (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+-- One row per distinct species ever seen in `detections`, holding resolved
+-- reference links for the hub UI (see species_links.py). species_key is the
+-- scientific_name, not common_name — chosen because BirdNET's common names
+-- use American spelling unconditionally while Wikipedia's actual article
+-- titles frequently don't (e.g. "Gray Fantail" vs "Grey fantail"), and the
+-- binomial sidesteps that entirely. common_name is stored alongside purely
+-- for display/debugging, not as a lookup key.
+--
+-- Rows are written two ways: lazily, the first time a never-before-seen
+-- species is persisted to `detections` (species_links.maybe_resolve_new,
+-- called from routes.py right after db.insert_detections()); and in bulk via
+-- POST /api/species-links/resolve-missing, which also serves as the one-time
+-- backfill for species detected before this table existed. status='failed'
+-- rows (Wikipedia lookup came back empty, or the request errored) are left
+-- in place rather than deleted, so resolve-missing's "pending" count and
+-- retry sweep can find them again.
+CREATE TABLE IF NOT EXISTS species_links (
+    species_key   TEXT PRIMARY KEY,   -- scientific_name
+    common_name   TEXT NOT NULL,
+    ebird_code    TEXT,
+    wikipedia_url TEXT,
+    status        TEXT NOT NULL,      -- 'ok' | 'failed'
+    resolved_at   TEXT NOT NULL
+);
 """
 
 # Values for `approval_status`. New nodes land as PENDING — being seen on the
@@ -1460,32 +1485,38 @@ async def list_species_summary(
     SQL range; callers needing it (routes.py) fetch raw rows, classify them,
     and aggregate in Python instead of calling this function.
     """
-    where = ["confidence >= ?"]
+    # Columns qualified with d. throughout (rather than left bare) because
+    # species_links — joined in below for wikipedia_url/ebird_code — also
+    # has a common_name column; bare `common_name` would be an ambiguous
+    # reference once both tables are in scope.
+    where = ["d.confidence >= ?"]
     params: list = [min_conf]
 
     if species:
-        where.append("(common_name LIKE ? OR scientific_name LIKE ?)")
+        where.append("(d.common_name LIKE ? OR d.scientific_name LIKE ?)")
         like = f"%{species}%"
         params.extend([like, like])
 
     if from_ts:
-        where.append("analyzed_at >= ?")
+        where.append("d.analyzed_at >= ?")
         params.append(from_ts)
 
     if to_ts:
-        where.append("analyzed_at <= ?")
+        where.append("d.analyzed_at <= ?")
         params.append(to_ts)
 
     async with connect() as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
-            f"""SELECT common_name, scientific_name,
+            f"""SELECT d.common_name, d.scientific_name,
                        COUNT(*) AS count,
-                       MAX(analyzed_at) AS last_seen,
-                       AVG(confidence) AS avg_confidence
-                FROM detections
+                       MAX(d.analyzed_at) AS last_seen,
+                       AVG(d.confidence) AS avg_confidence,
+                       l.wikipedia_url, l.ebird_code
+                FROM detections d
+                LEFT JOIN species_links l ON l.species_key = d.scientific_name
                 WHERE {' AND '.join(where)}
-                GROUP BY common_name, scientific_name
+                GROUP BY d.common_name, d.scientific_name
                 ORDER BY count DESC""",
             params,
         )
@@ -1608,6 +1639,59 @@ async def get_effective_species_tdoa_params(species_key: str) -> tuple[dict, boo
         species_key, reason, DEFAULT_SPECIES_KEY,
     )
     return default_row, True
+
+
+# ---------------------------------------------------------------------------
+# Species links (Wikipedia / eBird reference URLs — species_links.py)
+# ---------------------------------------------------------------------------
+
+async def list_species_links() -> list[dict]:
+    """Return every resolved (or attempted) species_links row."""
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM species_links")
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def upsert_species_link(
+    *,
+    species_key: str,
+    common_name: str,
+    ebird_code: str | None,
+    wikipedia_url: str | None,
+    status: str,
+    resolved_at: str,
+) -> None:
+    """Insert or replace one species' resolved links row."""
+    async with connect() as conn:
+        await conn.execute(
+            """INSERT OR REPLACE INTO species_links
+               (species_key, common_name, ebird_code, wikipedia_url, status, resolved_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (species_key, common_name, ebird_code, wikipedia_url, status, resolved_at),
+        )
+        await conn.commit()
+
+
+async def list_species_missing_links() -> list[dict]:
+    """Return {common_name, scientific_name} for every species present in
+    `detections` that has no species_links row yet, or whose row is
+    status='failed'. Feeds POST /api/species-links/resolve-missing — this is
+    both the retry queue and, the first time it's ever run, the backfill for
+    species detected before this feature existed (maybe_resolve_new() only
+    catches species going forward from the species_links table's creation).
+    """
+    async with connect() as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """SELECT DISTINCT d.common_name, d.scientific_name
+               FROM detections d
+               LEFT JOIN species_links l ON l.species_key = d.scientific_name
+               WHERE l.species_key IS NULL OR l.status = 'failed'"""
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
 
 async def reset_species_tdoa_params_to_factory_default() -> dict:
