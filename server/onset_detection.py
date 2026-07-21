@@ -130,8 +130,9 @@ def detect_onset(
     the one that matters).
 
     background_override (added 2026-07-19, node-reported noise floor
-    design): when given, used as the background level instead of
-    np.median(rms) of this clip. Motivation: TDOA corroboration pulls are
+    design; changed to a min()-based safety floor 2026-07-21 — see below):
+    when given, the LOWER of this and the clip-derived median is used as
+    the background level. Motivation: TDOA corroboration pulls are
     deliberately narrow (pre/post margins around a known arrival — see
     routes.py _plan_tdoa_attempt_inner), so a clip can be mostly "active
     signal" with too little genuine quiet background left for the
@@ -139,12 +140,28 @@ def detect_onset(
     level continuously (NoiseFloorTracker, sound-capture-node) and reports
     it on every pull. Must already be in the same normalized [-1.0, 1.0)
     scale soundfile uses here — see detect_onset_us's node_noise_floor_rms
-    param for where the int16->normalized conversion happens. The
-    clip-derived median is still computed and logged alongside the
-    override every time one is given, so real pull data accumulates for
-    comparison before anything downstream (e.g. per-species margins) is
-    tuned against the override value — see project_bird_tdoa_correlation_gap
-    memory. Not yet used to change any margins itself.
+    param for where the int16->normalized conversion happens.
+
+    **2026-07-21 correction:** originally always preferred the override
+    outright when present. Real fleet-wide field data (dawn+dusk cycle,
+    717 pulled-neighbor rows) showed this was actively harmful — onset_failed
+    on pulled-neighbor rows hit 89.7% (vs ~1-3% for origin/unaffected rows),
+    because node_reported was higher than clip_derived 94.8% of the time,
+    not lower as the original design assumed. Root cause: NoiseFloorTracker
+    integrates over a 180s window; during sustained chorus activity, many
+    calls sit below its freeze-ratio threshold and gradually drag the floor
+    up toward "typical chorus-period activity" rather than true quiet
+    ambient, while a short clip's own median (centered on one specific
+    arrival) stays closer to the quiet moments immediately around that one
+    call — the opposite of the narrow-clip-inflation effect this was built
+    to counter. Switching to min() is a safety measure, not a fix for that
+    underlying tau/freeze mismatch: it guarantees this can never raise the
+    effective threshold above what clip-derived-only behavior already gave,
+    so it can only help or be a no-op, never actively hurt, while the
+    NoiseFloorTracker measurement itself gets redesigned. The clip-derived
+    median is still computed and logged alongside the override every time
+    one is given — see project_bird_noise_floor_reporting memory for the
+    full investigation. Not yet used to change any margins itself.
 
     Raises ValueError if even the loudest point in the buffer doesn't look
     like a real transient. The message includes enough detail (background/
@@ -159,12 +176,13 @@ def detect_onset(
     rms = _energy_envelope(data, rate, window_ms)
     clip_background = np.median(rms)
     if background_override is not None:
-        background = background_override
+        background = min(clip_background, background_override)
         log.info(
             "onset background: clip_derived=%.5f node_reported=%.5f "
-            "delta=%.5f (using node_reported)",
+            "delta=%.5f (using %s)",
             clip_background, background_override,
             background_override - clip_background,
+            "node_reported" if background < clip_background else "clip_derived",
         )
     else:
         background = clip_background
