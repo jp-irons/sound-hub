@@ -48,12 +48,33 @@ from scipy.signal import correlate, resample_poly
 LEADING_EDGE_PRE_MS = 1.0
 LEADING_EDGE_POST_MS = 4.0
 
-# Confidence gate — same values validated in tools/clap_sync_check.py
-# against real hand-clap field tests (see that module's
-# _AMBIGUOUS_RATIO_THRESHOLD/_MIN_PEAK_CORR_COEF for the reasoning/incident
-# each threshold traces back to). Below either, the correlated estimate is
-# not trusted — see correlate_leading_edge()'s "trusted" return field.
-AMBIGUOUS_RATIO_THRESHOLD = 1.5
+# Confidence gate. MIN_PEAK_CORR_COEF is still the value validated in
+# tools/clap_sync_check.py against real hand-clap field tests (see that
+# module's _MIN_PEAK_CORR_COEF for the reasoning/incident it traces back
+# to) — field data (project_bird_tdoa_implausible_solves memory, 2026-07-23)
+# shows it's doing real work: only 55 of 2040 fell-back rows failed on
+# coefficient, averaging 0.214, clearly weak matches.
+#
+# AMBIGUOUS_RATIO_THRESHOLD lowered 1.5→1.2 (2026-07-23) — also inherited
+# from clap_sync_check.py, but same field data showed it was the dominant
+# bottleneck, not coefficient: 1985 of 2040 fell-back rows (97%) failed
+# *only* on ambiguity, with peak_corr_coef averaging 0.798 — actually higher
+# than the trusted group's own 0.704 average — and the rejected group's
+# ambiguity ratio averaged 1.198, not far below the old 1.5 bar. Real bird
+# calls plausibly have more repeated/periodic internal structure (harmonics,
+# trills) than the hand claps this was tuned against, producing a genuine
+# secondary correlation peak that isn't a wrong-match signal so much as a
+# normal feature of the call shape. Loosening this is judged a favourable
+# trade: LEADING_EDGE_PRE_MS/POST_MS bound the trim window to 5ms, so even a
+# wrongly-chosen secondary peak within an ambiguous window is bounded to a
+# few ms of timing error (~metres of range error at ~343 m/s) — small next
+# to the alternative, which is falling back to the fully independent
+# per-node detector with no cross-check at all (unbounded error — the
+# likely source of the implausible, thousands-of-km TDOA solves that
+# motivated this investigation). 1.2 is a first field-data-driven guess,
+# not a validated final value — expect retuning from real post-change data,
+# same status as every other threshold in this pipeline.
+AMBIGUOUS_RATIO_THRESHOLD = 1.2
 MIN_PEAK_CORR_COEF = 0.3
 
 # How close (in samples) a secondary peak has to be to the primary one to be
