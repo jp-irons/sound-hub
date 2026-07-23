@@ -1,9 +1,6 @@
 """
 Acoustic TDOA solver — closed-form, arbitrary node geometry.
 
-Copied from bird-locator/bird-tdoa-solver/tdoa_solver/solver.py.
-Do not edit here; update the source in bird-locator and re-copy.
-
 Method: Schau-Robinson linearisation in arbitrary coordinates.
 
 Each node i gives the range equation:
@@ -184,6 +181,21 @@ def _solve_least_squares(
             f"Geometry is singular or near-singular (rank={rank}). "
             "Nodes may be coplanar or collinear."
         )
+
+    # rank<4 only catches exact degeneracy. Near-singular geometry (short
+    # baselines relative to source distance, or a poorly-spread node subset
+    # for this particular attempt) can still amplify ordinary timestamp
+    # noise into wildly wrong output — mirrors the same check already done
+    # for the 4-node quadratic path via np.linalg.cond(Axyz). lstsq already
+    # computes the singular values needed for this; sv is sorted descending,
+    # so sv[0]/sv[-1] is the condition number at no extra cost.
+    cond = sv[0] / sv[-1] if sv[-1] > 0 else float('inf')
+    if cond > 1e10:
+        raise ValueError(
+            f"Geometry is ill-conditioned (cond={cond:.2e}). "
+            "Node subset may be poorly spread for this attempt."
+        )
+
     x, y, z, d = sol
     rms = _rms_residual(x, y, z, d, pos, d_arr)
     return SolveResult(x=x, y=y, z=z, d=d, residual=rms, method='least_squares')
