@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Aggregate report over TDOA attempts since the 2026-07-23 fixes
-(AMBIGUOUS_RATIO_THRESHOLD 1.5->1.2 @ ~10:20 Brisbane, least_squares
-conditioning check @ ~10:41 Brisbane). Answers: how many attempts have run,
-where are they dying (node dropout vs correlation vs solver), is the
-correlation trust rate what we expect, and -- most importantly -- do any
-solved attempts hold up physically.
+"""Aggregate report over recent TDOA attempts. Answers: how many attempts
+have run, where are they dying (node dropout vs correlation vs solver), is
+the correlation trust rate what we expect, and -- most importantly -- do
+any solved attempts hold up physically.
 
 Run on the hub VM:
-    python3 tools/tdoa_since_fix_report.py [cutoff_brisbane_HH:MM]
-    (default cutoff: 10:20 today, Brisbane time, UTC+10, no DST)
+    python3 tools/tdoa_since_fix_report.py [cutoff]
+    default cutoff: last 24 hours (rolling window from now)
+
+    cutoff can be:
+      - omitted                  -> now minus 24h
+      - "HH:MM"                  -> that time today, Brisbane (UTC+10, no DST)
+      - "YYYY-MM-DD HH:MM"       -> that exact Brisbane date/time, e.g. the
+                                     2026-07-23 10:20 fix-deployment reference
+                                     point from that day's investigation
 """
 import sqlite3
 import sys
@@ -20,10 +25,30 @@ DB_PATH = "/opt/sound-hub/sound_hub.db"
 C = 343.0  # m/s, matches tdoa_solver.DEFAULT_SPEED_OF_SOUND
 BRISBANE_OFFSET = timedelta(hours=10)
 
-cutoff_hhmm = sys.argv[1] if len(sys.argv) > 1 else "10:20"
+cutoff_arg = sys.argv[1] if len(sys.argv) > 1 else None
 now_brisbane = datetime.now(timezone.utc) + BRISBANE_OFFSET
-hh, mm = (int(x) for x in cutoff_hhmm.split(":"))
-cutoff_brisbane = now_brisbane.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+if cutoff_arg is None:
+    # Rolling window, not a fixed time-of-day -- a fixed "HH:MM" default
+    # silently reuses *today's* date every run, so it drifts to "today" and
+    # stops meaning anything the day after it was written (confirmed bug,
+    # 2026-07-24: defaulted to a cutoff a few minutes in the *future*).
+    cutoff_brisbane = now_brisbane - timedelta(hours=24)
+elif re.fullmatch(r"\d{1,2}:\d{2}", cutoff_arg):
+    hh, mm = (int(x) for x in cutoff_arg.split(":"))
+    cutoff_brisbane = now_brisbane.replace(hour=hh, minute=mm, second=0, microsecond=0)
+else:
+    # "YYYY-MM-DD HH:MM" (also accepts a "T" separator). tzinfo=utc here
+    # doesn't mean this value IS utc -- it matches the same "aware but the
+    # wall-clock number is actually Brisbane local time" convention used by
+    # now_brisbane above (datetime.now(utc) + BRISBANE_OFFSET), required so
+    # cutoff_utc = cutoff_brisbane - BRISBANE_OFFSET below computes a real
+    # epoch timestamp via .timestamp() instead of silently reinterpreting a
+    # naive value against the host's local system timezone.
+    cutoff_brisbane = datetime.strptime(
+        cutoff_arg.replace("T", " "), "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=timezone.utc)
+
 cutoff_utc = cutoff_brisbane - BRISBANE_OFFSET
 cutoff_us = int(cutoff_utc.timestamp() * 1_000_000)
 
