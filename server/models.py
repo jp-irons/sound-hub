@@ -204,6 +204,49 @@ class TdoaAttemptNodeRecord(BaseModel):
     )
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    peak_corr_coef: Optional[float] = Field(
+        default=None, alias="peakCorrCoef",
+        description="Leading-edge cross-correlation peak height (0-1) "
+                     "against the origin's WAV, when correlation was "
+                     "attempted (null for the origin's own row, or if "
+                     "correlation never ran — see correlation.py). Below "
+                     "MIN_PEAK_CORR_COEF means the match itself was weak.",
+    )
+    quality_ratio: Optional[float] = Field(
+        default=None, alias="qualityRatio",
+        description="Primary/secondary correlation-peak ratio — how "
+                     "unambiguous the match was. Below "
+                     "AMBIGUOUS_RATIO_THRESHOLD means arrival_us fell back "
+                     "to the independent per-node onset detector instead "
+                     "of the correlation-refined value, even if "
+                     "peak_corr_coef was good.",
+    )
+    delta_from_origin_us: Optional[float] = Field(
+        default=None, alias="deltaFromOriginUs",
+        description="This node's arrival_us minus the attempt's origin "
+                     "node's arrival_us — the actual TDOA value fed "
+                     "(indirectly, via absolute timestamps) to "
+                     "tdoa_solver.solve(). Zero for the origin's own row. "
+                     "Null if either arrival_us is missing.",
+    )
+    baseline_m: Optional[float] = Field(
+        default=None, alias="baselineM",
+        description="Straight-line distance (metres) between this node "
+                     "and the attempt's origin node, from node_positions. "
+                     "Null if either position is unset.",
+    )
+    consistency_ratio: Optional[float] = Field(
+        default=None, alias="consistencyRatio",
+        description="abs(speed_of_sound * delta_from_origin_us) / "
+                     "baseline_m — the physical-plausibility check: a real "
+                     "source can never produce a delay whose "
+                     "range-equivalent exceeds the baseline between the "
+                     "two receivers, so this can never legitimately exceed "
+                     "1.0. A value above 1 means these two timestamps are "
+                     "not both correct, regardless of what the solver "
+                     "later does with them. Null if baseline_m is null or "
+                     "zero.",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

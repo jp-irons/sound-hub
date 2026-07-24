@@ -1134,6 +1134,18 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                   <th style={sty.th}>Node</th>
                                   <th style={sty.th}>Role</th>
                                   <th style={sty.th}>Arrival</th>
+                                  <th style={sty.th} title="This node's arrival_us minus the origin's — the actual TDOA fed to the solver">
+                                    TDOA (Δ origin)
+                                  </th>
+                                  <th style={sty.th} title="Leading-edge correlation peak height, 0-1 — below MIN_PEAK_CORR_COEF means a weak match">
+                                    Corr
+                                  </th>
+                                  <th style={sty.th} title="Primary/secondary correlation-peak ratio — below AMBIGUOUS_RATIO_THRESHOLD means arrival_us fell back to the independent onset detector">
+                                    Ratio
+                                  </th>
+                                  <th style={sty.th} title="abs(c * Δ) / baseline to origin — a real source can never exceed 1.0 here regardless of distance; above 1 means these two timestamps can't both be correct">
+                                    Consistency
+                                  </th>
                                   <th style={sty.th}>File</th>
                                   <th style={sty.th}>Error</th>
                                 </tr>
@@ -1147,6 +1159,29 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     </td>
                                     <td style={sty.td}>
                                       {n.arrivalUs != null ? formatDateTime(tUsToIso(n.arrivalUs)) : '—'}
+                                    </td>
+                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
+                                      {n.nodeId === a.originNodeId
+                                        ? <span style={{ color: 'var(--text-muted, #888)' }}>origin</span>
+                                        : n.deltaFromOriginUs != null
+                                          ? `${n.deltaFromOriginUs >= 0 ? '+' : ''}${n.deltaFromOriginUs.toFixed(1)}µs`
+                                          : '—'}
+                                    </td>
+                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
+                                      {n.peakCorrCoef != null ? n.peakCorrCoef.toFixed(2) : '—'}
+                                    </td>
+                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
+                                      {n.qualityRatio != null
+                                        ? (n.qualityRatio > 1e6 ? '∞' : n.qualityRatio.toFixed(2))
+                                        : '—'}
+                                    </td>
+                                    <td style={{
+                                      ...sty.td, fontFamily: 'monospace', fontSize: 11,
+                                      color: n.consistencyRatio != null && n.consistencyRatio > 1
+                                        ? 'var(--red, #f44336)' : sty.td.color,
+                                      fontWeight: n.consistencyRatio != null && n.consistencyRatio > 1 ? 600 : 400,
+                                    }}>
+                                      {n.consistencyRatio != null ? n.consistencyRatio.toFixed(2) : '—'}
                                     </td>
                                     <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
                                       {n.filename ? (

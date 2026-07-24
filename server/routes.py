@@ -1620,14 +1620,28 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
         )
         return
 
-    # No hint_point is wired in here — nothing in production config defines
-    # one today (only the manual POST /tdoa/solve route accepts one ad-hoc).
-    # A 4-node solve's mirror-root ambiguity is therefore stored for manual
-    # review (solve_ambiguous_json), not auto-resolved. See DESIGN.md gaps.
+    # hint_point (2026-07-23): centroid of the nodes actually contributing
+    # to this solve. Resolves the 4-node quadratic path's mirror-root
+    # ambiguity (tdoa_solver._select_root) — without a hint, that path
+    # falls back to "prefer the root farther from the array centroid",
+    # which its own docstring says fails for sources close to the array.
+    # Every real source here is close to the array (deck-clustered nodes),
+    # so that fallback was liable to pick the unphysical mirror root even
+    # given perfectly good input data — confirmed 2026-07-23 against real
+    # solved attempts with clean pairwise-consistent timestamps that still
+    # landed thousands of km away (see project_bird_tdoa_implausible_solves
+    # memory). The centroid is a simple, always-available "somewhere near
+    # the array" prior — no per-species/per-attempt config needed. Only
+    # affects root *selection*; the solver still returns both candidates
+    # (ambiguous_root) so a bad pick is still visible after the fact.
+    cx = sum(n.x for n in solver_nodes) / len(solver_nodes)
+    cy = sum(n.y for n in solver_nodes) / len(solver_nodes)
+    cz = sum(n.z for n in solver_nodes) / len(solver_nodes)
     try:
         result = tdoa_solve(
             nodes=solver_nodes, timestamps_us=timestamps_us,
             speed_of_sound=DEFAULT_SPEED_OF_SOUND,
+            hint_point=(cx, cy, cz),
         )
     except ValueError as exc:
         await db.update_tdoa_attempt_status(
@@ -1650,7 +1664,7 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
         "method=%s nodes=%d%s",
         attempt_id, result.x, result.y, result.z, result.residual,
         result.method, len(solver_nodes),
-        " (ambiguous root stored, no hint_point configured)" if ambiguous_json else "",
+        " (ambiguous root stored, resolved via array-centroid hint_point)" if ambiguous_json else "",
     )
 
 
@@ -2770,10 +2784,30 @@ async def solve_tdoa(req: TdoaRequest):
     )
 
 
-def _tdoa_attempt_node_record_from_row(row: dict) -> TdoaAttemptNodeRecord:
+def _tdoa_attempt_node_record_from_row(
+    row: dict,
+    *,
+    origin_arrival_us: float | None,
+    baseline_m: float | None,
+) -> TdoaAttemptNodeRecord:
     """Build a TdoaAttemptNodeRecord from a tdoa_attempt_nodes DB row — as
     returned by db.list_tdoa_attempt_nodes(), which already LEFT JOINs in
-    audio_events.filename."""
+    audio_events.filename.
+
+    origin_arrival_us/baseline_m (2026-07-23, Analysis > Localisation UI
+    request): let the frontend show the actual TDOA fed to the solver and a
+    live physical-plausibility check, rather than needing a one-off script
+    against the DB every time — see project_bird_tdoa_implausible_solves
+    memory for why this was worth surfacing directly in the UI.
+    """
+    delta_from_origin_us = None
+    consistency_ratio = None
+    if row["arrival_us"] is not None and origin_arrival_us is not None:
+        delta_from_origin_us = row["arrival_us"] - origin_arrival_us
+        if baseline_m is not None and baseline_m > 0:
+            implied_range_diff_m = DEFAULT_SPEED_OF_SOUND * delta_from_origin_us * 1e-6
+            consistency_ratio = abs(implied_range_diff_m) / baseline_m
+
     return TdoaAttemptNodeRecord(
         id=row["id"],
         node_id=row["node_id"],
@@ -2785,20 +2819,49 @@ def _tdoa_attempt_node_record_from_row(row: dict) -> TdoaAttemptNodeRecord:
         filename=row["filename"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        peak_corr_coef=row["peak_corr_coef"],
+        quality_ratio=row["quality_ratio"],
+        delta_from_origin_us=delta_from_origin_us,
+        baseline_m=baseline_m,
+        consistency_ratio=consistency_ratio,
     )
 
 
 def _tdoa_attempt_record_from_row(
-    row: dict, node_rows: list[dict],
+    row: dict, node_rows: list[dict], positions: dict[str, dict],
 ) -> TdoaAttemptRecord:
     """Build a TdoaAttemptRecord from a tdoa_attempts row plus its already-
     fetched tdoa_attempt_nodes rows. solve_ambiguous_json is stored as a
     JSON array string (see db.persist_tdoa_solution) — parsed back to a
-    tuple here, the same shape solve_tdoa() above returns ad-hoc."""
+    tuple here, the same shape solve_tdoa() above returns ad-hoc.
+
+    positions: node_id -> {pos_e, pos_n, pos_alt} for every surveyed node
+    (db.list_node_positions(), fetched once by the caller — not per
+    attempt) — used to compute each node's baseline distance to the
+    origin for the UI's physical-plausibility column.
+    """
     ambiguous = None
     if row.get("solve_ambiguous_json"):
         parsed = json.loads(row["solve_ambiguous_json"])
         ambiguous = (parsed[0], parsed[1], parsed[2])
+
+    origin_node_id = row["origin_node_id"]
+    origin_row = next((n for n in node_rows if n["node_id"] == origin_node_id), None)
+    origin_arrival_us = origin_row["arrival_us"] if origin_row else None
+    origin_pos = positions.get(origin_node_id) if origin_node_id else None
+
+    def _baseline_to_origin(node_id: str) -> float | None:
+        pos = positions.get(node_id)
+        if pos is None or origin_pos is None:
+            return None
+        keys = ("pos_e", "pos_n", "pos_alt")
+        if any(pos.get(k) is None or origin_pos.get(k) is None for k in keys):
+            return None
+        return math.sqrt(
+            (pos["pos_e"] - origin_pos["pos_e"]) ** 2
+            + (pos["pos_n"] - origin_pos["pos_n"]) ** 2
+            + (pos["pos_alt"] - origin_pos["pos_alt"]) ** 2
+        )
 
     return TdoaAttemptRecord(
         id=row["id"],
@@ -2826,7 +2889,14 @@ def _tdoa_attempt_record_from_row(
         solved_at=row["solved_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        nodes=[_tdoa_attempt_node_record_from_row(n) for n in node_rows],
+        nodes=[
+            _tdoa_attempt_node_record_from_row(
+                n,
+                origin_arrival_us=origin_arrival_us,
+                baseline_m=_baseline_to_origin(n["node_id"]),
+            )
+            for n in node_rows
+        ],
     )
 
 
@@ -2847,13 +2917,16 @@ async def list_tdoa_attempts(limit: int = Query(default=50, ge=1, le=500)):
     One query per attempt to fetch its nodes (db.list_tdoa_attempt_nodes) —
     fine at this project's scale (a handful of nodes, infrequent
     detections); would need batching if attempt volume grows much beyond
-    that.
+    that. node_positions is fetched once for the whole response, not per
+    attempt — it's small (one row per node) and every attempt needs it for
+    the per-node baseline/consistency-ratio fields.
     """
     attempts = await db.list_tdoa_attempts(limit=limit)
+    positions = await db.list_node_positions()
     records = []
     for attempt in attempts:
         node_rows = await db.list_tdoa_attempt_nodes(attempt["id"])
-        records.append(_tdoa_attempt_record_from_row(attempt, node_rows))
+        records.append(_tdoa_attempt_record_from_row(attempt, node_rows, positions))
     return records
 
 
