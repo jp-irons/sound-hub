@@ -1933,6 +1933,46 @@ async def _plan_tdoa_attempt_inner(
         )
         return
 
+    # Per-pair transit time (added 2026-07-25 — see project memory on the
+    # margin/transit-time discussion). travel_time_floor_s above is the
+    # *property-wide* worst case (max distance between any two
+    # approved+positioned nodes) — correct as the attempt-level envelope
+    # (pull_t_start_us/pull_t_end_us, used for the tdoa_attempts row and
+    # find_open_tdoa_attempt's straggler-matching), but overkill for any
+    # individual pull to a neighbour closer than the property's farthest
+    # pair. The actual audio requested from a specific neighbour only needs
+    # to cover that neighbour's own worst-case transit time from the
+    # origin, not the whole network's. NodeTransit_pair is always <=
+    # travel_time_floor_s by construction (it's a distance between two of
+    # the same candidates _max_pairwise_distance_m already maximised over),
+    # so every per-node pull window computed below is guaranteed to sit
+    # inside the attempt-level envelope — no schema or straggler-matching
+    # change needed, only the actual bytes requested per pull shrink.
+    origin_position = candidates.get(origin_node_id) if origin_node_id is not None else None
+
+    def _pull_window_for_node(node_id: str) -> tuple[int, int]:
+        """(t_start_us, t_end_us) to request from this specific neighbour.
+        Falls back to the property-wide travel_time_floor_s (same as the
+        attempt-level window) whenever a pair-specific distance can't be
+        computed — origin unpositioned/unapproved is the only case that
+        should hit this in practice, since every node_id passed in here
+        comes from planned_node_ids, itself derived from `candidates`, so
+        the neighbour's own position is always known."""
+        node_position = candidates.get(node_id)
+        if origin_position is None or node_position is None:
+            transit_s = travel_time_floor_s
+        else:
+            ox, oy, oz = origin_position
+            nx, ny, nz = node_position
+            dist_m = math.sqrt((ox - nx) ** 2 + (oy - ny) ** 2 + (oz - nz) ** 2)
+            transit_s = dist_m / WORST_CASE_SPEED_OF_SOUND
+        node_margin_pre_s = (params["window_margin_pre_ms"] / 1000.0) + transit_s
+        node_margin_post_s = (params["window_margin_post_ms"] / 1000.0) + transit_s
+        return (
+            int(origin_arrival_us - node_margin_pre_s * 1e6),
+            int(origin_arrival_us + node_margin_post_s * 1e6),
+        )
+
     async def _pull_or_reuse_one(nid: str) -> bool:
         """Resolve one remaining candidate neighbour. If it already pushed
         (or was pulled for a different attempt) audio covering the window
@@ -1943,8 +1983,9 @@ async def _plan_tdoa_attempt_inner(
         Otherwise issues a fresh pull. Returns True if the node now has (or
         will have) audio available — i.e. counts toward the corroborating
         total."""
+        node_pull_start_us, node_pull_end_us = _pull_window_for_node(nid)
         existing_event = await db.find_covering_audio_event(
-            nid, pull_t_start_us, pull_t_end_us
+            nid, node_pull_start_us, node_pull_end_us
         )
         if existing_event is not None:
             node_row_id = await db.insert_tdoa_attempt_node(
@@ -1978,7 +2019,7 @@ async def _plan_tdoa_attempt_inner(
         # terminal on the first attempt.
         try:
             wav_bytes, actual_start_us, actual_end_us, noise_floor_rms = await _fetch_audio_direct(
-                nid, pull_t_start_us, pull_t_end_us,
+                nid, node_pull_start_us, node_pull_end_us,
             )
         except HTTPException as exc:
             # 404/503 are the node's own response (it heard the request and
