@@ -43,6 +43,27 @@ from scipy.signal import butter, sosfiltfilt
 
 log = logging.getLogger("sound_hub.onset_detection")
 
+
+class OnsetNotFoundError(ValueError):
+    """Raised by detect_onset() when no transient clears threshold_factor x
+    background RMS. Subclasses ValueError so existing `except Exception`/
+    `except ValueError` call sites keep working unchanged, but carries the
+    achieved ratio (peak_envelope/background — the same quantity
+    threshold_factor is compared against) as .ratio, so a caller that wants
+    it doesn't have to regex-parse the error string.
+
+    Added 2026-07-25 alongside detect_onset()'s success path also now
+    returning its own ratio (see that function's return value and
+    tdoa_attempt_nodes.onset_ratio in db.py): together these let a future
+    onset_threshold_factor re-derivation query the full field distribution
+    (successes AND failures) directly from the DB, rather than only the
+    failure side via the error text — see project memory on the p90
+    percentile discussion this followed."""
+
+    def __init__(self, message: str, ratio: float):
+        super().__init__(message)
+        self.ratio = ratio
+
 # Onset detector tuning — short-time energy envelope, refined to the
 # steepest-rise sample. Copied from tools/clap_sync_check.py; keep in sync
 # manually if that file's tuning changes (see module docstring). These are
@@ -118,10 +139,15 @@ def detect_onset(
     threshold_factor: float = _ONSET_THRESHOLD_FACTOR,
     margin_ms: float = _ONSET_REFINE_MARGIN_MS,
     background_override: float | None = None,
-) -> int:
-    """Return the sample index of the most prominent short-time-energy
-    transient in `data`, refined to the steepest-rise sample within
-    margin_ms of it.
+) -> tuple[int, float]:
+    """Return (onset_sample_index, ratio) for the most prominent
+    short-time-energy transient in `data` — the index refined to the
+    steepest-rise sample within margin_ms of it, and ratio the achieved
+    peak_envelope/background at the (unrefined) global-peak sample, i.e.
+    the same quantity threshold_factor is compared against. Added
+    2026-07-25 (previously only onset_sample_index) so a successful
+    detection's ratio can be persisted the same way a failed one's already
+    is via OnsetNotFoundError.ratio — see that class's docstring.
 
     Takes the GLOBAL peak of the energy envelope, not the first sample that
     crosses threshold_factor x background RMS — see
@@ -163,15 +189,17 @@ def detect_onset(
     one is given — see project_bird_noise_floor_reporting memory for the
     full investigation. Not yet used to change any margins itself.
 
-    Raises ValueError if even the loudest point in the buffer doesn't look
-    like a real transient. The message includes enough detail (background/
-    peak RMS at higher precision than the old 1-decimal format — which
-    rounded any background/peak below 0.05 to a misleading "0.0" — plus
-    buffer duration and raw peak sample amplitude) to diagnose the failure
-    from the tdoa_attempt_nodes.error column alone, without needing to pull
-    the WAV file itself. Added 2026-07-11 after exactly that ambiguity came
-    up in practice — "background=0.0, peak=0.0" looked like a bug in the
-    onset detector when it was actually a real near-silent buffer.
+    Raises OnsetNotFoundError (a ValueError subclass, carries .ratio — see
+    that class's docstring) if even the loudest point in the buffer doesn't
+    look like a real transient. The message includes enough detail
+    (background/peak RMS at higher precision than the old 1-decimal format
+    — which rounded any background/peak below 0.05 to a misleading "0.0" —
+    plus buffer duration and raw peak sample amplitude) to diagnose the
+    failure from the tdoa_attempt_nodes.error column alone, without needing
+    to pull the WAV file itself. Added 2026-07-11 after exactly that
+    ambiguity came up in practice — "background=0.0, peak=0.0" looked like
+    a bug in the onset detector when it was actually a real near-silent
+    buffer.
     """
     rms = _energy_envelope(data, rate, window_ms)
     clip_background = np.median(rms)
@@ -189,18 +217,28 @@ def detect_onset(
     threshold = max(background * threshold_factor, 1e-6)
 
     peak_idx = int(np.argmax(rms))
+    # Computed unconditionally (not just on failure) so a passing detection
+    # can report how comfortably it passed, not only how narrowly a failure
+    # missed — see OnsetNotFoundError's docstring for why this matters.
+    # background can legitimately be ~0 for a true digital-silence buffer;
+    # threshold's own max(..., 1e-6) floor already guards the pass/fail
+    # comparison above, so reuse it here rather than let a bare division
+    # raise or silently produce inf for what's otherwise a normal buffer.
+    ratio = rms[peak_idx] / max(background, 1e-6)
     if rms[peak_idx] <= threshold:
         duration_s = len(data) / rate if rate else 0.0
         peak_sample = float(np.max(np.abs(data))) if len(data) else 0.0
-        raise ValueError(
+        raise OnsetNotFoundError(
             f"no transient found above {threshold_factor}x background RMS "
             f"(background={background:.5f}, peak_envelope={rms[peak_idx]:.5f}, "
             f"peak_sample={peak_sample:.5f}, duration={duration_s:.2f}s, "
-            f"n_samples={len(data)})"
+            f"n_samples={len(data)})",
+            ratio=ratio,
         )
 
     margin = max(1, int(round(margin_ms * 1e-3 * rate)))
-    return _refine_to_steepest_rise(data, peak_idx, margin)
+    onset_idx = _refine_to_steepest_rise(data, peak_idx, margin)
+    return onset_idx, ratio
 
 
 def detect_onset_us(
@@ -211,10 +249,12 @@ def detect_onset_us(
     freq_band_low_hz: float | None = None,
     freq_band_high_hz: float | None = None,
     node_noise_floor_rms: float | None = None,
-) -> float:
+) -> tuple[float, float]:
     """Run the species' configured onset_detection_method against a node's
-    WAV and return the absolute (node-clock) microsecond timestamp of the
-    detected onset.
+    WAV and return (arrival_us, ratio) — arrival_us the absolute
+    (node-clock) microsecond timestamp of the detected onset, ratio the
+    achieved peak_envelope/background at detection (see detect_onset's
+    return value; added 2026-07-25, previously arrival_us alone).
 
     t_start_us must be the actual capture-window start for this specific
     file (audio_events.t_start_us / the push's tStartUs) — the onset sample
@@ -242,9 +282,12 @@ def detect_onset_us(
     not in the caller, so routes.py never needs to know soundfile's
     normalization convention.
 
-    Raises ValueError if the method is unknown or no transient is found;
-    callers should catch this and record 'onset_failed' rather than let it
-    propagate (see routes.py _correlate_attempt_node).
+    Raises ValueError if the method is unknown, or OnsetNotFoundError (a
+    ValueError subclass, so existing `except ValueError`/`except Exception`
+    callers are unaffected) if no transient is found; callers should catch
+    this and record 'onset_failed' rather than let it propagate (see
+    routes.py _correlate_attempt_node) — and can read .ratio off the
+    caught exception to persist it the same way a success's ratio is.
     """
     if method != "global_peak":
         raise ValueError(f"unknown onset_detection_method '{method}'")
@@ -255,8 +298,8 @@ def detect_onset_us(
     background_override = (
         node_noise_floor_rms / 32768.0 if node_noise_floor_rms is not None else None
     )
-    onset_idx = detect_onset(
+    onset_idx, ratio = detect_onset(
         data, rate, threshold_factor=threshold_factor,
         background_override=background_override,
     )
-    return t_start_us + (onset_idx / rate) * 1e6
+    return t_start_us + (onset_idx / rate) * 1e6, ratio

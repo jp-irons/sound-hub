@@ -1164,10 +1164,11 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
 
         origin = None
         origin_arrival_us = None
+        origin_ratio = None
         for m in sorted(members, key=lambda m: m["confidence"], reverse=True):
             fpath = os.path.join(_AUDIO_DIR, m["filename"])
             try:
-                origin_arrival_us = onset_detection.detect_onset_us(
+                origin_arrival_us, origin_ratio = onset_detection.detect_onset_us(
                     params["onset_detection_method"], fpath, m["t_start_us"],
                     threshold_factor=params["onset_threshold_factor"],
                     freq_band_low_hz=params["freq_band_low_hz"],
@@ -1207,6 +1208,7 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
             t_start_us=origin["t_start_us"],
             t_end_us=origin["t_end_us"],
             origin_arrival_us=origin_arrival_us,
+            origin_ratio=origin_ratio,
             known_reporter_audio_events=known_reporters,
         )
     except Exception:
@@ -1299,7 +1301,7 @@ async def _correlate_attempt_node(
     # "fall back to the clip-derived median", unchanged behavior.
     node_noise_floor_rms = audio_event.get("noise_floor_rms")
     try:
-        arrival_us = onset_detection.detect_onset_us(
+        arrival_us, onset_ratio = onset_detection.detect_onset_us(
             onset_detection_method, fpath, t_start_us,
             threshold_factor=onset_threshold_factor,
             freq_band_low_hz=freq_band_low_hz,
@@ -1307,9 +1309,14 @@ async def _correlate_attempt_node(
             node_noise_floor_rms=node_noise_floor_rms,
         )
     except Exception as exc:
+        # OnsetNotFoundError (the no-transient-found case) carries the
+        # achieved ratio even on failure — see db.py's onset_ratio column
+        # and OnsetNotFoundError's docstring. Other failure modes (unknown
+        # method, unreadable WAV) never got far enough to compute a ratio.
+        failed_ratio = getattr(exc, "ratio", None)
         await db.update_tdoa_attempt_node_result(
             node_row_id, status="onset_failed", error=str(exc),
-            audio_event_id=audio_event_id,
+            audio_event_id=audio_event_id, onset_ratio=failed_ratio,
         )
         log.warning(
             "tdoa correlation — node=%s onset detection failed: %s",
@@ -1383,6 +1390,7 @@ async def _correlate_attempt_node(
         node_row_id, status="arrived", arrival_us=final_arrival_us,
         audio_event_id=audio_event_id,
         peak_corr_coef=peak_corr_coef, quality_ratio=quality_ratio,
+        onset_ratio=onset_ratio,
     )
     log.info(
         "tdoa correlation — node=%s arrival_us=%.1f (method=%s)",
@@ -1494,10 +1502,14 @@ async def _save_direct_pull_audio(
     broker resolution).
 
     noise_floor_rms (added 2026-07-19) — the node's reported floor for this
-    pull (see _fetch_audio_direct), threaded through in-memory only, not
-    persisted to the audio_events table: the only current consumer is the
-    _correlate_attempt_node call this dict feeds straight into, and nothing
-    else needs it later (see project_bird_tdoa_correlation_gap memory).
+    pull (see _fetch_audio_direct). Passed straight through to
+    _correlate_attempt_node via the returned dict, same as before. Also now
+    persisted to the audio_events row itself (added 2026-07-25 — see
+    db.insert_audio_event's noise_floor_rms param) so real field noise-floor
+    readings accumulate somewhere queryable instead of only existing in a
+    hub log line for this one detect_onset_us() call — the intended
+    consumer is per-species window_margin_pre_ms derivation (see project
+    memory on the margin/transit-time discussion), not built yet.
 
     Returns a dict shaped the way _correlate_attempt_node expects
     (id/filename/t_start_us/t_end_us/noise_floor_rms) — not a full
@@ -1513,6 +1525,7 @@ async def _save_direct_pull_audio(
         node_id=node_id, triggered=False, received_at=_now_iso(),
         bytes_=len(wav_bytes), analysis_status="skipped_birdnet_tdoa_pull",
         t_start_us=t_start_us, t_end_us=t_end_us, filename=fname,
+        noise_floor_rms=noise_floor_rms,
     )
     log.info("direct pull node=%s — %d bytes -> %s (noise_floor_rms=%s)",
               node_id, len(wav_bytes), fname, noise_floor_rms)
@@ -1676,6 +1689,7 @@ async def _plan_tdoa_attempt(
     t_start_us: int,
     t_end_us: int,
     origin_arrival_us: float,
+    origin_ratio: float | None = None,
     known_reporter_audio_events: dict[str, int] | None = None,
 ) -> None:
     """TDOA orchestration milestones 1+2: on a persisted top-species
@@ -1696,6 +1710,11 @@ async def _plan_tdoa_attempt(
     instant, not on the origin's raw t_start_us/t_end_us detection span —
     t_start_us/t_end_us are kept only to log/sanity-check that arrival
     actually falls inside the capture window it was found in.
+
+    origin_ratio (added 2026-07-25) is that same onset check's achieved
+    peak_envelope/background ratio — threaded through purely to persist
+    onto the origin's own tdoa_attempt_nodes row (see onset_ratio in
+    db.py), not used in any planning decision here.
 
     known_reporter_audio_events maps node_id -> audio_event_id for other
     nodes that detection-coalescing (_register_detection_for_tdoa /
@@ -1723,6 +1742,7 @@ async def _plan_tdoa_attempt(
             t_start_us=t_start_us,
             t_end_us=t_end_us,
             origin_arrival_us=origin_arrival_us,
+            origin_ratio=origin_ratio,
             known_reporter_audio_events=known_reporter_audio_events or {},
         )
     except Exception:
@@ -1740,6 +1760,7 @@ async def _plan_tdoa_attempt_inner(
     t_start_us: int,
     t_end_us: int,
     origin_arrival_us: float,
+    origin_ratio: float | None,
     known_reporter_audio_events: dict[str, int],
 ) -> None:
     """Actual planning logic for _plan_tdoa_attempt — see that function's
@@ -1882,7 +1903,7 @@ async def _plan_tdoa_attempt_inner(
         )
         await db.update_tdoa_attempt_node_result(
             origin_row_id, status="arrived", arrival_us=origin_arrival_us,
-            audio_event_id=audio_event_id,
+            audio_event_id=audio_event_id, onset_ratio=origin_ratio,
         )
 
     for nid, aeid in known_reporters.items():

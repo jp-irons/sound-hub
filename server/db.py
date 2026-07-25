@@ -138,13 +138,27 @@ CREATE TABLE IF NOT EXISTS audio_events (
     top_species       TEXT,               -- common_name of the top candidate, NULL if none
     t_start_us        INTEGER,            -- capture-window start, node-clock Unix epoch us (NULL for hub-requested pulls predating this column, or if a node hasn't sent it)
     t_end_us          INTEGER,            -- capture-window end, node-clock Unix epoch us
-    filename          TEXT                -- WAV filename under the audio/ dir (see routes.py
+    filename          TEXT,               -- WAV filename under the audio/ dir (see routes.py
                                             -- audio_push()'s fname). NULL for rows written before
                                             -- this column existed. Needed so TDOA correlation
                                             -- (milestone 3) can re-open a node's WAV after the
                                             -- fact — e.g. a "reused_existing" corroborator whose
                                             -- audio arrived long before the attempt that ends up
                                             -- using it, or the origin node's own trigger push.
+    noise_floor_rms   REAL                -- node-reported ambient RMS floor (X-Noise-Floor-Rms
+                                            -- header, raw int16 scale — see NoiseFloorTracker on
+                                            -- the node side) for this specific pull. NULL for
+                                            -- triggered pushes (no pull-response header to read)
+                                            -- and for pulls from older firmware that doesn't send
+                                            -- it. Added 2026-07-25 to persist a value that was
+                                            -- previously threaded through in-memory only and
+                                            -- discarded after one detect_onset_us() call (see
+                                            -- routes.py _save_direct_pull_audio) — the intent is
+                                            -- a queryable history of real field noise levels,
+                                            -- feeding both NoiseFloorTracker's own planned
+                                            -- percentile-based redesign and per-species
+                                            -- window_margin_pre_ms derivation (see project memory
+                                            -- on the margin/transit-time discussion).
 );
 
 
@@ -558,12 +572,35 @@ async def init_db() -> None:
                 "ALTER TABLE tdoa_attempt_nodes ADD COLUMN quality_ratio REAL"
             )
 
+        # Migration: add onset_ratio to tdoa_attempt_nodes (2026-07-25) if it
+        # doesn't exist yet — the achieved peak_envelope/background ratio at
+        # detect_onset() (see onset_detection.py), now recorded on BOTH
+        # 'arrived' (comfortable pass) and 'onset_failed' (near-miss) rows,
+        # not just parseable out of the error text on failures as before.
+        # This is what lets a future onset_threshold_factor re-derivation
+        # query the real field distribution directly instead of regex-
+        # parsing tdoa_attempt_nodes.error — see project memory on the
+        # p90-percentile discussion this followed. NULL for every row
+        # written before this migration, and for failure modes that never
+        # reach detect_onset() at all (missing file/t_start_us, unknown
+        # onset_detection_method).
+        if "onset_ratio" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN onset_ratio REAL"
+            )
+
         # Migration: add filename to audio_events (milestone 3 — needed to
         # re-open a node's WAV for onset detection after the fact, e.g. a
         # 'reused_existing' corroborator's audio that arrived long before
         # the attempt that ends up using it) if it doesn't exist yet.
         if "filename" not in audio_event_columns:
             await conn.execute("ALTER TABLE audio_events ADD COLUMN filename TEXT")
+
+        # Migration: add noise_floor_rms to audio_events (2026-07-25) if it
+        # doesn't exist yet — previously computed per-pull but never
+        # persisted (see insert_audio_event's noise_floor_rms param).
+        if "noise_floor_rms" not in audio_event_columns:
+            await conn.execute("ALTER TABLE audio_events ADD COLUMN noise_floor_rms REAL")
 
         # Migration: add solve-result columns to tdoa_attempts (milestone 4)
         # if they don't exist yet.
@@ -1049,6 +1086,7 @@ async def insert_audio_event(
     t_start_us: int | None = None,
     t_end_us: int | None = None,
     filename: str | None = None,
+    noise_floor_rms: float | None = None,
 ) -> int:
     """Record one push received at POST /api/audio/push, regardless of outcome.
 
@@ -1063,6 +1101,14 @@ async def insert_audio_event(
     scheme. Optional so existing call sites can be migrated incrementally,
     though as of milestone 3 all of audio_push()'s call sites pass it.
 
+    noise_floor_rms (added 2026-07-25) — the node-reported ambient RMS floor
+    for this specific pull (X-Noise-Floor-Rms header), only ever passed by
+    routes.py _save_direct_pull_audio (the direct-pull path); triggered
+    pushes have no pull-response header to read, so this stays NULL for
+    them. Persisted so real field noise-floor readings accumulate somewhere
+    queryable instead of only existing in a hub log line for the single
+    detect_onset_us() call that consumed them at the time.
+
     Returns the inserted row's id — used by the TDOA orchestration hook in
     routes.py to link a tdoa_attempts row back to the audio_event that
     triggered it.
@@ -1072,11 +1118,11 @@ async def insert_audio_event(
             """INSERT INTO audio_events
                (node_id, triggered, received_at, bytes, analysis_status,
                 detection_count, top_confidence, top_species, t_start_us,
-                t_end_us, filename)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                t_end_us, filename, noise_floor_rms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (node_id, 1 if triggered else 0, received_at, bytes_, analysis_status,
              detection_count, top_confidence, top_species, t_start_us, t_end_us,
-             filename),
+             filename, noise_floor_rms),
         )
         await conn.commit()
         return cursor.lastrowid
@@ -2072,6 +2118,7 @@ async def update_tdoa_attempt_node_result(
     audio_event_id: int | None = None,
     peak_corr_coef: float | None = None,
     quality_ratio: float | None = None,
+    onset_ratio: float | None = None,
 ) -> None:
     """Milestone 3: record one node's correlation outcome against its
     tdoa_attempt_nodes row — status='arrived' with arrival_us set on
@@ -2090,7 +2137,17 @@ async def update_tdoa_attempt_node_result(
     than left untouched: they describe THIS call's outcome (no correlation
     attempted, correlation attempted but not trusted, or a trusted
     correlation), same always-overwritten treatment as arrival_us/error
-    above, not a value that only some callers happen to know."""
+    above, not a value that only some callers happen to know.
+
+    onset_ratio (added 2026-07-25): the achieved peak_envelope/background
+    ratio from onset_detection.detect_onset() — see that function's return
+    value and OnsetNotFoundError.ratio — recorded on 'arrived' rows (a
+    comfortable pass) as well as 'onset_failed' rows (a near-miss), where
+    previously only failures had this recoverable at all, and only by
+    regex-parsing the error text. Same always-overwritten treatment as
+    peak_corr_coef/quality_ratio; NULL for failure modes that never reach
+    detect_onset() (missing file/t_start_us, unknown
+    onset_detection_method — see routes.py _correlate_attempt_node)."""
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
         if audio_event_id is not None:
@@ -2098,19 +2155,20 @@ async def update_tdoa_attempt_node_result(
                 """UPDATE tdoa_attempt_nodes
                    SET status = ?, arrival_us = ?, error = ?,
                        audio_event_id = ?, peak_corr_coef = ?,
-                       quality_ratio = ?, updated_at = ?
+                       quality_ratio = ?, onset_ratio = ?, updated_at = ?
                    WHERE id = ?""",
                 (status, arrival_us, error, audio_event_id,
-                 peak_corr_coef, quality_ratio, now, node_row_id),
+                 peak_corr_coef, quality_ratio, onset_ratio, now, node_row_id),
             )
         else:
             await conn.execute(
                 """UPDATE tdoa_attempt_nodes
                    SET status = ?, arrival_us = ?, error = ?,
-                       peak_corr_coef = ?, quality_ratio = ?, updated_at = ?
+                       peak_corr_coef = ?, quality_ratio = ?,
+                       onset_ratio = ?, updated_at = ?
                    WHERE id = ?""",
                 (status, arrival_us, error, peak_corr_coef, quality_ratio,
-                 now, node_row_id),
+                 onset_ratio, now, node_row_id),
             )
         await conn.commit()
 
