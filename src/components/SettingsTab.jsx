@@ -246,6 +246,12 @@ export default function SettingsTab() {
   const [addError, setAddError] = useState(null)
   const [addBusy, setAddBusy] = useState(false)
   const addKeyInputRef = useRef(null)
+  // Two-click confirm before overwriting an existing species' row via this
+  // form (mirrors resetArmed/clearArmed elsewhere in this file). Keyed to
+  // the exact species key that was armed so editing addKey afterwards (e.g.
+  // to target a different species) can't silently carry the arm-state over
+  // and overwrite the wrong row.
+  const [overwriteArmedKey, setOverwriteArmedKey] = useState(null)
 
   // Pre-fills the add-species form from an existing row — e.g. species B is
   // similar to species A but with a higher frequency band, so copy A's tuned
@@ -362,7 +368,12 @@ export default function SettingsTab() {
     const trimmedKey = addKey.trim()
     if (!trimmedKey) { setAddError('Species key is required — must match a detection\'s common name.'); return }
     if (trimmedKey === DEFAULT_SPECIES_KEY) { setAddError(`"${DEFAULT_SPECIES_KEY}" already exists — edit it in the table above.`); return }
-    if (speciesParams.some(r => r.speciesKey === trimmedKey)) { setAddError('That species already has a row — edit it in the table above instead.'); return }
+    const collides = speciesParams.some(r => r.speciesKey === trimmedKey)
+    if (collides && overwriteArmedKey !== trimmedKey) {
+      setOverwriteArmedKey(trimmedKey)
+      setAddError(`"${trimmedKey}" already has a row — submitting again will overwrite it. Click "Add species" again to confirm, or edit it in the table above instead.`)
+      return
+    }
     const [body, validationError] = buildSpeciesParamsBody(addFields)
     if (validationError) { setAddError(validationError); return }
 
@@ -379,6 +390,7 @@ export default function SettingsTab() {
       }
       setAddKey('')
       setAddFields(BLANK_ADD_FIELDS)
+      setOverwriteArmedKey(null)
       await loadSpeciesParams()
     } catch (err) {
       setAddError(err.message ?? String(err))
@@ -963,7 +975,11 @@ export default function SettingsTab() {
               <span style={sty.fieldLabelText}>Species key (common name)</span>
               <input ref={addKeyInputRef} style={sty.smallInput} value={addKey} disabled={addBusy}
                 placeholder="e.g. Pheasant Coucal"
-                onChange={e => setAddKey(e.target.value)} />
+                onChange={e => {
+                  const v = e.target.value
+                  setAddKey(v)
+                  if (v.trim() !== overwriteArmedKey) setOverwriteArmedKey(null)
+                }} />
             </label>
             <label style={sty.fieldGroup}>
               <span style={sty.fieldLabelText}>Correlation method</span>
@@ -1020,8 +1036,14 @@ export default function SettingsTab() {
                 onChange={e => setAddField('notes', e.target.value)} />
             </label>
             <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-              <button type="submit" style={{ ...sty.actionBtn, ...sty.primaryBtn, padding: '7px 16px' }} disabled={addBusy}>
-                {addBusy ? 'Adding…' : 'Add species'}
+              <button type="submit" style={{
+                ...sty.actionBtn, ...sty.primaryBtn, padding: '7px 16px',
+                ...(overwriteArmedKey && overwriteArmedKey === addKey.trim()
+                  ? { color: 'var(--red, #f44336)', borderColor: 'var(--red, #f44336)' } : {}),
+              }} disabled={addBusy}>
+                {addBusy ? 'Adding…'
+                  : overwriteArmedKey && overwriteArmedKey === addKey.trim() ? 'Click again to overwrite'
+                  : 'Add species'}
               </button>
             </div>
           </form>
