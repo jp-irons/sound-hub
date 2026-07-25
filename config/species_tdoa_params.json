@@ -44,13 +44,13 @@
     "Noisy Miner": {
       "correlation_method": "plain",
       "enabled": true,
-      "freq_band_high_hz": 7500,
-      "freq_band_low_hz": 1500,
+      "freq_band_high_hz": 9370,
+      "freq_band_low_hz": 720,
       "min_corroborating_nodes": 4,
-      "notes": "Derived 2026-07-13 from 7 Xeno-canto samples via event-picking + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin) -- see tools/README.md. onset_threshold_factor not yet validated against real pulled attempts on this property. NOT reprocessed 2026-07-25: an automated rerun (tools/derive_species_bands.py) on the same 7 samples scored only 26 calls (3 of 7 files scored zero -- too quiet for the segmentation threshold used) and proposed an implausible 1912-17536 Hz band, pulled up by a handful of extreme individual readings. Left at this hand-derived value pending either more/better reference recordings or a species-specific threshold retune -- see tools/README.md and the 2026-07-25 session notes.",
+      "notes": "Reprocessed 2026-07-25 (second pass, same day as the initial 6-species batch) using tools/derive_species_bands.py. The initial run used the same call-segmentation --threshold-factor (6.0) as every other species and scored only 26 calls, with 3 of 7 source files scoring zero -- too quiet for that threshold. Rerunning with --threshold-factor 3.0 recovered signal from 2 of those 3 (XC60735, XC60739) but pushed the proposed band even higher (1237-17905Hz), not lower. Per-file inspection found the real cause: XC837694 alone contributed 51 of 93 scored segments at that threshold, with a consistently extreme high edge (median 16667Hz, max 19339Hz) at regular ~0.5-0.7s intervals across the whole ~40s clip -- a pattern consistent with a continuous insect/cicada chorus rather than sparse bird calls, not confirmed by ear. Excluding XC837694 (done ad-hoc for this run, not yet a reusable --exclude-files option in tools/derive_species_bands.py -- see project memory) while keeping --threshold-factor 3.0 gives 724-9369Hz off the remaining 42 calls across 6 files, rounded to 720-9370. Band = 10th percentile low_hz to 90th percentile high_hz, same method as every other species. Note the call-segmentation threshold-factor used to derive this band (3.0) differs from every other species processed this way (6.0) -- that's a tuning parameter of the derivation script only, unrelated to onset_threshold_factor below (which governs real-time onset detection on the hub, not band derivation). onset_threshold_factor (5.0) left unchanged from the 2026-07-13 value -- this pass only re-derives the band. Still wider than most other species in this file; worth re-validating against real pulled TDOA attempts on this property before trusting long-term.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 5.0,
-      "updated_at": "2026-07-13T00:00:00+00:00",
+      "updated_at": "2026-07-25T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0
     },
@@ -63,6 +63,19 @@
       "notes": "Reprocessed 2026-07-25 (supersedes the 2026-07-13 hand-derived value) using tools/derive_species_bands.py: 91 calls scored across 8 unique Xeno-canto samples (10 downloaded, 2 exact-duplicate files dropped: XC604355, XC831892). The automated segmenter's noise-floor filter (drops any segment whose derived low edge lands at/near derive_band()'s own 50Hz floor -- i.e. no defined tonal content) independently reproduced the prior manual exclusion of XC580877 as a likely wind/rustle-contaminated outlier, without needing to hardcode it. Band = 10th percentile low_hz to 90th percentile high_hz across all scored calls. onset_threshold_factor (5.5) unchanged -- this pass only re-derives the band.",
       "onset_detection_method": "global_peak",
       "onset_threshold_factor": 5.5,
+      "updated_at": "2026-07-25T00:00:00+00:00",
+      "window_margin_post_ms": 500.0,
+      "window_margin_pre_ms": 500.0
+    },
+    "Scaly-breasted Lorikeet": {
+      "correlation_method": "plain",
+      "enabled": true,
+      "freq_band_high_hz": 12300,
+      "freq_band_low_hz": 900,
+      "min_corroborating_nodes": 4,
+      "notes": "Derived 2026-07-25 from 56 calls across 6 Xeno-canto samples via tools/derive_species_bands.py's automated energy-envelope call segmentation + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin), same --threshold-factor (6.0) as the main 2026-07-25 batch. Band = 10th percentile low_hz to 90th percentile high_hz across all scored calls. Widest band of any species in this file, but checked per-file before applying: no single recording dominates or looks contaminated (per-file high_hz medians spread smoothly ~4200-11900Hz across all 6 source files, largest single-file sample n=19) -- treated as real call variation, not noise, consistent with lorikeets' harsh broadband calls. onset_threshold_factor left at the 8.0 factory default -- not derived from these reference recordings, needs empirical validation against real pulled TDOA attempts on this property.",
+      "onset_detection_method": "global_peak",
+      "onset_threshold_factor": 8.0,
       "updated_at": "2026-07-25T00:00:00+00:00",
       "window_margin_post_ms": 500.0,
       "window_margin_pre_ms": 500.0
