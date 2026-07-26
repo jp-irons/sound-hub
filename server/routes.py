@@ -1228,6 +1228,9 @@ async def _correlate_attempt_node(
     correlation_method: str,
     freq_band_low_hz: float | None = None,
     freq_band_high_hz: float | None = None,
+    window_margin_pre_ms: float | None = None,
+    window_margin_post_ms: float | None = None,
+    travel_time_floor_s: float = 0.0,
 ) -> None:
     """TDOA orchestration milestone 3 (+ milestone 5 refinement): run onset
     detection against one node's WAV, then refine that estimate against the
@@ -1235,11 +1238,21 @@ async def _correlate_attempt_node(
     record the outcome on its tdoa_attempt_nodes row.
 
     onset_threshold_factor/correlation_method/freq_band_low_hz/
-    freq_band_high_hz should always be the values snapshotted onto the
+    freq_band_high_hz/window_margin_pre_ms/window_margin_post_ms/
+    travel_time_floor_s should always be the values snapshotted onto the
     attempt's tdoa_attempts row at plan time (see _plan_tdoa_attempt_inner),
     not re-read live from species_tdoa_params — same "already-planned
     attempts keep the params they were planned with" rationale as
     onset_detection_method itself.
+
+    window_margin_pre_ms/post_ms (added 2026-07-26) are the species' raw
+    knee distance (unscaled — see project_soundhub_tdoa_correlation_window
+    memory), used below to size the leading-edge correlation template.
+    travel_time_floor_s is the attempt-level worst-case transit time,
+    used only as a fallback when this specific origin/neighbour pair's live
+    node_positions can't be resolved (unpositioned node) — the normal case
+    computes the pair's own transit time directly, never this coarser
+    property-wide value.
 
     audio_event is the full audio_events row for this node's contribution —
     needs 'filename' (to re-open the WAV) and 't_start_us' (to anchor the
@@ -1357,6 +1370,31 @@ async def _correlate_attempt_node(
                 neighbor_data = onset_detection.bandpass_filter(
                     neighbor_data, neighbor_rate, freq_band_low_hz, freq_band_high_hz
                 )
+            # Per-pair transit time, computed live from node_positions (never
+            # hardcoded — same principle as _pull_window_for_node's
+            # NodeTransit). Falls back to the attempt-level
+            # travel_time_floor_s only when either node's position can't be
+            # resolved right now (e.g. since-unpositioned node) — see
+            # project_soundhub_tdoa_correlation_window memory.
+            origin_position = await db.get_node_position(origin["origin_node_id"])
+            neighbor_position = await db.get_node_position(node_id)
+            if (
+                origin_position is None or neighbor_position is None
+                or origin_position.get("pos_e") is None
+                or origin_position.get("pos_n") is None
+                or origin_position.get("pos_alt") is None
+                or neighbor_position.get("pos_e") is None
+                or neighbor_position.get("pos_n") is None
+                or neighbor_position.get("pos_alt") is None
+            ):
+                transit_s = travel_time_floor_s
+            else:
+                dist_m = math.sqrt(
+                    (origin_position["pos_e"] - neighbor_position["pos_e"]) ** 2
+                    + (origin_position["pos_n"] - neighbor_position["pos_n"]) ** 2
+                    + (origin_position["pos_alt"] - neighbor_position["pos_alt"]) ** 2
+                )
+                transit_s = dist_m / WORST_CASE_SPEED_OF_SOUND
             corr_result = correlation.correlate_leading_edge(
                 origin_data=origin_data, origin_rate=origin_rate,
                 origin_t_start_us=origin["origin_t_start_us"],
@@ -1364,6 +1402,9 @@ async def _correlate_attempt_node(
                 neighbor_data=neighbor_data, neighbor_rate=neighbor_rate,
                 neighbor_t_start_us=t_start_us,
                 method=correlation_method,
+                template_pre_ms=window_margin_pre_ms,
+                template_post_ms=window_margin_post_ms,
+                transit_s=transit_s,
             )
         except Exception:
             corr_result = None
@@ -1882,6 +1923,8 @@ async def _plan_tdoa_attempt_inner(
         onset_threshold_factor=params["onset_threshold_factor"],
         freq_band_low_hz=params["freq_band_low_hz"],
         freq_band_high_hz=params["freq_band_high_hz"],
+        window_margin_pre_ms=params["window_margin_pre_ms"],
+        window_margin_post_ms=params["window_margin_post_ms"],
         travel_time_floor_s=travel_time_floor_s,
     )
     log.info(
@@ -1938,6 +1981,9 @@ async def _plan_tdoa_attempt_inner(
                 correlation_method=params["correlation_method"],
                 freq_band_low_hz=params["freq_band_low_hz"],
                 freq_band_high_hz=params["freq_band_high_hz"],
+                window_margin_pre_ms=params["window_margin_pre_ms"],
+                window_margin_post_ms=params["window_margin_post_ms"],
+                travel_time_floor_s=travel_time_floor_s,
             )
         else:
             await db.update_tdoa_attempt_node_result(
@@ -2044,6 +2090,9 @@ async def _plan_tdoa_attempt_inner(
                 correlation_method=params["correlation_method"],
                 freq_band_low_hz=params["freq_band_low_hz"],
                 freq_band_high_hz=params["freq_band_high_hz"],
+                window_margin_pre_ms=params["window_margin_pre_ms"],
+                window_margin_post_ms=params["window_margin_post_ms"],
+                travel_time_floor_s=travel_time_floor_s,
             )
             return True
         # Direct hub->node HTTP pull (see _fetch_audio_direct) — replaces the
@@ -2092,6 +2141,9 @@ async def _plan_tdoa_attempt_inner(
             correlation_method=params["correlation_method"],
             freq_band_low_hz=params["freq_band_low_hz"],
             freq_band_high_hz=params["freq_band_high_hz"],
+            window_margin_pre_ms=params["window_margin_pre_ms"],
+            window_margin_post_ms=params["window_margin_post_ms"],
+            travel_time_floor_s=travel_time_floor_s,
         )
         return True
 
@@ -2275,6 +2327,9 @@ async def audio_push(
                         correlation_method=node_row["correlation_method"],
                         freq_band_low_hz=node_row["freq_band_low_hz"],
                         freq_band_high_hz=node_row["freq_band_high_hz"],
+                        window_margin_pre_ms=node_row["window_margin_pre_ms"],
+                        window_margin_post_ms=node_row["window_margin_post_ms"],
+                        travel_time_floor_s=node_row["travel_time_floor_s"],
                     )
                     await _maybe_solve_tdoa_attempt(node_row["attempt_id"])
                 asyncio.create_task(_correlate_and_maybe_solve())

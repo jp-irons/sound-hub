@@ -221,8 +221,8 @@ CREATE TABLE IF NOT EXISTS species_tdoa_params (
     onset_threshold_factor  REAL NOT NULL DEFAULT 8.0,
     freq_band_low_hz        REAL,
     freq_band_high_hz       REAL,
-    window_margin_pre_ms    REAL NOT NULL DEFAULT 500.0,
-    window_margin_post_ms   REAL NOT NULL DEFAULT 500.0,
+    window_margin_pre_ms    REAL NOT NULL DEFAULT 250.0,
+    window_margin_post_ms   REAL NOT NULL DEFAULT 250.0,
     min_corroborating_nodes INTEGER NOT NULL DEFAULT 4,
     notes                   TEXT,
     updated_at              TEXT NOT NULL
@@ -275,6 +275,8 @@ CREATE TABLE IF NOT EXISTS tdoa_attempts (
     onset_threshold_factor  REAL NOT NULL DEFAULT 8.0,
     freq_band_low_hz        REAL,
     freq_band_high_hz       REAL,
+    window_margin_pre_ms    REAL,
+    window_margin_post_ms   REAL,
     travel_time_floor_s     REAL NOT NULL,
     failure_reason          TEXT,
     solved_e                REAL,
@@ -414,8 +416,8 @@ FACTORY_DEFAULT_SPECIES_PARAMS = {
     "onset_threshold_factor": 8.0,
     "freq_band_low_hz": None,
     "freq_band_high_hz": None,
-    "window_margin_pre_ms": 500.0,
-    "window_margin_post_ms": 500.0,
+    "window_margin_pre_ms": 250.0,
+    "window_margin_post_ms": 250.0,
     "min_corroborating_nodes": 4,
     "notes": None,
 }
@@ -658,6 +660,22 @@ async def init_db() -> None:
             await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN freq_band_low_hz REAL")
         if "freq_band_high_hz" not in tdoa_attempt_columns:
             await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN freq_band_high_hz REAL")
+
+        # Migration: add window_margin_pre_ms/post_ms snapshot columns to
+        # tdoa_attempts (2026-07-26 — correlation.py transit-aware window
+        # sizing fix, see project_soundhub_tdoa_correlation_window memory).
+        # Same "copied from species_tdoa_params at plan time" idiom as
+        # onset_threshold_factor/freq_band_* above — needed so the legacy
+        # ESP-NOW audio_push correlation path (find_tdoa_attempt_node_by_
+        # request_id) has the species' raw knee distance available, not just
+        # the live species_tdoa_params row (which may have changed since this
+        # attempt was planned). Nullable (unlike travel_time_floor_s, which
+        # is NOT NULL) since older rows predating this migration have no
+        # value to backfill.
+        if "window_margin_pre_ms" not in tdoa_attempt_columns:
+            await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN window_margin_pre_ms REAL")
+        if "window_margin_post_ms" not in tdoa_attempt_columns:
+            await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN window_margin_post_ms REAL")
 
         # Migration: dedupe tdoa_attempt_nodes before adding the UNIQUE index
         # below (found 2026-07-13 — the straggler-fold-in path in routes.py's
@@ -1777,6 +1795,8 @@ async def insert_tdoa_attempt(
     freq_band_low_hz: float | None,
     freq_band_high_hz: float | None,
     travel_time_floor_s: float,
+    window_margin_pre_ms: float | None = None,
+    window_margin_post_ms: float | None = None,
     failure_reason: str | None = None,
 ) -> int:
     """Insert one TDOA orchestration attempt. Always called with status=
@@ -1787,6 +1807,12 @@ async def insert_tdoa_attempt(
     planned_node_ids is a pre-serialized JSON array string — this module
     stays a dumb DB layer and has no opinion on its contents, matching the
     rest of this file's style.
+
+    window_margin_pre_ms/post_ms (added 2026-07-26) are the species' raw
+    knee distance, snapshotted here the same way onset_threshold_factor is —
+    see correlation.py's leading-edge window sizing, which needs this same
+    per-species figure but can't safely re-read species_tdoa_params live
+    (it may have changed since this attempt was planned).
     """
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
@@ -1796,13 +1822,16 @@ async def insert_tdoa_attempt(
                 status, t_start_us, t_end_us, planned_node_ids,
                 min_corroborating_nodes, correlation_method,
                 onset_detection_method, onset_threshold_factor,
-                freq_band_low_hz, freq_band_high_hz, travel_time_floor_s,
+                freq_band_low_hz, freq_band_high_hz,
+                window_margin_pre_ms, window_margin_post_ms,
+                travel_time_floor_s,
                 failure_reason, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (audio_event_id, origin_node_id, species_key, 1 if used_default else 0,
              status, t_start_us, t_end_us, planned_node_ids,
              min_corroborating_nodes, correlation_method, onset_detection_method,
              onset_threshold_factor, freq_band_low_hz, freq_band_high_hz,
+             window_margin_pre_ms, window_margin_post_ms,
              travel_time_floor_s, failure_reason, now, now),
         )
         await conn.commit()
@@ -2178,7 +2207,8 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
     tagged with, find the tdoa_attempt_nodes row it corresponds to, joined
     with the fields from its parent tdoa_attempts row that correlation
     needs (species_key, onset_detection_method, onset_threshold_factor,
-    correlation_method, freq_band_low_hz/high_hz, min_corroborating_nodes).
+    correlation_method, freq_band_low_hz/high_hz, window_margin_pre_ms/
+    post_ms, travel_time_floor_s, min_corroborating_nodes).
     Returns None if no attempt ever issued this requestId (e.g. a manual
     /nodes/{id}/sample pull, purpose='manual')."""
     async with connect() as conn:
@@ -2189,7 +2219,9 @@ async def find_tdoa_attempt_node_by_request_id(request_id: int) -> dict | None:
                       ta.species_key, ta.onset_detection_method,
                       ta.onset_threshold_factor, ta.correlation_method,
                       ta.freq_band_low_hz,
-                      ta.freq_band_high_hz, ta.min_corroborating_nodes
+                      ta.freq_band_high_hz, ta.window_margin_pre_ms,
+                      ta.window_margin_post_ms, ta.travel_time_floor_s,
+                      ta.min_corroborating_nodes
                FROM tdoa_attempt_nodes tan
                JOIN tdoa_attempts ta ON ta.id = tan.attempt_id
                WHERE tan.request_id = ?

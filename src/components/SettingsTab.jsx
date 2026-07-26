@@ -88,8 +88,8 @@ const BLANK_ADD_FIELDS = {
   onsetThresholdFactor: '8.0',
   freqBandLowHz: '',
   freqBandHighHz: '',
-  windowMarginPreMs: '500',
-  windowMarginPostMs: '500',
+  windowMarginPreMs: '250',
+  windowMarginPostMs: '250',
   minCorroboratingNodes: '4',
   notes: '',
 }

@@ -39,12 +39,20 @@ from math import gcd
 import numpy as np
 from scipy.signal import correlate, resample_poly
 
-# Leading-edge trim window — deliberately narrow, matching
-# tools/clap_sync_check.py's clap-tuned defaults. tdoa-correlation-design-
-# notes.md validated this width (not wider) as the safer production choice
-# at real-world SNR (see that doc's sections 3 and 8 — widening only pays
-# off once SNR is already high, and has a much heavier error tail even with
-# bandpass filtering). Do not widen without re-running that validation.
+# Fallback leading-edge trim window — only used when a caller doesn't have
+# a per-species knee distance to pass in (template_pre_ms/post_ms is None —
+# e.g. a tdoa_attempts row predating the 2026-07-26 window_margin_pre_ms/
+# post_ms snapshot migration). These were tools/clap_sync_check.py's
+# clap-tuned defaults; production callers now size the template from each
+# species' own real knee distance instead (see correlate_leading_edge's
+# template_pre_ms/post_ms/transit_s parameters and
+# project_soundhub_tdoa_correlation_window memory) — the old fixed ~5ms
+# window was found 2026-07-25 to be far narrower than real inter-node
+# transit times on this property, causing confident-looking but wrong
+# correlation matches. The historical "keep it narrow to dodge a struck
+# object's ring-down" justification for these specific numbers doesn't
+# apply to birdsong (confirmed with Jon — that reasoning traced to
+# clap_sync_check.py's hand-clap tests, tapping a glass vase).
 LEADING_EDGE_PRE_MS = 1.0
 LEADING_EDGE_POST_MS = 4.0
 
@@ -204,6 +212,9 @@ def correlate_leading_edge(
     origin_arrival_us: float,
     neighbor_data: np.ndarray, neighbor_rate: int, neighbor_t_start_us: float,
     method: str = "plain",
+    template_pre_ms: float | None = None,
+    template_post_ms: float | None = None,
+    transit_s: float = 0.0,
 ) -> dict | None:
     """Refine a neighbour node's arrival time by cross-correlating a short
     leading-edge window of its WAV against the same real-world window of
@@ -216,6 +227,25 @@ def correlate_leading_edge(
     onset_detection.detect_onset_us applies before onset detection —
     tdoa-correlation-design-notes.md found bandpass helps plain correlation
     directly, not just onset detection).
+
+    template_pre_ms/post_ms (added 2026-07-26): the species' raw knee
+    distance (window_margin_pre_ms/post_ms — unscaled, see
+    project_soundhub_tdoa_correlation_window memory), sizing the origin's
+    template exactly to the call's own real lead-in/lead-out extent instead
+    of a fixed clap-tuned width. Falls back to LEADING_EDGE_PRE_MS/POST_MS
+    if either is None (caller has no per-species figure to hand, e.g. an
+    attempt row predating the window_margin_pre_ms/post_ms snapshot
+    migration).
+
+    transit_s: this specific origin/neighbour pair's live worst-case transit
+    time (computed by the caller from node_positions — never hardcoded,
+    see routes.py _correlate_attempt_node). The neighbour's search buffer is
+    widened by this amount on each side of the template width, so the true
+    alignment is findable anywhere within +/- transit_s of the naive
+    (zero-geometry) center — fixing the historical bug where a fixed ~5ms
+    window couldn't contain a true match separated by more than that (this
+    property's real inter-node transit times run up to ~18ms). Defaults to
+    0.0 (no widening) for callers without geometry info.
 
     Returns None if either trimmed window ends up too short to correlate
     meaningfully (buffer edge, or a badly wrong center) — callers should
@@ -244,8 +274,20 @@ def correlate_leading_edge(
     origin_center = int(round((origin_arrival_us - origin_t_start_us) * 1e-6 * rate))
     neighbor_center = int(round((origin_arrival_us - neighbor_t_start_us) * 1e-6 * rate))
 
-    a = _trim_leading_edge(origin_data, rate, origin_center)
-    b = _trim_leading_edge(neighbor_data, rate, neighbor_center)
+    pre_ms = template_pre_ms if template_pre_ms is not None else LEADING_EDGE_PRE_MS
+    post_ms = template_post_ms if template_post_ms is not None else LEADING_EDGE_POST_MS
+    transit_ms = transit_s * 1e3
+
+    # Origin's template is exactly knee-sized — the call's own real extent.
+    # Neighbour's search buffer is widened by the live per-pair transit time
+    # on each side, so the true alignment (which may sit up to transit_s
+    # away from the naive zero-geometry center) is always inside the window
+    # being searched, not just the window being matched against.
+    a = _trim_leading_edge(origin_data, rate, origin_center, pre_ms=pre_ms, post_ms=post_ms)
+    b = _trim_leading_edge(
+        neighbor_data, rate, neighbor_center,
+        pre_ms=pre_ms + transit_ms, post_ms=post_ms + transit_ms,
+    )
 
     if len(a) < _MIN_TRIM_SAMPLES or len(b) < _MIN_TRIM_SAMPLES:
         return None
