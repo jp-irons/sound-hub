@@ -31,8 +31,15 @@ Why this exists:
 
     This script instead finds the actual lead-in/lead-out "knee" -- the
     real point where the energy envelope flattens into background, walking
-    outward from the detected onset -- and proposes 2x that measured
-    distance as the margin. It runs against the same Xeno-canto reference
+    outward from the detected onset -- and proposes that measured distance,
+    UNSCALED, as species_tdoa_params.window_margin_pre_ms/post_ms (changed
+    2026-07-25 -- this script used to bake a 2x safety factor into its
+    proposed value; that factor is now applied downstream, at the point of
+    use, in routes.py's _pull_window_for_node -- see that function's
+    comments -- because correlation.py's leading-edge correlation step also
+    needs this same per-species figure, and it needs the raw, unscaled knee
+    distance rather than an already-doubled pull-sizing value). It runs
+    against the same Xeno-canto reference
     recordings already used for band/threshold derivation rather than field
     pulls, specifically because those files are NOT pre-cropped to any
     production pull window: there are often several real seconds of genuine
@@ -85,10 +92,12 @@ Methodology per call:
        --max-lookahead-ms cap) -- a cap-limited censor can be fixed by just
        raising that flag and re-running; a neighbour-limited one is a real
        property of that recording.
-    5. Per call, proposed_margin = 2x the measured knee distance. Per
+    5. Per call, the measured knee distance is used as-is (no scaling). Per
        species, reports the percentile distribution of that across all
        uncensored calls and proposes --margin-pct (default 75th percentile)
-       of it as the candidate window_margin_pre_ms/post_ms.
+       of it as the candidate window_margin_pre_ms/post_ms -- the pull
+       request itself applies a 2x safety factor on top of this value at
+       the point of use (see routes.py), not here.
 
 Usage:
     python tools/derive_onset_margins.py
@@ -223,10 +232,25 @@ def measure_margins_for_file(path: str, rate: int, data: np.ndarray, seg_kwargs:
 
 def aggregate_direction(rows: list, ms_key: str, censored_key: str, reason_key: str,
                          margin_pct: float) -> dict:
-    """proposed_margin_ms = margin_pct percentile of 2x each uncensored
-    call's measured knee distance. Censored calls are excluded from the
-    percentile entirely (not imputed, not treated as 0) -- see module
-    docstring on why a censored call must not silently bias the result."""
+    """proposed_knee_ms = margin_pct percentile of each uncensored call's
+    RAW measured knee distance (unscaled). Censored calls are excluded from
+    the percentile entirely (not imputed, not treated as 0) -- see module
+    docstring on why a censored call must not silently bias the result.
+
+    No 2x safety factor applied here (changed 2026-07-25 -- see
+    project_soundhub_margin_derivation memory's follow-up correction): this
+    used to fold a 2x multiplier into the value proposed for
+    species_tdoa_params.window_margin_pre/post_ms, matching how routes.py
+    consumed it at the time (straight pull-window sizing). Since then
+    window_margin_pre/post_ms has been redefined to store the raw knee
+    distance itself -- the 2x pull-request safety factor is now applied at
+    the point of use, in routes.py's _pull_window_for_node, rather than
+    baked into this script's output -- because the correlation leading-edge
+    step (correlation.py) also needs this same per-species figure, and it
+    needs the UNSCALED knee distance (the call's actual extent), not a
+    value that's already been doubled for a different consumer's purposes.
+    One stored number, scaled differently by each downstream consumer, not
+    two derived numbers that could drift apart."""
     found = [r for r in rows if not r[censored_key]]
     censored = [r for r in rows if r[censored_key]]
     n_cap = sum(1 for r in censored if r[reason_key] == "hit_cap")
@@ -238,7 +262,7 @@ def aggregate_direction(rows: list, ms_key: str, censored_key: str, reason_key: 
     if not found:
         result["proposed_margin_ms"] = None
         return result
-    margins = np.array([2.0 * r[ms_key] for r in found])
+    margins = np.array([r[ms_key] for r in found])
     percentiles = [50, 75, 90, 100]
     result["margin_percentiles_ms"] = {p: float(np.percentile(margins, p)) for p in percentiles}
     result["proposed_margin_ms"] = float(np.percentile(margins, margin_pct))
@@ -273,8 +297,10 @@ def main():
     parser.add_argument("--max-lookahead-ms", type=float, default=3000.0,
                          help="Same as --max-lookback-ms, forward from onset for the lead-out knee")
     parser.add_argument("--margin-pct", type=float, default=75.0,
-                         help="Percentile of the per-call 2x-knee-distance distribution proposed "
-                              "as the new window_margin_pre_ms/post_ms")
+                         help="Percentile of the per-call raw (unscaled) knee-distance "
+                              "distribution proposed as the new window_margin_pre_ms/post_ms -- "
+                              "the pull request itself applies a 2x safety factor on top of "
+                              "this at the point of use (routes.py), not here")
     parser.add_argument("--tmp-dir", default=None,
                          help="Scratch dir for mp3->wav conversions (default: a temp dir, cleaned up after)")
     parser.add_argument("--json-out", default=None, help="Optional path to dump the full structured report")
@@ -362,9 +388,9 @@ def main():
                 if agg["n_found"] < 10:
                     print(f"    [warn] only {agg['n_found']} uncensored call(s) -- treat this as low-confidence.")
                 mp = agg["margin_percentiles_ms"]
-                print(f"    2x-knee-distance percentiles (ms): 50%={mp[50]:.0f}  75%={mp[75]:.0f}  "
+                print(f"    knee-distance percentiles (ms, unscaled): 50%={mp[50]:.0f}  75%={mp[75]:.0f}  "
                       f"90%={mp[90]:.0f}  max={mp[100]:.0f}")
-                print(f"    Proposed ({args.margin_pct:.0f}th pct): {agg['proposed_margin_ms']:.0f}ms")
+                print(f"    Proposed ({args.margin_pct:.0f}th pct, unscaled): {agg['proposed_margin_ms']:.0f}ms")
 
             current = current_config.get(species)
             if current:

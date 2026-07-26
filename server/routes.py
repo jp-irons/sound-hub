@@ -1804,8 +1804,20 @@ async def _plan_tdoa_attempt_inner(
     # geometry (~3Ha, worst-case diagonal travel time well under 1s) ever
     # required, and it silently overrode the margin+floor computation below
     # whenever that computation came out smaller than 3.0s total.
-    margin_pre_s = (params["window_margin_pre_ms"] / 1000.0) + travel_time_floor_s
-    margin_post_s = (params["window_margin_post_ms"] / 1000.0) + travel_time_floor_s
+    #
+    # window_margin_pre/post_ms redefined 2026-07-25 (margin/knee-vs-pull
+    # discussion) to store the raw per-species lead-in/lead-out KNEE distance
+    # itself (tools/derive_onset_margins.py's measured onset-to-background
+    # distance), not an already-safety-factored pull value. The 2x safety
+    # factor is applied here, at the point of use, rather than baked into the
+    # stored config value — so the same raw knee number can also drive the
+    # leading-edge correlation template/search sizing (see correlation.py),
+    # which needs the UNSCALED knee distance, not the doubled pull-request
+    # value. Pulling MORE than the correlation step's own template width
+    # (2x vs 1x the knee) is deliberate slack so the true match is never
+    # right at the edge of what was actually requested from the node.
+    margin_pre_s = (2.0 * params["window_margin_pre_ms"] / 1000.0) + travel_time_floor_s
+    margin_post_s = (2.0 * params["window_margin_post_ms"] / 1000.0) + travel_time_floor_s
     # Recentred on the origin's onset arrival instant rather than its raw
     # (BirdNET-classification-driven) t_start_us/t_end_us span — the span
     # can be a second or more wide and off-center from the actual transient,
@@ -1987,8 +1999,10 @@ async def _plan_tdoa_attempt_inner(
             nx, ny, nz = node_position
             dist_m = math.sqrt((ox - nx) ** 2 + (oy - ny) ** 2 + (oz - nz) ** 2)
             transit_s = dist_m / WORST_CASE_SPEED_OF_SOUND
-        node_margin_pre_s = (params["window_margin_pre_ms"] / 1000.0) + transit_s
-        node_margin_post_s = (params["window_margin_post_ms"] / 1000.0) + transit_s
+        # 2x the raw knee distance, same "safety factor applied at point of
+        # use" reasoning as margin_pre_s/margin_post_s above.
+        node_margin_pre_s = (2.0 * params["window_margin_pre_ms"] / 1000.0) + transit_s
+        node_margin_post_s = (2.0 * params["window_margin_post_ms"] / 1000.0) + transit_s
         return (
             int(origin_arrival_us - node_margin_pre_s * 1e6),
             int(origin_arrival_us + node_margin_post_s * 1e6),
