@@ -360,6 +360,22 @@ const TDOA_NODE_STATUS_COLOR = {
   onset_failed: 'var(--red, #f44336)',
 }
 
+// correlationStatus (added 2026-07-26) shown in the Corr column in place of
+// a bare '—' for the reasons a node ended up on the uncorrelated
+// independent-detector fallback — see project memory on unpositioned-origin
+// visibility. Only the non-scored reasons get a label here; 'trusted'/
+// 'untrusted' already show their actual peakCorrCoef number instead.
+const CORRELATION_STATUS_LABEL = {
+  no_origin: 'no origin',
+  crashed: 'crashed',
+  too_short: 'too short',
+}
+const CORRELATION_STATUS_FLAG = {
+  no_origin: true,
+  crashed: true,
+  too_short: true,
+}
+
 // arrival_us / t_start_us / t_end_us are node-clock epoch microseconds, same
 // units as trigger_events.t_us — reuses tUsToIso() below rather than a
 // second conversion helper.
@@ -1097,6 +1113,14 @@ export default function AnalyticsTab({ isAdmin = false }) {
                             : a.status === 'failed'
                               ? (a.failureReason ?? '—')
                               : '—'}
+                          {a.status === 'solved' && a.uncorrelatedNodeCount > 0 && (
+                            <span
+                              style={{ color: 'var(--yellow, #ffc107)', fontWeight: 600, marginLeft: 6 }}
+                              title={`${a.uncorrelatedNodeCount} of the node(s) that fed this solve relied on independent per-node timing, not cross-correlation — often because the origin had no known position at plan time. Expand for detail.`}
+                            >
+                              ⚠ {a.uncorrelatedNodeCount} uncorrelated
+                            </span>
+                          )}
                         </td>
                         {isAdmin && (
                           <td style={sty.td}>
@@ -1167,8 +1191,14 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                           ? `${n.deltaFromOriginUs >= 0 ? '+' : ''}${n.deltaFromOriginUs.toFixed(1)}µs`
                                           : '—'}
                                     </td>
-                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
-                                      {n.peakCorrCoef != null ? n.peakCorrCoef.toFixed(2) : '—'}
+                                    <td style={{
+                                      ...sty.td, fontFamily: 'monospace', fontSize: 11,
+                                      color: CORRELATION_STATUS_FLAG[n.correlationStatus]
+                                        ? 'var(--yellow, #ffc107)' : sty.td.color,
+                                    }}>
+                                      {n.peakCorrCoef != null
+                                        ? n.peakCorrCoef.toFixed(2)
+                                        : (CORRELATION_STATUS_LABEL[n.correlationStatus] ?? '—')}
                                     </td>
                                     <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
                                       {n.qualityRatio != null

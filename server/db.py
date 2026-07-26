@@ -591,6 +591,23 @@ async def init_db() -> None:
                 "ALTER TABLE tdoa_attempt_nodes ADD COLUMN onset_ratio REAL"
             )
 
+        # Migration: add correlation_status to tdoa_attempt_nodes (2026-07-26
+        # — see project_soundhub_correlation_visibility memory / Finding 3 in
+        # project_soundhub_tdoa_correlation_window). Previously a NULL
+        # peak_corr_coef/quality_ratio was overloaded across several
+        # genuinely different situations (no origin available to correlate
+        # against, correlate_leading_edge crashing, trimmed windows too short
+        # to score) with no way to tell them apart after the fact. One of:
+        # 'no_origin', 'crashed', 'too_short', 'trusted', 'untrusted' — NULL
+        # for rows that never reach the correlation step at all (onset_failed
+        # before correlation is attempted, or the origin's own row, which is
+        # never correlated against itself). See routes.py
+        # _correlate_attempt_node for where each value is set.
+        if "correlation_status" not in tdoa_attempt_node_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempt_nodes ADD COLUMN correlation_status TEXT"
+            )
+
         # Migration: add filename to audio_events (milestone 3 — needed to
         # re-open a node's WAV for onset detection after the fact, e.g. a
         # 'reused_existing' corroborator's audio that arrived long before
@@ -676,6 +693,25 @@ async def init_db() -> None:
             await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN window_margin_pre_ms REAL")
         if "window_margin_post_ms" not in tdoa_attempt_columns:
             await conn.execute("ALTER TABLE tdoa_attempts ADD COLUMN window_margin_post_ms REAL")
+
+        # Migration: add uncorrelated_node_count to tdoa_attempts (2026-07-26
+        # — see project_soundhub_correlation_visibility memory). Set by
+        # persist_tdoa_solution() alongside solved_e/n/alt etc.: how many of
+        # the nodes that actually fed the solve had a
+        # tdoa_attempt_nodes.correlation_status other than 'trusted' (no
+        # origin to correlate against, crashed, too-short window, or
+        # untrusted) — i.e. relied on the independent per-node onset detector
+        # rather than cross-correlation refinement. 0 = every contributing
+        # node was cross-correlation-verified; NULL for attempts solved
+        # before this migration. This is the single number meant to answer
+        # "should I trust this solved position" without digging into
+        # per-node internals — motivated by Jon expecting to add new,
+        # not-yet-surveyed nodes soon, whose origin-side detections would
+        # otherwise silently degrade every attempt they participate in.
+        if "uncorrelated_node_count" not in tdoa_attempt_columns:
+            await conn.execute(
+                "ALTER TABLE tdoa_attempts ADD COLUMN uncorrelated_node_count INTEGER"
+            )
 
         # Migration: dedupe tdoa_attempt_nodes before adding the UNIQUE index
         # below (found 2026-07-13 — the straggler-fold-in path in routes.py's
@@ -2031,6 +2067,7 @@ async def persist_tdoa_solution(
     residual_m: float,
     method: str,
     ambiguous_root_json: str | None = None,
+    uncorrelated_node_count: int | None = None,
 ) -> None:
     """Milestone 4: write a successful tdoa_solver.solve() result back to
     the attempt row and advance status to 'solved'.
@@ -2041,6 +2078,13 @@ async def persist_tdoa_solution(
     tdoa_solver.SolveResult.ambiguous_root. No hint_point is wired into the
     automatic solve as of milestone 4, so a 4-node solve's mirror root is
     stored for manual review, not auto-resolved.
+
+    uncorrelated_node_count (added 2026-07-26): how many of the nodes that
+    fed THIS solve had a tdoa_attempt_nodes.correlation_status other than
+    'trusted' — see the column's migration comment and
+    _maybe_solve_tdoa_attempt_inner (routes.py), which computes it from the
+    same solver_nodes list the solve itself used. 0 means every contributing
+    arrival was cross-correlation-verified.
     """
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
@@ -2048,10 +2092,11 @@ async def persist_tdoa_solution(
             """UPDATE tdoa_attempts
                SET status = 'solved', solved_e = ?, solved_n = ?,
                    solved_alt = ?, solve_residual_m = ?, solve_method = ?,
-                   solve_ambiguous_json = ?, solved_at = ?, updated_at = ?
+                   solve_ambiguous_json = ?, uncorrelated_node_count = ?,
+                   solved_at = ?, updated_at = ?
                WHERE id = ?""",
-            (e, n, alt, residual_m, method, ambiguous_root_json, now, now,
-             attempt_id),
+            (e, n, alt, residual_m, method, ambiguous_root_json,
+             uncorrelated_node_count, now, now, attempt_id),
         )
         await conn.commit()
 
@@ -2148,6 +2193,7 @@ async def update_tdoa_attempt_node_result(
     peak_corr_coef: float | None = None,
     quality_ratio: float | None = None,
     onset_ratio: float | None = None,
+    correlation_status: str | None = None,
 ) -> None:
     """Milestone 3: record one node's correlation outcome against its
     tdoa_attempt_nodes row — status='arrived' with arrival_us set on
@@ -2176,7 +2222,13 @@ async def update_tdoa_attempt_node_result(
     regex-parsing the error text. Same always-overwritten treatment as
     peak_corr_coef/quality_ratio; NULL for failure modes that never reach
     detect_onset() (missing file/t_start_us, unknown
-    onset_detection_method — see routes.py _correlate_attempt_node)."""
+    onset_detection_method — see routes.py _correlate_attempt_node).
+
+    correlation_status (added 2026-07-26): one of 'no_origin', 'crashed',
+    'too_short', 'trusted', 'untrusted' — see the ALTER TABLE migration's
+    comment for what each means. Same always-overwritten treatment as
+    peak_corr_coef/quality_ratio (including NULL, for rows that never reach
+    the correlation step at all)."""
     now = datetime.now(timezone.utc).isoformat()
     async with connect() as conn:
         if audio_event_id is not None:
@@ -2184,20 +2236,22 @@ async def update_tdoa_attempt_node_result(
                 """UPDATE tdoa_attempt_nodes
                    SET status = ?, arrival_us = ?, error = ?,
                        audio_event_id = ?, peak_corr_coef = ?,
-                       quality_ratio = ?, onset_ratio = ?, updated_at = ?
+                       quality_ratio = ?, onset_ratio = ?,
+                       correlation_status = ?, updated_at = ?
                    WHERE id = ?""",
                 (status, arrival_us, error, audio_event_id,
-                 peak_corr_coef, quality_ratio, onset_ratio, now, node_row_id),
+                 peak_corr_coef, quality_ratio, onset_ratio,
+                 correlation_status, now, node_row_id),
             )
         else:
             await conn.execute(
                 """UPDATE tdoa_attempt_nodes
                    SET status = ?, arrival_us = ?, error = ?,
                        peak_corr_coef = ?, quality_ratio = ?,
-                       onset_ratio = ?, updated_at = ?
+                       onset_ratio = ?, correlation_status = ?, updated_at = ?
                    WHERE id = ?""",
                 (status, arrival_us, error, peak_corr_coef, quality_ratio,
-                 onset_ratio, now, node_row_id),
+                 onset_ratio, correlation_status, now, node_row_id),
             )
         await conn.commit()
 

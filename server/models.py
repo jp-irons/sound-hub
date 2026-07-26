@@ -221,6 +221,21 @@ class TdoaAttemptNodeRecord(BaseModel):
                      "of the correlation-refined value, even if "
                      "peak_corr_coef was good.",
     )
+    correlation_status: Optional[str] = Field(
+        default=None, alias="correlationStatus",
+        description="One of 'no_origin' (no correlated origin was available "
+                     "for this attempt — the origin was unpositioned/"
+                     "unapproved at plan time, so this node fell back to its "
+                     "independent onset detector with no cross-check at "
+                     "all), 'crashed' (correlation raised an exception), "
+                     "'too_short' (trimmed windows too short to score), "
+                     "'trusted', or 'untrusted'. Null for rows that never "
+                     "reach the correlation step (onset_failed, the "
+                     "origin's own row, or attempts predating this field). "
+                     "Added 2026-07-26 so a NULL peak_corr_coef's cause is "
+                     "no longer ambiguous — see project memory on "
+                     "unpositioned-origin visibility.",
+    )
     delta_from_origin_us: Optional[float] = Field(
         default=None, alias="deltaFromOriginUs",
         description="This node's arrival_us minus the attempt's origin "
@@ -285,6 +300,18 @@ class TdoaAttemptRecord(BaseModel):
     solve_method: Optional[str] = Field(default=None, alias="solveMethod")
     solve_ambiguous_root: Optional[tuple[float, float, float]] = Field(
         default=None, alias="solveAmbiguousRoot",
+    )
+    uncorrelated_node_count: Optional[int] = Field(
+        default=None, alias="uncorrelatedNodeCount",
+        description="How many of the nodes that fed this solve had a "
+                     "correlationStatus other than 'trusted' (no origin to "
+                     "correlate against, crashed, too-short window, or "
+                     "untrusted) — i.e. relied on the independent per-node "
+                     "onset detector rather than cross-correlation "
+                     "refinement. 0 means every contributing arrival was "
+                     "cross-correlation-verified. Null until solved, or for "
+                     "attempts solved before this field was added "
+                     "(2026-07-26).",
     )
     solved_at: Optional[str] = Field(default=None, alias="solvedAt")
     created_at: str = Field(alias="createdAt")

@@ -1345,8 +1345,18 @@ async def _correlate_attempt_node(
     final_arrival_us = arrival_us
     peak_corr_coef = None
     quality_ratio = None
+    # correlation_status (2026-07-26 — see project_soundhub_correlation_
+    # visibility memory / Finding 3): distinguishes the several genuinely
+    # different reasons a node ends up on the uncorrelated independent-
+    # detector fallback, which previously all collapsed into an
+    # indistinguishable NULL peak_corr_coef. Left None for the self-guard
+    # branch below (a defensive case that "shouldn't happen" rather than a
+    # real fallback reason worth counting).
+    correlation_status = None
+    crashed = False
     origin = await db.get_tdoa_attempt_origin(attempt_id)
     if origin is None:
+        correlation_status = "no_origin"
         log.info(
             "tdoa correlation — node=%s: no correlated origin available for "
             "this attempt yet, using independent onset arrival_us=%.1f",
@@ -1408,11 +1418,19 @@ async def _correlate_attempt_node(
             )
         except Exception:
             corr_result = None
+            crashed = True
             log.exception(
                 "tdoa correlation — node=%s leading-edge correlation crashed, "
                 "keeping independent onset arrival_us=%.1f",
                 node_id, arrival_us,
             )
+
+        if crashed:
+            correlation_status = "crashed"
+        elif corr_result is None:
+            correlation_status = "too_short"
+        else:
+            correlation_status = "trusted" if corr_result["trusted"] else "untrusted"
 
         if corr_result is not None:
             peak_corr_coef = corr_result["peak_corr_coef"]
@@ -1431,7 +1449,7 @@ async def _correlate_attempt_node(
         node_row_id, status="arrived", arrival_us=final_arrival_us,
         audio_event_id=audio_event_id,
         peak_corr_coef=peak_corr_coef, quality_ratio=quality_ratio,
-        onset_ratio=onset_ratio,
+        onset_ratio=onset_ratio, correlation_status=correlation_status,
     )
     log.info(
         "tdoa correlation — node=%s arrival_us=%.1f (method=%s)",
@@ -1651,6 +1669,13 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
     positions = await db.list_node_positions()
     solver_nodes: list[TdoaNode] = []
     timestamps_us: list[float] = []
+    # Tallied alongside solver_nodes (not separately re-derived) so this
+    # count always matches exactly which rows actually fed the solve, not
+    # just every 'arrived' row — see project_soundhub_correlation_visibility
+    # memory. None (never reached the correlation step, or predates the
+    # 2026-07-26 migration) counts as uncorrelated too, same as any other
+    # non-'trusted' value — an unknown status is not a known-good one.
+    uncorrelated_node_count = 0
     for row in arrived:
         pos = positions.get(row["node_id"])
         if pos is None or any(pos.get(k) is None for k in ("pos_e", "pos_n", "pos_alt")):
@@ -1664,6 +1689,8 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
             node_id=row["node_id"], x=pos["pos_e"], y=pos["pos_n"], z=pos["pos_alt"],
         ))
         timestamps_us.append(row["arrival_us"])
+        if row["correlation_status"] != "trusted":
+            uncorrelated_node_count += 1
 
     if len(solver_nodes) < min_corroborating_nodes:
         log.warning(
@@ -1712,12 +1739,13 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
         attempt_id, e=result.x, n=result.y, alt=result.z,
         residual_m=result.residual, method=result.method,
         ambiguous_root_json=ambiguous_json,
+        uncorrelated_node_count=uncorrelated_node_count,
     )
     log.info(
         "tdoa attempt id=%s — solved: E=%.2f N=%.2f Alt=%.2f residual=%.3fm "
-        "method=%s nodes=%d%s",
+        "method=%s nodes=%d uncorrelated=%d%s",
         attempt_id, result.x, result.y, result.z, result.residual,
-        result.method, len(solver_nodes),
+        result.method, len(solver_nodes), uncorrelated_node_count,
         " (ambiguous root stored, resolved via array-centroid hint_point)" if ambiguous_json else "",
     )
 
@@ -2952,6 +2980,7 @@ def _tdoa_attempt_node_record_from_row(
         updated_at=row["updated_at"],
         peak_corr_coef=row["peak_corr_coef"],
         quality_ratio=row["quality_ratio"],
+        correlation_status=row["correlation_status"],
         delta_from_origin_us=delta_from_origin_us,
         baseline_m=baseline_m,
         consistency_ratio=consistency_ratio,
@@ -3017,6 +3046,7 @@ def _tdoa_attempt_record_from_row(
         solve_residual_m=row["solve_residual_m"],
         solve_method=row["solve_method"],
         solve_ambiguous_root=ambiguous,
+        uncorrelated_node_count=row["uncorrelated_node_count"],
         solved_at=row["solved_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
