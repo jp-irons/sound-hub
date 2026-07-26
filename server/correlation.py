@@ -168,9 +168,27 @@ def _score_correlation(rate: int, a: np.ndarray, b: np.ndarray, method: str) -> 
         raise ValueError(f"unknown correlation method '{method}'")
 
     peak_idx = int(np.argmax(corr))
-    # lag_samples > 0 means b is delayed relative to a.
-    lag_samples = peak_idx - (len(b) - 1)
-    lag_samples += _parabolic_peak(corr, peak_idx)
+    # scipy.signal.correlate(a, b, mode="full")'s peak_idx - (len(b) - 1)
+    # gives the shift that must be applied to A to align it onto B — i.e.
+    # its sign is the OPPOSITE of "how much B is delayed relative to A".
+    # Verified 2026-07-26 (project_soundhub_correlation_sign_bug memory)
+    # with a minimal known-delay test: a signal genuinely arriving later in
+    # b than in a produces a NEGATIVE raw value here, not positive. Negate
+    # it so lag_samples/lag_us matches this function's actual contract
+    # (positive means b/the neighbour is delayed relative to a/the origin)
+    # and correlate_leading_edge's arrival_us = origin_arrival_us + lag_us
+    # gets the correction in the right direction. This is a pre-existing
+    # bug, not introduced by any per-species window sizing change — it
+    # previously had little room to matter because the old fixed ~5ms
+    # leading-edge window bounded how large a wrongly-signed correction
+    # could ever be; the transit-aware widened window (2026-07-26) gives it
+    # much more room, making this fix a prerequisite for that change being
+    # safe to deploy.
+    # The parabolic sub-sample refinement is computed in the ORIGINAL
+    # (un-negated) scipy convention too (it refines peak_idx itself, same
+    # direction), so it must be subtracted here, not added, to negate
+    # consistently with the integer part above.
+    lag_samples = -(peak_idx - (len(b) - 1)) - _parabolic_peak(corr, peak_idx)
     lag_us = lag_samples * 1e6 / rate
 
     quality_ratio = _peak_quality(corr, peak_idx, rate)
@@ -293,13 +311,27 @@ def correlate_leading_edge(
         return None
 
     score = _score_correlation(rate, a, b, method)
+
+    # _score_correlation's lag measures the offset between the true content's
+    # LOCAL index in a vs. in b (each relative to that buffer's own index 0
+    # -- see correlation_sign_bug memory). That's only equal to the real
+    # inter-node delay when both buffers' index-0 sits at the same real-time
+    # instant. Widening b's PRE side by transit_ms (above) moves b's own
+    # index-0 transit_ms earlier than a's, independent of any real delay --
+    # a second, distinct bug from the sign one, found analytically +
+    # verified empirically 2026-07-26 while re-checking the sign fix's
+    # arithmetic. Must be subtracted back out here for lag_us/arrival_us to
+    # mean what their docstrings say. Zero when transit_s=0.0 (the
+    # backward-compatible default), so this is a no-op for any caller not
+    # passing per-pair geometry.
+    lag_us = score["lag_us"] - transit_s * 1e6
     trusted = (
         score["peak_corr_coef"] >= MIN_PEAK_CORR_COEF
         and score["quality_ratio"] >= AMBIGUOUS_RATIO_THRESHOLD
     )
     return {
-        "arrival_us": origin_arrival_us + score["lag_us"],
-        "lag_us": score["lag_us"],
+        "arrival_us": origin_arrival_us + lag_us,
+        "lag_us": lag_us,
         "peak_corr_coef": score["peak_corr_coef"],
         "quality_ratio": score["quality_ratio"],
         "trusted": trusted,
