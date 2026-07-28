@@ -622,7 +622,7 @@ export default function AnalyticsTab({ isAdmin = false }) {
   // via a throwaway object URL/anchor.
   const downloadTdoaAudio = useCallback(async (filename) => {
     try {
-      const res = await apiFetch(`/tdoa/audio/${encodeURIComponent(filename)}`)
+      const res = await apiFetch(`/audio/${encodeURIComponent(filename)}`)
       if (!res.ok) {
         const body = await res.json().catch(() => null)
         throw new Error(body?.detail ?? `${res.status}`)

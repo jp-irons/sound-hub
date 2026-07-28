@@ -520,7 +520,7 @@ export default function App() {
         </div>
       )}
 
-      {tab === 'detections' && <DetectionsTab />}
+      {tab === 'detections' && <DetectionsTab isAuthenticated={authState === 'authenticated'} />}
       {tab === 'analytics' && authState === 'authenticated' && <AnalyticsTab isAdmin={isAdmin} />}
       {tab === 'tools' && isAdmin && <ToolsTab />}
       {tab === 'users' && isAdmin && <UsersTab user={user} />}

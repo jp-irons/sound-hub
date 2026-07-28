@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { buildDetectionParams } from '../utils/detectionFilters.js'
 import { ConfBar, formatTime, formatDateTime } from './DetectionFormat.jsx'
 import { useIsMobile } from '../hooks/useBreakpoint.js'
+import { apiFetch } from '../auth.js'
 
 const API_BASE = '/api'
 const POLL_INTERVAL_MS = 5000
@@ -49,9 +50,10 @@ function comparatorFor(sortMode) {
   }
 }
 
-export default function SpeciesSummaryList({ minConf, species, datePreset, customFrom, customTo, moment }) {
+export default function SpeciesSummaryList({ minConf, species, datePreset, customFrom, customTo, moment, isAuthenticated }) {
   const [summary, setSummary]   = useState([])
   const [error, setError]       = useState(null)
+  const [audioError, setAudioError] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [details, setDetails]   = useState({})       // commonName -> rows | 'loading' | 'error'
   const [pinned, setPinned]     = useState(loadPinned)
@@ -133,6 +135,34 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
     }
   }
 
+  // Downloads a detection's source WAV — viewer-gated, same route and same
+  // blob-fetch-not-hyperlink pattern as Analytics' downloadTdoaAudio (this
+  // app has no cookie session for a bare <a href> to carry auth on, and a
+  // token-in-URL was rejected there for the same reason: browser history /
+  // server access logs). Only ever called when nodeId is set: manual
+  // ToolsTab uploads store `source` as a display label with no file ever
+  // persisted to serve (the temp upload is deleted right after analysis).
+  const downloadDetectionAudio = useCallback(async (filename) => {
+    try {
+      const res = await apiFetch(`/audio/${encodeURIComponent(filename)}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail ?? `${res.status}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setAudioError(`Could not download ${filename}: ${err.message ?? String(err)}`)
+    }
+  }, [])
+
   const sty = {
     root: {
       flex: 1, overflow: 'auto', background: 'var(--surface1, #1e1e1e)',
@@ -210,6 +240,10 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
     detailWikiLink: {
       display: 'inline-block', marginTop: 4, fontSize: 11,
       color: 'var(--accent, #4da6ff)', textDecoration: 'none',
+    },
+    downloadLink: {
+      background: 'none', border: 'none', padding: 0, font: 'inherit',
+      color: 'var(--accent, #4da6ff)', cursor: 'pointer', textAlign: 'left',
     },
     table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
     th: {
@@ -292,7 +326,19 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
                     <tr key={d.id}>
                       <td style={sty.td}>{formatTime(d.analyzedAt)}</td>
                       <td style={sty.td}><ConfBar value={d.confidence} /></td>
-                      <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>{d.source ?? '—'}</td>
+                      <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
+                        {isAuthenticated && d.nodeId && d.source ? (
+                          <button
+                            style={sty.downloadLink}
+                            title="Download WAV"
+                            onClick={() => downloadDetectionAudio(d.source)}
+                          >
+                            {d.source} ⭳
+                          </button>
+                        ) : (
+                          d.source ?? '—'
+                        )}
+                      </td>
                       <td style={{ ...sty.td, color: 'var(--text-muted, #888)' }}>
                         {d.startSec != null ? `${d.startSec}–${d.endSec}s` : '—'}
                       </td>
@@ -351,6 +397,11 @@ export default function SpeciesSummaryList({ minConf, species, datePreset, custo
   return (
     <div style={sty.root}>
       {toolbar}
+      {audioError && (
+        <div style={{ padding: '6px 12px', fontSize: 11, color: 'var(--red, #f44336)' }}>
+          {audioError}
+        </div>
+      )}
       {pinnedRows.length > 0 && (
         <>
           <div style={sty.sectionLabel}>Pinned</div>

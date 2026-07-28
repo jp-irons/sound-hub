@@ -3186,28 +3186,34 @@ async def list_tdoa_attempts(limit: int = Query(default=50, ge=1, le=500)):
     return records
 
 
-@router.get("/tdoa/audio/{filename}", dependencies=[Depends(require_viewer)])
-async def get_tdoa_audio(filename: str):
-    """Serve one WAV file from the hub's audio/ directory by filename —
-    backs the Localisation sub-tab's "File" column, e.g. to manually
-    sanity-check a node's audio behind an onset-detection failure.
+@router.get("/audio/{filename}", dependencies=[Depends(require_viewer)])
+async def get_audio_file(filename: str):
+    """Serve one WAV file from the hub's audio/ directory by filename.
 
-    filename always comes from a DB-stored value in the UI's normal flow
-    (audio_events.filename, joined in by db.list_tdoa_attempt_nodes), but
-    it's still a request parameter the browser controls — validated against
-    path traversal regardless, rather than trusted just because the normal
-    caller is well-behaved. Two layers: os.path.basename() strips any
-    directory components (rejects anything containing a slash outright),
-    and the resolved path is confirmed to still be inside audio/ (catches
-    a bare '..' or '.', which basename() alone does not — basename('..')
-    is '..').
+    Generic by design, not TDOA-specific — it just serves whatever's in
+    audio/ — so it backs two callers: the Localisation sub-tab's "File"
+    column (e.g. to manually sanity-check a node's audio behind an
+    onset-detection failure) and the Detections tab's per-detection
+    download (SpeciesSummaryList.jsx, gated client-side on nodeId being
+    set, since manual ToolsTab uploads have no persisted file to serve).
+    Was named /tdoa/audio/{filename} until the Detections use was added
+    (2026-07-28) made that name misleading; renamed to /audio/{filename}.
 
-    Auth note: viewer-level like the rest of the TDOA read surface, but
-    this repo authenticates with a Bearer header (auth.js), not cookies —
-    a plain <a href> wouldn't carry it, and putting the token in the URL
-    instead was deliberately rejected (browser history / server access
-    logs). The frontend fetches this via apiFetch() as a blob and triggers
-    the download client-side instead of linking directly.
+    filename comes from a DB-stored value in both callers' normal flow
+    (audio_events.filename / detections.source), but it's still a request
+    parameter the browser controls — validated against path traversal
+    regardless, rather than trusted just because the normal caller is
+    well-behaved. Two layers: os.path.basename() strips any directory
+    components (rejects anything containing a slash outright), and the
+    resolved path is confirmed to still be inside audio/ (catches a bare
+    '..' or '.', which basename() alone does not — basename('..') is '..').
+
+    Auth note: viewer-level, but this repo authenticates with a Bearer
+    header (auth.js), not cookies — a plain <a href> wouldn't carry it, and
+    putting the token in the URL instead was deliberately rejected (browser
+    history / server access logs). The frontend fetches this via
+    apiFetch() as a blob and triggers the download client-side instead of
+    linking directly.
     """
     safe_name = os.path.basename(filename)
     if safe_name != filename:

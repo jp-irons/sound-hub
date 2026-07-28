@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { DATE_PRESETS, MOMENT_OPTIONS, isQuickMoment } from '../utils/detectionFilters.js'
 import SpeciesSummaryList from './SpeciesSummaryList.jsx'
 
-export default function DetectionsTab() {
+export default function DetectionsTab({ isAuthenticated }) {
   const [minConf, setMinConf]         = useState(0.0)
   const [species, setSpecies]         = useState('')
   const [datePreset, setDatePreset]   = useState('today')
@@ -125,6 +125,7 @@ export default function DetectionsTab() {
         customFrom={customFrom}
         customTo={customTo}
         moment={moment}
+        isAuthenticated={isAuthenticated}
       />
     </div>
   )
