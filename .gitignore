@@ -31,3 +31,5 @@ config/nginx.conf
 
 # sample files
 test/samples/
+test/sampleInvestigation/
+test/tdoa_pulls/

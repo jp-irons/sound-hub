@@ -129,8 +129,23 @@ def solve(
 
     c = speed_of_sound
 
-    # Scale timestamps to metres: di = c * ti_seconds
-    d_arr = np.array([c * t * 1e-6 for t in timestamps_us])
+    # Subtract a common time reference before scaling to metres. Callers
+    # pass raw absolute Unix-epoch microsecond timestamps (~1.8e15 us), and
+    # d = c*t*1e-6 at that scale is ~6e11 m. The b[] terms below square d0
+    # and di and subtract them (d0**2 - di**2) to isolate the real signal —
+    # a few metres of genuine range difference — which is ~11 orders of
+    # magnitude smaller than d0**2/di**2 themselves. float64 only carries
+    # ~15-17 significant digits, so that subtraction was pure catastrophic
+    # cancellation: the real signal was destroyed before the linear solve
+    # ever ran, and every historical solve was effectively noise. Anchoring
+    # on the earliest timestamp keeps all values small (order of the actual
+    # inter-node transit times, at most a few ms -> a few hundred metres)
+    # without changing the geometry: the linear system only depends on
+    # relative di-d0/di**2-d0**2 terms, and result.d is never read outside
+    # this module's own residual check, so the constant shift is invisible
+    # to every caller (see routes.py — only x/y/z/residual/method are used).
+    t_ref = min(timestamps_us)
+    d_arr = np.array([c * (t - t_ref) * 1e-6 for t in timestamps_us])
     pos = np.array([[n.x, n.y, n.z] for n in nodes])
 
     n = len(nodes)
