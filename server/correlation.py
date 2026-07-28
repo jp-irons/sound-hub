@@ -113,16 +113,49 @@ def _parabolic_peak(corr: np.ndarray, peak_idx: int) -> float:
     return 0.5 * (y0 - y2) / denom
 
 
-def _peak_quality(corr: np.ndarray, peak_idx: int, rate: int) -> float:
+def _peak_quality(
+    corr: np.ndarray, peak_idx: int, rate: int,
+    transit_s: float = 0.0, b_len: int | None = None,
+) -> float:
     """Ratio of the primary correlation peak to the next-highest peak found
-    outside a small exclusion zone around it. Identical to
+    outside a small exclusion zone around it. Was identical to
     tools/clap_sync_check.py's _peak_quality() (minus the second_idx return,
-    unused here)."""
+    unused here) — diverges as of 2026-07-28 (see transit_s/b_len below);
+    not backported to clap_sync_check.py, which has no widened/geometry-
+    aware search window to bound against.
+
+    transit_s/b_len (added 2026-07-28): when both are given, the competing-
+    peak search is restricted to the physically valid lag range for this
+    node pair (+/- transit_s around the primary alignment), not the full
+    correlate(..., mode='full') output. That output spans every possible
+    slide of the (narrow) origin template across the (transit_s-widened)
+    neighbour buffer — most of it corresponds to lags the sound could not
+    physically have travelled fast enough to produce. Real diagnostic data
+    (2026-07-28, 5 field attempts / 19 node pairs) found 12 of 19 failing
+    pairs' "competing" peak sat outside this bound — one case ~25x past it
+    — almost certainly a partial-overlap/edge artifact or an unrelated
+    repeated call elsewhere in the widened buffer, not a genuine competing
+    TDOA hypothesis for this pair. Falls back to the old whole-array search
+    when either arg is omitted/zero, matching correlate_leading_edge's own
+    transit_s default for callers without geometry info."""
     exclude = max(1, int(round(_PEAK_EXCLUSION_MS * 1e-3 * rate)))
     masked = corr.astype(np.float64).copy()
     lo = max(0, peak_idx - exclude)
     hi = min(len(corr), peak_idx + exclude + 1)
     masked[lo:hi] = -np.inf
+
+    if transit_s > 0.0 and b_len is not None:
+        # idx = (b_len - 1) - lag_samples (see _score_correlation), and the
+        # physically valid final lag (after correlate_leading_edge's own
+        # transit_s correction) is bounded to +/- transit_s, i.e. raw
+        # lag_samples in [0, 2*transit_s*rate].
+        transit_samples = transit_s * rate
+        valid_hi = b_len - 1
+        valid_lo = valid_hi - int(round(2 * transit_samples))
+        out_of_bounds = np.ones(len(corr), dtype=bool)
+        out_of_bounds[max(0, valid_lo):min(len(corr), valid_hi + 1)] = False
+        masked[out_of_bounds] = -np.inf
+
     second_idx = int(np.argmax(masked))
     second_val = masked[second_idx]
     peak_val = corr[peak_idx]
@@ -131,7 +164,9 @@ def _peak_quality(corr: np.ndarray, peak_idx: int, rate: int) -> float:
     return float(peak_val / second_val)
 
 
-def _score_correlation(rate: int, a: np.ndarray, b: np.ndarray, method: str) -> dict:
+def _score_correlation(
+    rate: int, a: np.ndarray, b: np.ndarray, method: str, transit_s: float = 0.0,
+) -> dict:
     """Cross-correlate a against b and return lag/quality numbers.
 
     method is 'plain' (time-domain cross-correlation, weighted by actual
@@ -145,6 +180,11 @@ def _score_correlation(rate: int, a: np.ndarray, b: np.ndarray, method: str) -> 
     actually read rather than dead config, and PHAT can still be the better
     choice for a species without a characterized frequency band (no
     bandpass applied at all).
+
+    transit_s (added 2026-07-28): forwarded to _peak_quality() to bound its
+    competing-peak search to the physically valid lag range — see that
+    function's docstring. Defaults to 0.0 (old whole-array behavior) for
+    any caller without geometry info.
     """
     if method == "gcc_phat":
         n = len(a) + len(b) - 1
@@ -191,7 +231,7 @@ def _score_correlation(rate: int, a: np.ndarray, b: np.ndarray, method: str) -> 
     lag_samples = -(peak_idx - (len(b) - 1)) - _parabolic_peak(corr, peak_idx)
     lag_us = lag_samples * 1e6 / rate
 
-    quality_ratio = _peak_quality(corr, peak_idx, rate)
+    quality_ratio = _peak_quality(corr, peak_idx, rate, transit_s=transit_s, b_len=len(b))
 
     a_energy = float(np.sum(a.astype(np.float64) ** 2))
     b_energy = float(np.sum(b.astype(np.float64) ** 2))
@@ -310,7 +350,7 @@ def correlate_leading_edge(
     if len(a) < _MIN_TRIM_SAMPLES or len(b) < _MIN_TRIM_SAMPLES:
         return None
 
-    score = _score_correlation(rate, a, b, method)
+    score = _score_correlation(rate, a, b, method, transit_s=transit_s)
 
     # _score_correlation's lag measures the offset between the true content's
     # LOCAL index in a vs. in b (each relative to that buffer's own index 0
