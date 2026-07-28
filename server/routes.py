@@ -1770,6 +1770,14 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
     # memory. None (never reached the correlation step, or predates the
     # 2026-07-26 migration) counts as uncorrelated too, same as any other
     # non-'trusted' value — an unknown status is not a known-good one.
+    # Exception: the origin's own row is never counted, even though its
+    # correlation_status is always None — it never correlates against
+    # anything (there's nothing for it to correlate against, it IS the
+    # reference), so a None there isn't "relied on an unverified estimate,"
+    # it's "not eligible to be scored in the first place." Without this
+    # exclusion every solve's count was inflated by exactly 1 (found
+    # 2026-07-29 from a live Torresian Crow solve showing "5 uncorrelated"
+    # with only 4 real corroborators, all individually clean).
     uncorrelated_node_count = 0
     for row in arrived:
         pos = positions.get(row["node_id"])
@@ -1784,7 +1792,7 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
             node_id=row["node_id"], x=pos["pos_e"], y=pos["pos_n"], z=pos["pos_alt"],
         ))
         timestamps_us.append(row["arrival_us"])
-        if row["correlation_status"] != "trusted":
+        if row["node_id"] != attempt["origin_node_id"] and row["correlation_status"] != "trusted":
             uncorrelated_node_count += 1
 
     if len(solver_nodes) < min_corroborating_nodes:

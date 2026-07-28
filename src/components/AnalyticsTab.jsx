@@ -369,6 +369,8 @@ const CORRELATION_STATUS_LABEL = {
   no_origin: 'no origin',
   crashed: 'crashed',
   too_short: 'too short',
+  trusted: 'trusted',
+  untrusted: 'untrusted',
 }
 const CORRELATION_STATUS_FLAG = {
   no_origin: true,
@@ -1171,7 +1173,9 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     Consistency
                                   </th>
                                   <th style={sty.th}>File</th>
-                                  <th style={sty.th}>Error</th>
+                                  <th style={sty.th} title="Error text when this node failed; otherwise its correlation_status (trusted/untrusted/no origin/crashed/too short) — '—' for the origin's own row, which is never correlated against anything">
+                                    Status
+                                  </th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1229,10 +1233,16 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                       ) : '—'}
                                     </td>
                                     <td style={{
-                                      ...sty.td, color: 'var(--red, #f44336)',
+                                      ...sty.td,
+                                      color: n.error
+                                        ? 'var(--red, #f44336)'
+                                        : n.correlationStatus === 'trusted'
+                                          ? 'var(--green, #4caf50)'
+                                          : CORRELATION_STATUS_FLAG[n.correlationStatus]
+                                            ? 'var(--yellow, #ffc107)' : sty.td.color,
                                       whiteSpace: 'normal', minWidth: 260, maxWidth: 420,
                                     }}>
-                                      {n.error ?? '—'}
+                                      {n.error ?? (CORRELATION_STATUS_LABEL[n.correlationStatus] ?? '—')}
                                     </td>
                                   </tr>
                                 ))}
