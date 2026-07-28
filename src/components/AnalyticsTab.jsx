@@ -347,7 +347,7 @@ const TDOA_NODE_STATUS_LABEL = {
   origin: 'Origin (trigger)',
   pulled: 'Pulled (direct)',
   arrived: 'Arrived',
-  onset_failed: 'Onset detection failed',
+  arrival_failed: 'No arrival found',
 }
 const TDOA_NODE_STATUS_COLOR = {
   requested: 'var(--text-muted, #888)',
@@ -357,7 +357,7 @@ const TDOA_NODE_STATUS_COLOR = {
   origin: 'var(--text-muted, #888)',
   pulled: 'var(--text-muted, #888)',
   arrived: 'var(--green, #4caf50)',
-  onset_failed: 'var(--red, #f44336)',
+  arrival_failed: 'var(--red, #f44336)',
 }
 
 // correlationStatus (added 2026-07-26) shown in the Corr column in place of

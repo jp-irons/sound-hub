@@ -304,10 +304,14 @@ CREATE TABLE IF NOT EXISTS tdoa_attempts (
 -- arrival_us (milestone 3): the absolute node-clock microsecond timestamp
 -- of the acoustic event's onset in this node's WAV, derived by running the
 -- attempt's onset_detection_method against the file named by
--- audio_events.filename. NULL until correlation succeeds. status reflects
--- the outcome: 'arrived' (arrival_us set), 'onset_failed' (WAV present but
--- no usable transient found, or filename missing — error holds why),
--- 'push_failed' (added 2026-07-13: the node acked the pull but explicitly
+-- audio_events.filename, or from leading-edge cross-correlation against the
+-- origin's WAV (see routes.py _correlate_attempt_node). NULL until one of
+-- those succeeds. status reflects the outcome: 'arrived' (arrival_us set),
+-- 'arrival_failed' (renamed 2026-07-28 from 'onset_failed' — no longer
+-- onset-specific, since correlation is attempted regardless of independent
+-- onset outcome; covers WAV present but no usable transient/correlation
+-- found, or filename missing — error holds why), 'push_failed' (added
+-- 2026-07-13: the node acked the pull but explicitly
 -- reported it couldn't deliver the audio — uplink busy/transport failure,
 -- or the window had already aged out of its PSRAM ring buffer — see
 -- routes.py audio_ack(). Distinct from 'request_failed', which means the
@@ -577,8 +581,10 @@ async def init_db() -> None:
         # Migration: add onset_ratio to tdoa_attempt_nodes (2026-07-25) if it
         # doesn't exist yet — the achieved peak_envelope/background ratio at
         # detect_onset() (see onset_detection.py), now recorded on BOTH
-        # 'arrived' (comfortable pass) and 'onset_failed' (near-miss) rows,
-        # not just parseable out of the error text on failures as before.
+        # 'arrived' (comfortable pass) and 'arrival_failed' (near-miss;
+        # renamed 2026-07-28 from 'onset_failed', see schema comment above)
+        # rows, not just parseable out of the error text on failures as
+        # before.
         # This is what lets a future onset_threshold_factor re-derivation
         # query the real field distribution directly instead of regex-
         # parsing tdoa_attempt_nodes.error — see project memory on the
@@ -599,9 +605,13 @@ async def init_db() -> None:
         # against, correlate_leading_edge crashing, trimmed windows too short
         # to score) with no way to tell them apart after the fact. One of:
         # 'no_origin', 'crashed', 'too_short', 'trusted', 'untrusted' — NULL
-        # for rows that never reach the correlation step at all (onset_failed
-        # before correlation is attempted, or the origin's own row, which is
-        # never correlated against itself). See routes.py
+        # for rows that never reach the correlation step at all (missing
+        # filename/t_start_us, or the origin's own row, which is never
+        # correlated against itself). 'no_origin' is expected to be
+        # unreachable in practice as of 2026-07-28 — origin selection now
+        # requires an approved position (see _fire_cluster_after_delay) —
+        # left as a defensive case rather than removed, since a position
+        # could in principle be revoked mid-attempt. See routes.py
         # _correlate_attempt_node for where each value is set.
         if "correlation_status" not in tdoa_attempt_node_columns:
             await conn.execute(
@@ -2197,7 +2207,9 @@ async def update_tdoa_attempt_node_result(
 ) -> None:
     """Milestone 3: record one node's correlation outcome against its
     tdoa_attempt_nodes row — status='arrived' with arrival_us set on
-    success, or 'onset_failed' with error set (no usable transient, or the
+    success, or 'arrival_failed' with error set (renamed 2026-07-28 from
+    'onset_failed' — no longer onset-specific, see db.py schema comment on
+    tdoa_attempt_nodes; covers no usable transient/correlation found, or the
     WAV's filename was missing/unreadable). audio_event_id is passed through
     for the corroboration-push path, which doesn't have it yet at insert
     time (the audio_event is only created once the WAV lands — see
@@ -2217,7 +2229,7 @@ async def update_tdoa_attempt_node_result(
     onset_ratio (added 2026-07-25): the achieved peak_envelope/background
     ratio from onset_detection.detect_onset() — see that function's return
     value and OnsetNotFoundError.ratio — recorded on 'arrived' rows (a
-    comfortable pass) as well as 'onset_failed' rows (a near-miss), where
+    comfortable pass) as well as 'arrival_failed' rows (a near-miss), where
     previously only failures had this recoverable at all, and only by
     regex-parsing the error text. Same always-overwritten treatment as
     peak_corr_coef/quality_ratio; NULL for failure modes that never reach

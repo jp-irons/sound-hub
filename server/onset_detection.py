@@ -285,9 +285,11 @@ def detect_onset_us(
     Raises ValueError if the method is unknown, or OnsetNotFoundError (a
     ValueError subclass, so existing `except ValueError`/`except Exception`
     callers are unaffected) if no transient is found; callers should catch
-    this and record 'onset_failed' rather than let it propagate (see
-    routes.py _correlate_attempt_node) — and can read .ratio off the
-    caught exception to persist it the same way a success's ratio is.
+    this — as of 2026-07-28 it no longer gates correlation for corroborating
+    nodes and only becomes a terminal 'arrival_failed' (renamed from
+    'onset_failed') if correlation also fails to produce a result, see
+    routes.py _correlate_attempt_node — and can read .ratio off the caught
+    exception to persist it the same way a success's ratio is.
     """
     if method != "global_peak":
         raise ValueError(f"unknown onset_detection_method '{method}'")

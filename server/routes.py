@@ -1125,15 +1125,20 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
     _plan_tdoa_attempt — wrapped in its own try/except since nothing awaits
     this task either.
 
-    Origin selection requires BOTH a BirdNET detection (true of every member
-    here already) AND a passing onset check — a member winning purely on
-    BirdNET confidence is no longer enough to become origin, so a tdoa_attempt
-    row is never created for a cluster whose members are all onset-less
-    (background noise crossing the species threshold, e.g. the soundcapture171
-    case this replaced: onset_failed origin that still burned 4 corroboration
+    Origin selection requires a BirdNET detection (true of every member here
+    already), an approved+positioned node (2026-07-28 — see
+    _approved_positioned_nodes; an unpositioned origin can never be
+    correlated against, see db.get_tdoa_attempt_origin, and there's no other
+    use for it: corroborator-side unpositioned nodes already can't feed the
+    solver either, see _maybe_solve_tdoa_attempt_inner), AND a passing onset
+    check — a member winning purely on BirdNET confidence is no longer
+    enough to become origin, so a tdoa_attempt row is never created for a
+    cluster whose members are all unpositioned or onset-less (background
+    noise crossing the species threshold, e.g. the soundcapture171 case this
+    replaced: arrival_failed origin that still burned 4 corroboration
     pulls). Members are tried in descending-confidence order so the
-    highest-confidence *passer* wins, preserving the old tie-break behaviour
-    among members that actually qualify.
+    highest-confidence *qualifying* candidate wins, preserving the old
+    tie-break behaviour among members that actually qualify.
 
     A member that fails onset here isn't discarded — it still joins
     known_reporters same as before, and gets (redundantly) onset-checked
@@ -1161,11 +1166,19 @@ async def _fire_cluster_after_delay(species_key: str, cluster: dict) -> None:
 
         members = cluster["members"]
         params, _ = await db.get_effective_species_tdoa_params(species_key)
+        candidates = await _approved_positioned_nodes()
 
         origin = None
         origin_arrival_us = None
         origin_ratio = None
         for m in sorted(members, key=lambda m: m["confidence"], reverse=True):
+            if m["node_id"] not in candidates:
+                log.info(
+                    "tdoa cluster species=%s candidate node=%s has no "
+                    "approved position, trying next candidate (if any)",
+                    species_key, m["node_id"],
+                )
+                continue
             fpath = os.path.join(_AUDIO_DIR, m["filename"])
             try:
                 origin_arrival_us, origin_ratio = onset_detection.detect_onset_us(
@@ -1260,7 +1273,7 @@ async def _correlate_attempt_node(
     index is relative to the start of *this* buffer, not the attempt's
     padded pull window). Both can be missing/NULL for rows written before
     milestone 3 (filename) or from older firmware that never sent its
-    actual capture window (t_start_us) — recorded as 'onset_failed' rather
+    actual capture window (t_start_us) — recorded as 'arrival_failed' rather
     than raised, matching this function's other failure modes.
 
     A single node's correlation failure (missing file, unreadable WAV, no
@@ -1286,7 +1299,7 @@ async def _correlate_attempt_node(
 
     2026-07-28 correction: independent onset detection is NO LONGER the
     gate for whether correlation is attempted. It used to be — a node
-    failing detect_onset_us() short-circuited straight to 'onset_failed'
+    failing detect_onset_us() short-circuited straight to 'arrival_failed'
     and correlate_leading_edge was never even tried. That was backwards:
     the origin's own onset (origin_arrival_us) is established at cluster-
     fire time, *before* any corroborating pull is even requested (see
@@ -1304,10 +1317,26 @@ async def _correlate_attempt_node(
     threshold still gates real origin *candidacy* in
     _fire_cluster_after_delay, so the statistics matter even though this
     call's own pass/fail no longer gates anything here) — but a failure no
-    longer returns early. Its value is only ever used as a fallback
-    arrival estimate (see final_arrival_us below), never to block
-    correlation from running. A node only ends up 'onset_failed' now if
-    NEITHER method produced a usable arrival_us at all.
+    longer returns early.
+
+    2026-07-28 fallback-priority correction (same day, later): the
+    independent estimate used to be preferred over an "untrusted" (but
+    still physically bounded — see correlation.py's
+    _valid_lag_index_range) correlation result whenever the independent
+    detector had already produced something. That was also backwards and
+    was the direct cause of live implausible solves (Torresian Crow/Pied
+    Currawong incidents, see project_soundhub_correlation_ambiguity_bound
+    memory): independent has no geometric awareness at all, so it can lock
+    onto any transient in its buffer, while even an untrusted correlation
+    result is guaranteed to fall inside the physically valid transit
+    window. final_arrival_us is now set from corr_result whenever
+    correlation produces ANY result, trusted or not; the independent
+    estimate is only used as a last-resort fallback when correlation
+    itself never produced a result at all (no_origin/crashed/too_short).
+    Jon's prediction, going in: even that narrow fallback likely gets
+    dropped once live data is watched — left in for now. A node only ends
+    up 'arrival_failed' if NEITHER method produced a usable arrival_us at
+    all.
     """
     audio_event_id = audio_event.get("id")
     filename = audio_event.get("filename")
@@ -1318,7 +1347,7 @@ async def _correlate_attempt_node(
             else "audio_event missing t_start_us"
         )
         await db.update_tdoa_attempt_node_result(
-            node_row_id, status="onset_failed", error=error,
+            node_row_id, status="arrival_failed", error=error,
             audio_event_id=audio_event_id,
         )
         log.warning(
@@ -1362,12 +1391,13 @@ async def _correlate_attempt_node(
 
     # Milestone 5: refine against the origin's WAV via leading-edge
     # cross-correlation when possible (see this function's docstring and
-    # project_bird_tdoa_correlation_gap memory). final_arrival_us starts as
-    # the independent detector's estimate (None if it failed) and is
-    # overwritten by a trusted correlated value when one comes back, or
-    # used as a last-resort fallback if correlation ran but wasn't trusted
-    # and independent detection had nothing either.
-    final_arrival_us = arrival_us
+    # project_bird_tdoa_correlation_gap memory). 2026-07-28: final_arrival_us
+    # starts empty (not the independent estimate) and is set from
+    # corr_result whenever correlation produces ANY result, trusted or not
+    # — see this function's docstring for why. The independent estimate is
+    # only applied afterward, as a last-resort fallback, if correlation
+    # never produced a result at all.
+    final_arrival_us = None
     peak_corr_coef = None
     quality_ratio = None
     # correlation_status (2026-07-26 — see project_soundhub_correlation_
@@ -1469,34 +1499,37 @@ async def _correlate_attempt_node(
                 if arrival_us is not None else "n/a (no independent estimate)",
                 peak_corr_coef, quality_ratio, corr_result["trusted"],
             )
-            if corr_result["trusted"]:
-                final_arrival_us = corr_result["arrival_us"]
-            elif final_arrival_us is None:
-                # Independent detection failed too (arrival_us is None) —
-                # this untrusted correlated value is the only estimate
-                # available. Better to record it than nothing, but
-                # correlation_status stays 'untrusted' so it's still
-                # visible/excludable downstream (see the deferred second
-                # change to _maybe_solve_tdoa_attempt_inner, which will
-                # stop feeding non-'trusted' rows into the solver).
-                final_arrival_us = corr_result["arrival_us"]
+            # 2026-07-28: any correlation result wins over the independent
+            # estimate, trusted or not — see this function's docstring.
+            # correlation_status still distinguishes trusted/untrusted so
+            # the distinction stays visible/excludable downstream (see the
+            # deferred change to _maybe_solve_tdoa_attempt_inner, which
+            # would stop feeding non-'trusted' rows into the solver).
+            final_arrival_us = corr_result["arrival_us"]
 
     if final_arrival_us is None:
-        # Neither independent detection nor correlation (whichever ran)
-        # produced a usable arrival estimate — genuinely nothing for this
-        # node to contribute. error prefers the independent detector's
-        # message when there is one (most informative — includes the
-        # achieved background/peak numbers); falls back to a generic
-        # message for the pure no-origin-yet-and-no-independent-estimate
-        # case, which shouldn't normally occur (see docstring — origin's
-        # onset is established before any corroborating pull is issued)
-        # but is handled defensively rather than raising.
+        # Correlation never produced a result at all (no_origin/crashed/
+        # too_short/self-guard) — fall back to the independent estimate if
+        # we have one, better than nothing. Jon's prediction (2026-07-28):
+        # this narrow fallback likely goes away once live data is watched.
+        final_arrival_us = arrival_us
+
+    if final_arrival_us is None:
+        # Neither correlation nor independent detection produced a usable
+        # arrival estimate — genuinely nothing for this node to
+        # contribute. error prefers the independent detector's message
+        # when there is one (most informative — includes the achieved
+        # background/peak numbers); falls back to a generic message for
+        # the pure no-origin-yet-and-no-independent-estimate case, which
+        # shouldn't normally occur post the origin position-approval gate
+        # in _fire_cluster_after_delay, but is handled defensively rather
+        # than raising.
         error = onset_error or (
             f"no usable arrival estimate: independent onset detection "
             f"produced nothing and correlation_status={correlation_status}"
         )
         await db.update_tdoa_attempt_node_result(
-            node_row_id, status="onset_failed", error=error,
+            node_row_id, status="arrival_failed", error=error,
             audio_event_id=audio_event_id, onset_ratio=onset_ratio,
             correlation_status=correlation_status,
         )
@@ -1698,7 +1731,7 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
     min_corroborating_nodes = attempt["min_corroborating_nodes"]
     if len(arrived) < min_corroborating_nodes:
         # Not enough arrivals yet — but if enough of the *rest* have already
-        # terminally failed (request_failed/onset_failed/push_failed) that
+        # terminally failed (request_failed/arrival_failed/push_failed) that
         # min_corroborating_nodes can no longer be reached even if every
         # still-pending node comes good, this attempt is dead: fail it now
         # instead of leaving it at 'pulling' forever waiting on corroborators
@@ -1708,7 +1741,7 @@ async def _maybe_solve_tdoa_attempt_inner(attempt_id: int) -> None:
         # nodes failed still left the attempt itself stuck).
         terminal_failed = [
             n for n in nodes
-            if n["status"] in ("request_failed", "onset_failed", "push_failed")
+            if n["status"] in ("request_failed", "arrival_failed", "push_failed")
         ]
         still_possible = len(nodes) - len(terminal_failed)
         if still_possible < min_corroborating_nodes:
@@ -2077,7 +2110,7 @@ async def _plan_tdoa_attempt_inner(
             )
         else:
             await db.update_tdoa_attempt_node_result(
-                node_row_id, status="onset_failed",
+                node_row_id, status="arrival_failed",
                 error=f"audio_event id={aeid} not found",
             )
 

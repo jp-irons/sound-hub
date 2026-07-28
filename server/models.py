@@ -170,23 +170,24 @@ class TdoaAttemptNodeRecord(BaseModel):
     inside TdoaAttemptRecord by GET /api/tdoa/attempts.
 
     status is one of 'requested' | 'request_failed' | 'push_failed' |
-    'reused_existing' | 'origin' | 'pulled' | 'arrived' | 'onset_failed' —
-    see tdoa_attempt_nodes' schema comment in db.py for what each means at
-    every stage of milestones 2-3. push_failed (added 2026-07-13) is
-    distinct from request_failed: request_failed means the hub couldn't get
-    a real answer at all (node unreachable, timed out, not in registry
-    yet); push_failed means the node itself explicitly said no (window
-    unavailable / capture not running via direct pull's 404/503 — see
-    _fetch_audio_direct — or, for the still-extant ESP-NOW manual-sample
-    path, AckStatus ERROR/UNAVAILABLE via POST /audio/ack, see
-    routes.py audio_ack()). pulled (added 2026-07-13) is the direct-HTTP
-    counterpart of reused_existing/origin — a transient pre-correlation
-    label set the instant a direct pull's WAV is saved, immediately
-    overwritten by _correlate_attempt_node with 'arrived' or
-    'onset_failed'; requested/request_failed's ESP-NOW-only 'still waiting'
-    window doesn't apply to it, since a direct pull is synchronous — see
-    _fetch_audio_direct's docstring for the full ESP-NOW-vs-direct-pull
-    picture.
+    'reused_existing' | 'origin' | 'pulled' | 'arrived' | 'arrival_failed'
+    (renamed 2026-07-28 from 'onset_failed' — no longer onset-specific, see
+    tdoa_attempt_nodes' schema comment in db.py) — see that schema comment
+    for what each means at every stage of milestones 2-3. push_failed
+    (added 2026-07-13) is distinct from request_failed: request_failed
+    means the hub couldn't get a real answer at all (node unreachable,
+    timed out, not in registry yet); push_failed means the node itself
+    explicitly said no (window unavailable / capture not running via
+    direct pull's 404/503 — see _fetch_audio_direct — or, for the
+    still-extant ESP-NOW manual-sample path, AckStatus ERROR/UNAVAILABLE
+    via POST /audio/ack, see routes.py audio_ack()). pulled (added
+    2026-07-13) is the direct-HTTP counterpart of reused_existing/origin —
+    a transient pre-correlation label set the instant a direct pull's WAV
+    is saved, immediately overwritten by _correlate_attempt_node with
+    'arrived' or 'arrival_failed'; requested/request_failed's ESP-NOW-only
+    'still waiting' window doesn't apply to it, since a direct pull is
+    synchronous — see _fetch_audio_direct's docstring for the full
+    ESP-NOW-vs-direct-pull picture.
     """
     id: int
     node_id: str = Field(alias="nodeId")
@@ -216,24 +217,28 @@ class TdoaAttemptNodeRecord(BaseModel):
         default=None, alias="qualityRatio",
         description="Primary/secondary correlation-peak ratio — how "
                      "unambiguous the match was. Below "
-                     "AMBIGUOUS_RATIO_THRESHOLD means arrival_us fell back "
-                     "to the independent per-node onset detector instead "
-                     "of the correlation-refined value, even if "
-                     "peak_corr_coef was good.",
+                     "AMBIGUOUS_RATIO_THRESHOLD means correlation_status is "
+                     "'untrusted' rather than 'trusted', but arrival_us is "
+                     "still taken from this correlation result (2026-07-28: "
+                     "any correlation result, trusted or not, is preferred "
+                     "over the independent per-node onset detector — see "
+                     "routes.py _correlate_attempt_node).",
     )
     correlation_status: Optional[str] = Field(
         default=None, alias="correlationStatus",
         description="One of 'no_origin' (no correlated origin was available "
-                     "for this attempt — the origin was unpositioned/"
-                     "unapproved at plan time, so this node fell back to its "
-                     "independent onset detector with no cross-check at "
-                     "all), 'crashed' (correlation raised an exception), "
-                     "'too_short' (trimmed windows too short to score), "
-                     "'trusted', or 'untrusted'. Null for rows that never "
-                     "reach the correlation step (onset_failed, the "
-                     "origin's own row, or attempts predating this field). "
-                     "Added 2026-07-26 so a NULL peak_corr_coef's cause is "
-                     "no longer ambiguous — see project memory on "
+                     "for this attempt — expected to be unreachable in "
+                     "practice as of 2026-07-28, since origin selection now "
+                     "requires an approved position; left as a defensive "
+                     "case, see _fire_cluster_after_delay), 'crashed' "
+                     "(correlation raised an exception), 'too_short' "
+                     "(trimmed windows too short to score), 'trusted', or "
+                     "'untrusted'. Null for rows that never reach the "
+                     "correlation step (arrival_failed before correlation "
+                     "is attempted — e.g. missing filename/t_start_us — or "
+                     "the origin's own row, or attempts predating this "
+                     "field). Added 2026-07-26 so a NULL peak_corr_coef's "
+                     "cause is no longer ambiguous — see project memory on "
                      "unpositioned-origin visibility.",
     )
     delta_from_origin_us: Optional[float] = Field(
