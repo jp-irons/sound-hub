@@ -326,3 +326,28 @@ detected at all). No change to its status as a separate, unsolved problem (§6).
    unresolved if/when one is added.
 4. Broaden the noise corpus used for validation (currently two recording runs
    from one node). **Still open.**
+
+## 11. Follow-up (2026-07-28): the ambiguity gate's secondary-peak search wasn't bounded to the physical window
+
+§9's quality-gating step (`MIN_PEAK_CORR_COEF`/`AMBIGUOUS_RATIO_THRESHOLD`)
+was built and deployed for the narrow-window production path, but a real
+bug in how it picked the "competing" peak wasn't caught until real field
+data forced the question. `_peak_quality()` searched the *entire*
+`scipy.signal.correlate(..., mode='full')` output for a secondary peak —
+not just the physically valid lag range the transit-aware widened window
+(§8's `transit_s` widening, later made production in
+`project_soundhub_tdoa_correlation_window`) was meant to represent. Real
+diagnostic data (5 attempts, 19 node pairs, Pied Currawong config): 12 of
+19 pairs had their ambiguity-suppressing "competitor" sitting outside the
+pair's own max-transit bound (`distance / 343`), in one case ~25x past it.
+Bounding that search to `± transit_s` recovered most of them (trusted
+correlations 4/19 → 14/19). The remaining ~5 pairs have a genuine
+in-bound competing peak — real call repetition/periodicity, not a search
+artifact — and are the leading candidate for §8's still-open "quality-
+gating for wide windows" recommendation, this time via a narrower
+correlation *template* rather than a wider one. See
+`project_soundhub_correlation_ambiguity_bound` memory for the full
+diagnostic and fix, and `project_soundhub_timestamp_precision_bug` for a
+separate, upstream bug (in `tdoa_solver.py`, not this module) that was
+very likely a bigger contributor to historically "implausible" solves than
+anything in this document.

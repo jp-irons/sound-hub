@@ -113,6 +113,25 @@ def _parabolic_peak(corr: np.ndarray, peak_idx: int) -> float:
     return 0.5 * (y0 - y2) / denom
 
 
+def _valid_lag_index_range(b_len: int, transit_s: float, rate: int) -> tuple[int, int]:
+    """Return (valid_lo, valid_hi) — the index range in a
+    correlate(a, b, mode='full') output (length len(a)+b_len-1) whose
+    corresponding lag is physically achievable for this node pair.
+
+    idx = (b_len - 1) - lag_samples (see _score_correlation's own
+    peak_idx→lag_samples derivation), and the physically valid *final* lag
+    (after correlate_leading_edge's own transit_s correction, lag_us =
+    raw_lag_us - transit_s*1e6) is bounded to +/- transit_s around the
+    primary alignment, i.e. raw lag_samples in [0, 2*transit_s*rate].
+    Shared by _score_correlation (bounds which peak can be SELECTED at all
+    — added 2026-07-28, see below) and _peak_quality (bounds which peak can
+    be considered a COMPETITOR — added 2026-07-28, same day, earlier)."""
+    transit_samples = transit_s * rate
+    valid_hi = b_len - 1
+    valid_lo = valid_hi - int(round(2 * transit_samples))
+    return valid_lo, valid_hi
+
+
 def _peak_quality(
     corr: np.ndarray, peak_idx: int, rate: int,
     transit_s: float = 0.0, b_len: int | None = None,
@@ -145,13 +164,7 @@ def _peak_quality(
     masked[lo:hi] = -np.inf
 
     if transit_s > 0.0 and b_len is not None:
-        # idx = (b_len - 1) - lag_samples (see _score_correlation), and the
-        # physically valid final lag (after correlate_leading_edge's own
-        # transit_s correction) is bounded to +/- transit_s, i.e. raw
-        # lag_samples in [0, 2*transit_s*rate].
-        transit_samples = transit_s * rate
-        valid_hi = b_len - 1
-        valid_lo = valid_hi - int(round(2 * transit_samples))
+        valid_lo, valid_hi = _valid_lag_index_range(b_len, transit_s, rate)
         out_of_bounds = np.ones(len(corr), dtype=bool)
         out_of_bounds[max(0, valid_lo):min(len(corr), valid_hi + 1)] = False
         masked[out_of_bounds] = -np.inf
@@ -181,10 +194,25 @@ def _score_correlation(
     choice for a species without a characterized frequency band (no
     bandpass applied at all).
 
-    transit_s (added 2026-07-28): forwarded to _peak_quality() to bound its
-    competing-peak search to the physically valid lag range — see that
-    function's docstring. Defaults to 0.0 (old whole-array behavior) for
-    any caller without geometry info.
+    transit_s (added 2026-07-28): bounds BOTH which peak can be selected as
+    the primary match (this function, below) AND which peak can be
+    considered a competitor to it (forwarded to _peak_quality() — see that
+    function's docstring). The primary-peak bound was added later the same
+    day, after real deployed data showed a "trusted" correlation
+    (peak_corr_coef/quality_ratio both clearing their gates) with an
+    implied range difference 2.96x-40.69x the physical baseline between
+    the two nodes — i.e. a physically impossible lag. Root cause: only the
+    *competing* peak search was ever bounded to the transit window; the
+    *winning* peak itself was still chosen via argmax over the entire
+    unbounded correlate(mode='full') output, so a strong, unambiguous, but
+    physically-impossible match could clear both gates and still be wrong.
+    Bounding the primary search too makes any correlation-selected result
+    mathematically guaranteed to fall within the physical bound — the
+    `consistency_ratio` diagnostic surfaced in the UI (routes.py
+    _tdoa_attempt_node_record_from_row) should end up <= ~1 for every
+    correlated (non-independent-fallback) node going forward. Defaults to
+    0.0 (old fully-unbounded behavior) for any caller without geometry
+    info, same as _peak_quality.
     """
     if method == "gcc_phat":
         n = len(a) + len(b) - 1
@@ -207,7 +235,23 @@ def _score_correlation(
     else:
         raise ValueError(f"unknown correlation method '{method}'")
 
-    peak_idx = int(np.argmax(corr))
+    # Bound the primary peak search to the physically valid lag range when
+    # geometry is known (see this function's docstring, transit_s param).
+    # Falls back to the full unbounded search when transit_s<=0, and again
+    # if the bounded slice is somehow empty (degenerate — transit_s huge
+    # relative to the buffers' own lengths, no real overlap at all): rather
+    # than crash, fall back and let the downstream coef/ratio gates reject
+    # whatever this finds, same failure mode as before this change existed.
+    if transit_s > 0.0:
+        valid_lo, valid_hi = _valid_lag_index_range(len(b), transit_s, rate)
+        bound_lo = max(0, valid_lo)
+        bound_hi = min(len(corr), valid_hi + 1)
+        if bound_hi > bound_lo:
+            peak_idx = bound_lo + int(np.argmax(corr[bound_lo:bound_hi]))
+        else:
+            peak_idx = int(np.argmax(corr))
+    else:
+        peak_idx = int(np.argmax(corr))
     # scipy.signal.correlate(a, b, mode="full")'s peak_idx - (len(b) - 1)
     # gives the shift that must be applied to A to align it onto B — i.e.
     # its sign is the OPPOSITE of "how much B is delayed relative to A".

@@ -4,7 +4,9 @@ Status: all four milestones (steps 3-6) implemented as of 2026-07-11 — see
 Milestones below and "Known gaps after milestones 3+4" for what's
 deliberately left unsolved. This doc didn't exist until 2026-06-29 — the
 pipeline sketch below was agreed in conversation on 2026-06-28/29 but never
-got committed until now.
+got committed until now. Milestone 7 (2026-07-28) fixes three real,
+connected bugs found in production TDOA solving — see that section for
+what's fixed vs. still deliberately deferred.
 
 ## Pipeline
 
@@ -174,6 +176,58 @@ large change:
    reporter/reused-existing WAVs still fall back to the clip-derived median
    (no pull-response header exists for those paths) — unchanged behaviour.
    See `project_bird_noise_floor_reporting` memory.
+
+7. **TDOA solve-quality fixes (2026-07-28).** Three real, connected bugs
+   found in one session, triggered by Jon's skepticism that no real solve
+   was ever landing anywhere near the array:
+   - **Timestamp-precision catastrophic cancellation, `tdoa_solver.py`.**
+     `solve()` scaled raw absolute Unix-epoch microsecond timestamps
+     directly (`d = c*t*1e-6 ≈ 6e11m`), so the linear system's `d0²-di²`
+     terms cancelled out the real few-metre signal before the solve ever
+     ran. **Fixed** — anchor to `min(timestamps_us)` before scaling.
+     Verified against 5 real attempts: 4/5 resolved to 2-18m from the array
+     (previously millions of metres). This very likely explains most of
+     what earlier investigations (§§6-7 above,
+     `docs/tdoa-correlation-design-notes.md`) attributed to correlation or
+     aperture causes — see correction blocks added to the
+     `project_bird_tdoa_implausible_solves`/`project_bird_tdoa_baseline_
+     aperture_limit` memories, and `project_soundhub_timestamp_precision_
+     bug` for the full writeup. Jon explicitly authorized this one edit
+     directly, departing from the repo's normal propose-first rule for
+     this instance only.
+   - **Correlation ambiguity-ratio search unbounded, `correlation.py`.**
+     `_peak_quality()` searched the *entire* `correlate(mode='full')`
+     output for a competing peak, including lags the sound could not
+     physically have produced. Real diagnostic: 12/19 node pairs across 5
+     attempts had their ambiguity-suppressing "competitor" outside the
+     physical max-transit bound. **Fixed and deployed** — search now
+     bounded to `+/- transit_s` when geometry is known
+     (`_peak_quality`/`_score_correlation`/`correlate_leading_edge` all
+     gained/threaded a `transit_s` param). Trusted correlations went
+     4/19 → 14/19 on the same test set. Deferred: a second, unvalidated
+     change (capping the correlation TEMPLATE width, independent of the
+     pull-margin knee distance in `window_margin_pre/post_ms`) targets the
+     remaining ~5 pairs whose ambiguity is genuine (call repetition inside
+     the physical bound, not a search-window artifact) — needs a real
+     multi-species data sweep, not a guessed constant, before a default is
+     chosen. See `project_soundhub_correlation_ambiguity_bound` memory.
+   - **Independent onset detection gated corroborating-node correlation,
+     `routes.py` `_correlate_attempt_node`.** A corroborating node's own
+     `detect_onset_us()` had to succeed before `correlate_leading_edge` was
+     even attempted — backwards, since the origin's onset (all correlation
+     needs) is established at cluster-fire time in `_fire_cluster_after_
+     delay`, before any corroborating pull is even requested (see
+     milestone 1 above). **Fixed** — onset detection is now non-blocking
+     (still run and logged, still feeds `onset_threshold_factor` p90
+     tuning), correlation always attempted when the origin is known. A
+     node only becomes `onset_failed` now if neither method produces
+     anything usable. Jon reviewed the diff and is deploying it himself.
+     Deferred, related: `_maybe_solve_tdoa_attempt_inner` still feeds every
+     `arrived` row into `tdoa_solve()` regardless of `correlation_status`
+     (`uncorrelated_node_count` is informational only, not a filter) —
+     restricting the solver to `trusted`-only rows is a natural next step
+     but explicitly held back ("see what happens first") until the above
+     is observed live. See `project_soundhub_onset_gating_removed` memory.
 
 UI surfacing of results is **done** (2026-07-11, separate follow-on session)
 — `GET /api/tdoa/attempts` (viewer-level) returns recent attempts with their
