@@ -1277,16 +1277,37 @@ async def _correlate_attempt_node(
     detect_onset_us() above is run independently per node — an amplitude/
     energy-threshold detector exposed to loudness/SNR differences between
     nodes at different distances from the same call (see
-    docs/tdoa-correlation-design-notes.md). After it succeeds (still the
-    gate — a node with no detectable transient at all is still
-    'onset_failed', unchanged), this node's estimate is refined by
-    cross-correlating a short leading-edge window of its WAV against the
-    origin's own WAV (correlation.correlate_leading_edge) — waveform-shape
-    matching is far less sensitive to which channel is louder or carries
-    more "active" signal than an independent amplitude-based detector.
-    Falls back to the independent detect_onset_us() value whenever the
-    origin isn't available to correlate against yet, or the correlation
-    isn't trustworthy (correlation.py's peak_corr_coef/quality_ratio gate).
+    docs/tdoa-correlation-design-notes.md). This node's estimate is then
+    refined by cross-correlating a short leading-edge window of its WAV
+    against the origin's own WAV (correlation.correlate_leading_edge) —
+    waveform-shape matching is far less sensitive to which channel is
+    louder or carries more "active" signal than an independent amplitude-
+    based detector.
+
+    2026-07-28 correction: independent onset detection is NO LONGER the
+    gate for whether correlation is attempted. It used to be — a node
+    failing detect_onset_us() short-circuited straight to 'onset_failed'
+    and correlate_leading_edge was never even tried. That was backwards:
+    the origin's own onset (origin_arrival_us) is established at cluster-
+    fire time, *before* any corroborating pull is even requested (see
+    _fire_cluster_after_delay/_plan_tdoa_attempt) — so by the time this
+    function runs for a corroborating node, correlation has everything it
+    needs regardless of whether this node's own independent detector found
+    anything. And it often doesn't: onset_detection.py's own docstring
+    documents pulled-neighbor rows failing independent detection at 89.7%
+    vs 1-3% for origin rows — deliberately narrow pull clips often don't
+    leave enough quiet background for a reliable amplitude threshold, even
+    when the call is clearly correlatable against the origin's much
+    stronger, wider-context signal. detect_onset_us() is still run and its
+    ratio still logged (feeds the per-species onset_threshold_factor p90
+    tuning — see project_soundhub_onset_threshold_p90 memory; that
+    threshold still gates real origin *candidacy* in
+    _fire_cluster_after_delay, so the statistics matter even though this
+    call's own pass/fail no longer gates anything here) — but a failure no
+    longer returns early. Its value is only ever used as a fallback
+    arrival estimate (see final_arrival_us below), never to block
+    correlation from running. A node only ends up 'onset_failed' now if
+    NEITHER method produced a usable arrival_us at all.
     """
     audio_event_id = audio_event.get("id")
     filename = audio_event.get("filename")
@@ -1313,6 +1334,15 @@ async def _correlate_attempt_node(
     # pull-response header to read from. detect_onset_us treats None as
     # "fall back to the clip-derived median", unchanged behavior.
     node_noise_floor_rms = audio_event.get("noise_floor_rms")
+    # arrival_us/onset_ratio (2026-07-28: no longer gates correlation, see
+    # docstring above) — arrival_us stays None and onset_error is recorded
+    # if detect_onset_us() fails; onset_ratio comes from
+    # OnsetNotFoundError.ratio in that case (still useful for threshold
+    # tuning even on a failure), or None for failure modes that never got
+    # far enough to compute one (unknown method, unreadable WAV).
+    arrival_us: float | None = None
+    onset_ratio = None
+    onset_error: str | None = None
     try:
         arrival_us, onset_ratio = onset_detection.detect_onset_us(
             onset_detection_method, fpath, t_start_us,
@@ -1322,26 +1352,21 @@ async def _correlate_attempt_node(
             node_noise_floor_rms=node_noise_floor_rms,
         )
     except Exception as exc:
-        # OnsetNotFoundError (the no-transient-found case) carries the
-        # achieved ratio even on failure — see db.py's onset_ratio column
-        # and OnsetNotFoundError's docstring. Other failure modes (unknown
-        # method, unreadable WAV) never got far enough to compute a ratio.
-        failed_ratio = getattr(exc, "ratio", None)
-        await db.update_tdoa_attempt_node_result(
-            node_row_id, status="onset_failed", error=str(exc),
-            audio_event_id=audio_event_id, onset_ratio=failed_ratio,
-        )
-        log.warning(
-            "tdoa correlation — node=%s onset detection failed: %s",
+        onset_ratio = getattr(exc, "ratio", None)
+        onset_error = str(exc)
+        log.info(
+            "tdoa correlation — node=%s independent onset detection failed "
+            "(non-blocking, attempting correlation against origin anyway): %s",
             node_id, exc,
         )
-        return
 
     # Milestone 5: refine against the origin's WAV via leading-edge
     # cross-correlation when possible (see this function's docstring and
     # project_bird_tdoa_correlation_gap memory). final_arrival_us starts as
-    # the independent detector's estimate and is only overwritten if a
-    # trusted correlated value comes back.
+    # the independent detector's estimate (None if it failed) and is
+    # overwritten by a trusted correlated value when one comes back, or
+    # used as a last-resort fallback if correlation ran but wasn't trusted
+    # and independent detection had nothing either.
     final_arrival_us = arrival_us
     peak_corr_coef = None
     quality_ratio = None
@@ -1359,8 +1384,8 @@ async def _correlate_attempt_node(
         correlation_status = "no_origin"
         log.info(
             "tdoa correlation — node=%s: no correlated origin available for "
-            "this attempt yet, using independent onset arrival_us=%.1f",
-            node_id, arrival_us,
+            "this attempt yet, using independent onset arrival_us=%s",
+            node_id, f"{arrival_us:.1f}" if arrival_us is not None else "None",
         )
     elif origin["origin_node_id"] == node_id:
         # Shouldn't happen — _plan_tdoa_attempt_inner never calls this
@@ -1421,8 +1446,8 @@ async def _correlate_attempt_node(
             crashed = True
             log.exception(
                 "tdoa correlation — node=%s leading-edge correlation crashed, "
-                "keeping independent onset arrival_us=%.1f",
-                node_id, arrival_us,
+                "keeping independent onset arrival_us=%s",
+                node_id, f"{arrival_us:.1f}" if arrival_us is not None else "None",
             )
 
         if crashed:
@@ -1436,14 +1461,51 @@ async def _correlate_attempt_node(
             peak_corr_coef = corr_result["peak_corr_coef"]
             quality_ratio = corr_result["quality_ratio"]
             log.info(
-                "tdoa correlation — node=%s independent=%.1fus correlated=%.1fus "
-                "delta=%.1fus coef=%.2f ratio=%.2f trusted=%s",
-                node_id, arrival_us, corr_result["arrival_us"],
-                corr_result["arrival_us"] - arrival_us, peak_corr_coef,
-                quality_ratio, corr_result["trusted"],
+                "tdoa correlation — node=%s independent=%s correlated=%.1fus "
+                "delta=%s coef=%.2f ratio=%.2f trusted=%s",
+                node_id, f"{arrival_us:.1f}" if arrival_us is not None else "None",
+                corr_result["arrival_us"],
+                f"{corr_result['arrival_us'] - arrival_us:.1f}"
+                if arrival_us is not None else "n/a (no independent estimate)",
+                peak_corr_coef, quality_ratio, corr_result["trusted"],
             )
             if corr_result["trusted"]:
                 final_arrival_us = corr_result["arrival_us"]
+            elif final_arrival_us is None:
+                # Independent detection failed too (arrival_us is None) —
+                # this untrusted correlated value is the only estimate
+                # available. Better to record it than nothing, but
+                # correlation_status stays 'untrusted' so it's still
+                # visible/excludable downstream (see the deferred second
+                # change to _maybe_solve_tdoa_attempt_inner, which will
+                # stop feeding non-'trusted' rows into the solver).
+                final_arrival_us = corr_result["arrival_us"]
+
+    if final_arrival_us is None:
+        # Neither independent detection nor correlation (whichever ran)
+        # produced a usable arrival estimate — genuinely nothing for this
+        # node to contribute. error prefers the independent detector's
+        # message when there is one (most informative — includes the
+        # achieved background/peak numbers); falls back to a generic
+        # message for the pure no-origin-yet-and-no-independent-estimate
+        # case, which shouldn't normally occur (see docstring — origin's
+        # onset is established before any corroborating pull is issued)
+        # but is handled defensively rather than raising.
+        error = onset_error or (
+            f"no usable arrival estimate: independent onset detection "
+            f"produced nothing and correlation_status={correlation_status}"
+        )
+        await db.update_tdoa_attempt_node_result(
+            node_row_id, status="onset_failed", error=error,
+            audio_event_id=audio_event_id, onset_ratio=onset_ratio,
+            correlation_status=correlation_status,
+        )
+        log.warning(
+            "tdoa correlation — node=%s: no usable arrival estimate "
+            "(correlation_status=%s): %s",
+            node_id, correlation_status, error,
+        )
+        return
 
     await db.update_tdoa_attempt_node_result(
         node_row_id, status="arrived", arrival_us=final_arrival_us,
