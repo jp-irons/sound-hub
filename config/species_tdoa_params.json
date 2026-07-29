@@ -2,6 +2,19 @@
   "notes": "freq_band_low_hz/freq_band_high_hz are derived from reference-recording acoustics and should transfer across deployments. onset_threshold_factor reflects the source recordings' own background noise, not any particular property's field SNR -- treat it as a starting point and re-validate against real pulled TDOA attempts before trusting it long-term. See tools/README.md.",
   "schema_version": 1,
   "species": {
+    "Australian Magpie": {
+      "correlation_method": "plain",
+      "enabled": true,
+      "freq_band_high_hz": 6957,
+      "freq_band_low_hz": 730,
+      "min_corroborating_nodes": 4,
+      "notes": "Derived 2026-07-29 from 55 calls across 8 unique Xeno-canto samples (9 downloaded, XC726066 scored zero calls -- too quiet for the segmentation threshold used) via tools/derive_species_bands.py's automated energy-envelope call segmentation + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin). Band = 10th percentile low_hz to 90th percentile high_hz across all scored calls (3 flagged as MAD-based outliers, informational only, not excluded). NOTE: unlike every other species processed this way, the high_hz distribution is NOT a smooth continuum -- it jumps from 1706Hz (25th pct) to 4630Hz (50th pct) to 6957Hz (90th pct), a ~2.7x step where Gray Butcherbird's confirmed-smooth continuum topped out at ~1.3x between adjacent percentiles. Consistent with magpies' repertoire containing two distinct call types (simple ~900-1900Hz calls vs full broadband warbling song up to ~7000Hz) rather than one continuous distribution -- the resulting wide band is real, not a derivation bug, but will pass more out-of-band noise than any other configured species. Not split into two bands for now, consistent with the percentile-range-not-fabricated-clusters approach used elsewhere (see Gray Butcherbird's notes) -- revisit if this species' correlation quality looks poor in practice, possibly by isolating which call type actually triggers BirdNET. window_margin_pre_ms/post_ms derived the same day via tools/derive_onset_margins.py's knee-finding pass on 59 calls (75th percentile of the raw lead-in/lead-out knee distance, zero censored) -- stores the raw knee distance itself, the 2x pull-request safety factor is applied downstream in routes.py's _pull_window_for_node. onset_threshold_factor set to 6.0 matching the live '__default__' fallback -- zero real detections on this property so far, revisit once real field attempts accumulate (see Gray Butcherbird's notes for the p90 real-field re-derivation method).",
+      "onset_detection_method": "global_peak",
+      "onset_threshold_factor": 6.0,
+      "updated_at": "2026-07-29T00:00:00+00:00",
+      "window_margin_post_ms": 157.0,
+      "window_margin_pre_ms": 190.0
+    },
     "Bush Stone Curlew": {
       "correlation_method": "plain",
       "enabled": true,
@@ -53,6 +66,19 @@
       "updated_at": "2026-07-25T00:00:00+00:00",
       "window_margin_post_ms": 65.5,
       "window_margin_pre_ms": 44.5
+    },
+    "Pied Butcherbird": {
+      "correlation_method": "plain",
+      "enabled": true,
+      "freq_band_high_hz": 2538,
+      "freq_band_low_hz": 942,
+      "min_corroborating_nodes": 4,
+      "notes": "Derived 2026-07-29 from 198 calls across 9 unique Xeno-canto samples (10 downloaded, 1 exact-duplicate file dropped: XC588693) via tools/derive_species_bands.py's automated energy-envelope call segmentation + derive_band (5-95th percentile cumulative spectral energy, 150Hz margin). Band = 10th percentile low_hz to 90th percentile high_hz across all scored calls (34 flagged as MAD-based outliers, informational only, not excluded from the range -- mostly a cluster of higher-frequency (~2100-3300Hz) segments in a couple of source files, treated as real call variation rather than noise since no single file dominated or looked contaminated). window_margin_pre_ms/post_ms derived the same day via tools/derive_onset_margins.py's knee-finding pass on 210 calls (75th percentile of the raw lead-in/lead-out knee distance, zero censored) -- stores the raw knee distance itself, the 2x pull-request safety factor is applied downstream in routes.py's _pull_window_for_node. onset_threshold_factor set to 6.0 matching the live '__default__' fallback -- zero real detections on this property so far, revisit once real field attempts accumulate (see Gray Butcherbird's notes for the p90 real-field re-derivation method).",
+      "onset_detection_method": "global_peak",
+      "onset_threshold_factor": 6.0,
+      "updated_at": "2026-07-29T00:00:00+00:00",
+      "window_margin_post_ms": 98.0,
+      "window_margin_pre_ms": 104.0
     },
     "Pied Currawong": {
       "correlation_method": "plain",
