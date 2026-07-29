@@ -33,8 +33,18 @@ conn.row_factory = sqlite3.Row
 positions = {
     row["node_id"]: (row["pos_e"], row["pos_n"], row["pos_alt"])
     for row in conn.execute(
-        "SELECT node_id, pos_e, pos_n, pos_alt FROM node_positions "
-        "WHERE pos_e IS NOT NULL AND pos_n IS NOT NULL AND pos_alt IS NOT NULL"
+        # Matches routes.py's _approved_positioned_nodes() candidate set as
+        # closely as an offline DB-only query can: approval_status is
+        # persisted so we can filter on it directly. isBroker can't be
+        # replicated here -- it's only known live, from the poller's
+        # in-memory raw_status, never written to nodes.role -- but a broker
+        # is expected to be GPS-less anyway, so it should already be
+        # excluded by the pos_e IS NOT NULL check below.
+        """SELECT p.node_id, p.pos_e, p.pos_n, p.pos_alt
+           FROM node_positions p
+           JOIN nodes n ON n.id = p.node_id
+           WHERE p.pos_e IS NOT NULL AND p.pos_n IS NOT NULL AND p.pos_alt IS NOT NULL
+             AND n.approval_status = 'approved'"""
     )
 }
 if not positions:
@@ -59,7 +69,7 @@ def range_m(e: float, n: float) -> float:
 attempts = conn.execute(
     """
     SELECT id, created_at, species_key, origin_node_id,
-           solved_e, solved_n, solved_alt, residual_m,
+           solved_e, solved_n, solved_alt, solve_residual_m,
            uncorrelated_node_count
     FROM tdoa_attempts
     WHERE status = 'solved'
@@ -79,7 +89,7 @@ for a in attempts:
     b = bearing_deg(a["solved_e"], a["solved_n"])
     print(f"{a['id']:>5}  {a['created_at']:<20} {a['species_key']:<22} "
           f"{a['origin_node_id']:<16} {r:8.2f} {b:8.1f} "
-          f"{a['residual_m']:9.3f} {a['uncorrelated_node_count'] if a['uncorrelated_node_count'] is not None else '?':>6}")
+          f"{a['solve_residual_m']:9.3f} {a['uncorrelated_node_count'] if a['uncorrelated_node_count'] is not None else '?':>6}")
     by_species[a["species_key"]].append((a["id"], r, b))
 
 print("\n--- per-species spread (bearing tight + range wide = aperture/GDOP limit as predicted) ---")
