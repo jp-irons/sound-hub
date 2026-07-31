@@ -85,6 +85,24 @@ LEADING_EDGE_POST_MS = 4.0
 AMBIGUOUS_RATIO_THRESHOLD = 1.2
 MIN_PEAK_CORR_COEF = 0.3
 
+# Per-method trust-gate thresholds (2026-07-31, phat_masked calibration —
+# see project_soundhub_phat_masked_calibrated_thresholds memory). 'plain'
+# and 'gcc_phat' both keep using the module-level MIN_PEAK_CORR_COEF/
+# AMBIGUOUS_RATIO_THRESHOLD above unchanged — gcc_phat has never been
+# separately calibrated and no species selects it in production, so it
+# inherits plain's numbers rather than being left undefined. phat_masked's
+# coefficient lives on a fundamentally different scale (phase-whitened,
+# not raw-amplitude) and was calibrated separately against a real
+# 2530-node-pair field batch (tools/analyze_real_batch3.py): coef>=0.07,
+# ratio>=2.00 is the FPR<=5% conservative operating point Jon chose from
+# that sweep — recovers ~25.7% of what production's own 'plain' trust gate
+# currently accepts, while agreeing with only ~5% of what it rejects.
+_TRUST_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "plain": (MIN_PEAK_CORR_COEF, AMBIGUOUS_RATIO_THRESHOLD),
+    "gcc_phat": (MIN_PEAK_CORR_COEF, AMBIGUOUS_RATIO_THRESHOLD),
+    "phat_masked": (0.07, 2.00),
+}
+
 # How close (in samples) a secondary peak has to be to the primary one to be
 # considered "the same event" rather than a competing one. Matches
 # clap_sync_check.py's _PEAK_EXCLUSION_MS.
@@ -177,22 +195,94 @@ def _peak_quality(
     return float(peak_val / second_val)
 
 
+def _next_pow2_fft_size(len_a: int, len_b: int) -> int:
+    """Smallest power-of-two FFT size >= the full convolution length —
+    shared by the gcc_phat and phat_masked branches below so both produce
+    the same-length transform, and therefore the same
+    [-(len(b)-1) .. +(len(a)-1)] reassembly layout plain's
+    correlate(mode='full') uses."""
+    n = len_a + len_b - 1
+    n_fft = 1
+    while n_fft < n:
+        n_fft *= 2
+    return n_fft
+
+
+def _max_possible_peak(R: np.ndarray, n_fft: int) -> float:
+    """Theoretical ceiling of |corr[n]| over every lag n, for a cross-
+    correlation built by IFFT-ing the frequency-domain array R. Needed
+    because plain's peak_corr_coef denominator (sqrt(a_energy*b_energy), a
+    Cauchy-Schwarz bound) is only valid for raw-amplitude correlation —
+    for a phase-whitened R (gcc_phat/phat_masked) it has no real ceiling
+    and produces coefficients with no meaningful scale (confirmed
+    2026-07-30 on real field data: gcc_phat's old raw-energy-denominator
+    coefficient came out in the hundreds to thousands). By the triangle
+    inequality, |corr[n]| <= (1/n_fft) * sum_k |R[k]| for every n — the
+    same bound IFFT-ing |R| (real, phase-free) and evaluating at n=0
+    produces, since every phase term is 1 there. Equality holds at the
+    perfect-match lag, so this is a tight ceiling, not a loose one. See
+    tools/validate_toa_methods.py's identically-named helper — ported
+    here unchanged, kept in sync manually per this module's "copy don't
+    diverge" convention (see module docstring)."""
+    ceiling = np.fft.irfft(np.abs(R), n_fft)
+    return float(ceiling[0])
+
+
+def _band_mask(freqs: np.ndarray, low_hz: float, high_hz: float, taper_hz: float) -> np.ndarray:
+    """Raised-cosine (Hann-edge) taper: ~1 inside [low_hz, high_hz],
+    smoothly rolling to ~0 over taper_hz on each side. A hard rectangular
+    gate would ring in the time domain and smear the very correlation peak
+    this mask exists to sharpen. Ported unchanged from
+    tools/validate_toa_methods.py — see that module's identically-named
+    function for the full derivation."""
+    lo_lo, lo_hi = max(0.0, low_hz - taper_hz), low_hz
+    hi_lo, hi_hi = high_hz, high_hz + taper_hz
+    mask = np.zeros_like(freqs)
+    mask[(freqs >= lo_hi) & (freqs <= hi_lo)] = 1.0
+    up = (freqs >= lo_lo) & (freqs < lo_hi)
+    mask[up] = 0.5 * (1 - np.cos(np.pi * (freqs[up] - lo_lo) / max(lo_hi - lo_lo, 1e-9)))
+    down = (freqs > hi_lo) & (freqs <= hi_hi)
+    mask[down] = 0.5 * (1 + np.cos(np.pi * (freqs[down] - hi_lo) / max(hi_hi - hi_lo, 1e-9)))
+    return mask
+
+
 def _score_correlation(
     rate: int, a: np.ndarray, b: np.ndarray, method: str, transit_s: float = 0.0,
+    band_lo: float | None = None, band_hi: float | None = None,
 ) -> dict:
     """Cross-correlate a against b and return lag/quality numbers.
 
     method is 'plain' (time-domain cross-correlation, weighted by actual
-    signal energy) or 'gcc_phat' (per-bin phase normalization).
+    signal energy), 'gcc_phat' (per-bin phase normalization), or
+    'phat_masked' (per-bin phase normalization of the RAW cross-spectrum,
+    THEN a tapered frequency-domain band mask applied to the already-
+    whitened result — added 2026-07-31).
     tdoa-correlation-design-notes.md section 7 found plain clearly better
     once bandpass filtering is already applied upstream — PHAT's per-bin
     normalization re-amplifies the bandpass filter's residual stopband
-    content back up to full weight, undoing much of what the filter bought.
-    'plain' is the production default (species_tdoa_params.correlation_method)
-    as of 2026-07-17; 'gcc_phat' remains implemented since the field is now
-    actually read rather than dead config, and PHAT can still be the better
-    choice for a species without a characterized frequency band (no
-    bandpass applied at all).
+    content back up to full weight, undoing much of what the filter
+    bought. 'plain' is the production default (species_tdoa_params.
+    correlation_method) as of 2026-07-17; 'gcc_phat' remains implemented
+    since the field is now actually read rather than dead config, but no
+    species currently selects it.
+
+    band_lo/band_hi (added 2026-07-31, phat_masked only): the species'
+    frequency band, applied INSIDE this function as a mask on the
+    whitened spectrum, not as a pre-filter on a/b. This is load-bearing,
+    not a style choice — a zero-phase bandpass filter applied to a/b
+    BEFORE PHAT-style whitening cancels out almost completely at every
+    bin with nonzero filter gain (the filter's squared magnitude response
+    cancels exactly, top and bottom, once normalized by |R|), which is
+    the proven root cause of gcc_phat's poor accuracy whenever a species
+    band is configured — see project_soundhub_gcc_phat_reorder_fix /
+    tools/validate_toa_methods.py's _corr_phat_masked docstring for the
+    full algebra. Masking AFTER whitening, with nothing downstream to
+    renormalize the suppressed bins back up, is the only ordering where
+    the band restriction actually survives to the correlation peak. This
+    means callers passing method='phat_masked' must pass RAW (unfiltered)
+    a/b — see correlate_leading_edge's docstring. Falls back to unmasked
+    full-band PHAT when band_lo/band_hi is None, matching gcc_phat's own
+    no-band no-op convention. Unused for 'plain'/'gcc_phat'.
 
     transit_s (added 2026-07-28): bounds BOTH which peak can be selected as
     the primary match (this function, below) AND which peak can be
@@ -214,11 +304,9 @@ def _score_correlation(
     0.0 (old fully-unbounded behavior) for any caller without geometry
     info, same as _peak_quality.
     """
+    max_possible_peak = None
     if method == "gcc_phat":
-        n = len(a) + len(b) - 1
-        n_fft = 1
-        while n_fft < n:
-            n_fft *= 2
+        n_fft = _next_pow2_fft_size(len(a), len(b))
         A = np.fft.rfft(a, n_fft)
         B = np.fft.rfft(b, n_fft)
         R = A * np.conj(B)
@@ -230,8 +318,24 @@ def _score_correlation(
         # scipy.signal.correlate(mode="full") returns, so the lag math
         # below (peak_idx - (len(b) - 1)) is identical for both methods.
         corr = np.concatenate((corr_full[-(len(b) - 1):], corr_full[: len(a)]))
+        max_possible_peak = _max_possible_peak(R, n_fft)
     elif method == "plain":
         corr = correlate(a, b, mode="full")
+    elif method == "phat_masked":
+        n_fft = _next_pow2_fft_size(len(a), len(b))
+        A = np.fft.rfft(a, n_fft)
+        B = np.fft.rfft(b, n_fft)
+        R = A * np.conj(B)
+        denom = np.abs(R)
+        denom[denom == 0] = 1e-12
+        R = R / denom
+        if band_lo is not None and band_hi is not None:
+            freqs = np.fft.rfftfreq(n_fft, d=1.0 / rate)
+            taper_hz = max(0.15 * (band_hi - band_lo), 100.0)
+            R = R * _band_mask(freqs, band_lo, band_hi, taper_hz)
+        corr_full = np.fft.irfft(R, n_fft)
+        corr = np.concatenate((corr_full[-(len(b) - 1):], corr_full[: len(a)]))
+        max_possible_peak = _max_possible_peak(R, n_fft)
     else:
         raise ValueError(f"unknown correlation method '{method}'")
 
@@ -277,10 +381,22 @@ def _score_correlation(
 
     quality_ratio = _peak_quality(corr, peak_idx, rate, transit_s=transit_s, b_len=len(b))
 
-    a_energy = float(np.sum(a.astype(np.float64) ** 2))
-    b_energy = float(np.sum(b.astype(np.float64) ** 2))
-    denom = np.sqrt(a_energy * b_energy)
-    peak_corr_coef = float(corr[peak_idx] / denom) if denom > 0 else 0.0
+    # peak_corr_coef normalization is method-aware (added 2026-07-31): the
+    # raw-energy Cauchy-Schwarz denominator below is only a valid [-1,1]
+    # bound for 'plain' (real-amplitude) correlation. For a phase-whitened
+    # corr (gcc_phat/phat_masked), corr lives on a different scale entirely
+    # and dividing by raw signal energy produces coefficients with no real
+    # ceiling (confirmed empirically 2026-07-30 on real field data — see
+    # _max_possible_peak's docstring). max_possible_peak (set above, only
+    # for gcc_phat/phat_masked) switches to the properly-bounded ceiling
+    # for those two methods instead.
+    if max_possible_peak is not None:
+        peak_corr_coef = float(corr[peak_idx] / max_possible_peak) if max_possible_peak > 0 else 0.0
+    else:
+        a_energy = float(np.sum(a.astype(np.float64) ** 2))
+        b_energy = float(np.sum(b.astype(np.float64) ** 2))
+        denom = np.sqrt(a_energy * b_energy)
+        peak_corr_coef = float(corr[peak_idx] / denom) if denom > 0 else 0.0
 
     return {
         "lag_us": lag_us,
@@ -317,6 +433,8 @@ def correlate_leading_edge(
     template_pre_ms: float | None = None,
     template_post_ms: float | None = None,
     transit_s: float = 0.0,
+    band_lo: float | None = None,
+    band_hi: float | None = None,
 ) -> dict | None:
     """Refine a neighbour node's arrival time by cross-correlating a short
     leading-edge window of its WAV against the same real-world window of
@@ -324,11 +442,19 @@ def correlate_leading_edge(
     from the origin's own independent onset detection at planning time
     (routes.py _fire_cluster_after_delay).
 
-    origin_data/neighbor_data should already be bandpass-filtered to the
-    species' band by the caller if one is configured (same filtering
-    onset_detection.detect_onset_us applies before onset detection —
-    tdoa-correlation-design-notes.md found bandpass helps plain correlation
-    directly, not just onset detection).
+    Pre-filtering requirement is METHOD-DEPENDENT (added 2026-07-31, see
+    _score_correlation's band_lo/band_hi docstring for why): for
+    method='plain'/'gcc_phat', origin_data/neighbor_data should already be
+    bandpass-filtered to the species' band by the caller if one is
+    configured (same filtering onset_detection.detect_onset_us applies
+    before onset detection — tdoa-correlation-design-notes.md found
+    bandpass helps plain correlation directly, not just onset detection).
+    For method='phat_masked', origin_data/neighbor_data must instead be
+    RAW/unfiltered, and band_lo/band_hi must be passed so the band
+    restriction can be applied AFTER whitening, inside this function —
+    pre-filtering for phat_masked would reproduce gcc_phat's proven
+    filter-then-whiten bug. band_lo/band_hi are ignored for 'plain'/
+    'gcc_phat'.
 
     template_pre_ms/post_ms (added 2026-07-26): the species' raw knee
     distance (window_margin_pre_ms/post_ms — unscaled, see
@@ -363,9 +489,12 @@ def correlate_leading_edge(
         peak_corr_coef: normalized correlation peak height, 0-1.
         quality_ratio:  primary/secondary peak ratio (inf if no competing peak).
         trusted:        True if peak_corr_coef/quality_ratio both clear this
-                         module's MIN_PEAK_CORR_COEF/AMBIGUOUS_RATIO_THRESHOLD
-                         gates. Numbers are returned either way so callers can
-                         still log/compare a distrusted result.
+                         method's trust-gate thresholds (_TRUST_THRESHOLDS —
+                         method-aware as of 2026-07-31; 'plain'/'gcc_phat'
+                         still use the module-level MIN_PEAK_CORR_COEF/
+                         AMBIGUOUS_RATIO_THRESHOLD). Numbers are returned
+                         either way so callers can still log/compare a
+                         distrusted result.
     """
     if origin_rate != neighbor_rate:
         g = gcd(origin_rate, neighbor_rate)
@@ -394,7 +523,7 @@ def correlate_leading_edge(
     if len(a) < _MIN_TRIM_SAMPLES or len(b) < _MIN_TRIM_SAMPLES:
         return None
 
-    score = _score_correlation(rate, a, b, method, transit_s=transit_s)
+    score = _score_correlation(rate, a, b, method, transit_s=transit_s, band_lo=band_lo, band_hi=band_hi)
 
     # _score_correlation's lag measures the offset between the true content's
     # LOCAL index in a vs. in b (each relative to that buffer's own index 0
@@ -409,9 +538,12 @@ def correlate_leading_edge(
     # backward-compatible default), so this is a no-op for any caller not
     # passing per-pair geometry.
     lag_us = score["lag_us"] - transit_s * 1e6
+    min_coef, min_ratio = _TRUST_THRESHOLDS.get(
+        method, (MIN_PEAK_CORR_COEF, AMBIGUOUS_RATIO_THRESHOLD)
+    )
     trusted = (
-        score["peak_corr_coef"] >= MIN_PEAK_CORR_COEF
-        and score["quality_ratio"] >= AMBIGUOUS_RATIO_THRESHOLD
+        score["peak_corr_coef"] >= min_coef
+        and score["quality_ratio"] >= min_ratio
     )
     return {
         "arrival_us": origin_arrival_us + lag_us,

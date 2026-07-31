@@ -3,7 +3,7 @@
   "schema_version": 1,
   "species": {
     "Australian Magpie": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 6957,
       "freq_band_low_hz": 730,
@@ -16,7 +16,7 @@
       "window_margin_pre_ms": 190.0
     },
     "Bush Stone Curlew": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 5560,
       "freq_band_low_hz": 1260,
@@ -29,7 +29,7 @@
       "window_margin_pre_ms": 80.0
     },
     "Gray Butcherbird": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 6360,
       "freq_band_low_hz": 540,
@@ -42,7 +42,7 @@
       "window_margin_pre_ms": 93.0
     },
     "Laughing Kookaburra": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 5790,
       "freq_band_low_hz": 380,
@@ -55,7 +55,7 @@
       "window_margin_pre_ms": 36.5
     },
     "Noisy Miner": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 9370,
       "freq_band_low_hz": 720,
@@ -68,7 +68,7 @@
       "window_margin_pre_ms": 44.5
     },
     "Pied Butcherbird": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 2538,
       "freq_band_low_hz": 942,
@@ -81,7 +81,7 @@
       "window_margin_pre_ms": 104.0
     },
     "Pied Currawong": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 3360,
       "freq_band_low_hz": 670,
@@ -94,7 +94,7 @@
       "window_margin_pre_ms": 94.0
     },
     "Scaly-breasted Lorikeet": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 12300,
       "freq_band_low_hz": 900,
@@ -107,7 +107,7 @@
       "window_margin_pre_ms": 164.5
     },
     "Sulphur-crested Cockatoo": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 5760,
       "freq_band_low_hz": 960,
@@ -120,7 +120,7 @@
       "window_margin_pre_ms": 375.0
     },
     "Torresian Crow": {
-      "correlation_method": "plain",
+      "correlation_method": "phat_masked",
       "enabled": true,
       "freq_band_high_hz": 7030,
       "freq_band_low_hz": 1060,

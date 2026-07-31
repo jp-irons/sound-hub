@@ -1428,7 +1428,19 @@ async def _correlate_attempt_node(
                 os.path.join(_AUDIO_DIR, origin["origin_filename"])
             )
             neighbor_rate, neighbor_data = onset_detection._load_mono(fpath)
-            if freq_band_low_hz is not None and freq_band_high_hz is not None:
+            # phat_masked whitens the RAW cross-spectrum first and applies
+            # the species' band as a mask AFTERWARD, inside
+            # correlation.correlate_leading_edge/_score_correlation —
+            # pre-filtering here would reproduce gcc_phat's proven
+            # filter-then-whiten bug (see correlation.py's
+            # _score_correlation band_lo/band_hi docstring). Every other
+            # method is still pre-filtered exactly as before; band_lo/
+            # band_hi are passed through unconditionally below and simply
+            # ignored by those methods.
+            if (
+                correlation_method != "phat_masked"
+                and freq_band_low_hz is not None and freq_band_high_hz is not None
+            ):
                 origin_data = onset_detection.bandpass_filter(
                     origin_data, origin_rate, freq_band_low_hz, freq_band_high_hz
                 )
@@ -1470,6 +1482,8 @@ async def _correlate_attempt_node(
                 template_pre_ms=window_margin_pre_ms,
                 template_post_ms=window_margin_post_ms,
                 transit_s=transit_s,
+                band_lo=freq_band_low_hz,
+                band_hi=freq_band_high_hz,
             )
         except Exception:
             corr_result = None
