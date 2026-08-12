@@ -292,6 +292,23 @@ class TdoaAttemptRecord(BaseModel):
     t_end_us: int = Field(alias="tEndUs")
     min_corroborating_nodes: int = Field(alias="minCorroboratingNodes")
     correlation_method: str = Field(alias="correlationMethod")
+    min_peak_corr_coef: float = Field(
+        alias="minPeakCorrCoef",
+        description="The peak_corr_coef trust-gate threshold actually "
+                     "applied to every node in this attempt — "
+                     "correlation.trust_thresholds_for_method(correlation_method). "
+                     "Method-aware: 'phat_masked' is calibrated to a "
+                     "different value than 'plain'/'gcc_phat'. Surfaced so "
+                     "the UI can show the real number in the Corr column's "
+                     "tooltip instead of a constant name that may not even "
+                     "apply to this attempt's method.",
+    )
+    min_quality_ratio: float = Field(
+        alias="minQualityRatio",
+        description="The quality_ratio (Ratio column) trust-gate threshold "
+                     "actually applied to every node in this attempt — see "
+                     "min_peak_corr_coef.",
+    )
     onset_detection_method: str = Field(alias="onsetDetectionMethod")
     onset_threshold_factor: float = Field(alias="onsetThresholdFactor")
     freq_band_low_hz: Optional[float] = Field(default=None, alias="freqBandLowHz")

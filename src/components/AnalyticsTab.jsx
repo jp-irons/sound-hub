@@ -372,11 +372,15 @@ const CORRELATION_STATUS_LABEL = {
   trusted: 'trusted',
   untrusted: 'untrusted',
 }
-const CORRELATION_STATUS_FLAG = {
-  no_origin: true,
-  crashed: true,
-  too_short: true,
-}
+
+// True whenever a node's correlation reached the trust-gate step but didn't
+// come out 'trusted' — covers 'untrusted', 'no_origin', 'crashed',
+// 'too_short'. Null/undefined means the origin's own row, or a row that
+// never reached correlation at all (e.g. arrival_failed before correlation
+// is attempted) — neither of those is "not trusted", they're just not
+// applicable, so they stay uncoloured. Used to flag the Corr/Ratio/
+// Consistency cells that fed a distrusted result.
+const notTrustedCorrelation = (status) => status != null && status !== 'trusted'
 
 // arrival_us / t_start_us / t_end_us are node-clock epoch microseconds, same
 // units as trigger_events.t_us — reuses tUsToIso() below rather than a
@@ -1163,10 +1167,10 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                   <th style={sty.th} title="This node's arrival_us minus the origin's — the actual TDOA fed to the solver">
                                     TDOA (Δ origin)
                                   </th>
-                                  <th style={sty.th} title="Leading-edge correlation peak height, 0-1 — below MIN_PEAK_CORR_COEF means a weak match">
+                                  <th style={sty.th} title={`Leading-edge correlation peak height, 0-1 — below ${a.minPeakCorrCoef.toFixed(2)} means a weak match`}>
                                     Corr
                                   </th>
-                                  <th style={sty.th} title="Primary/secondary correlation-peak ratio — below AMBIGUOUS_RATIO_THRESHOLD means arrival_us fell back to the independent onset detector">
+                                  <th style={sty.th} title={`Primary/secondary correlation-peak ratio — below ${a.minQualityRatio.toFixed(2)} means arrival_us fell back to the independent onset detector`}>
                                     Ratio
                                   </th>
                                   <th style={sty.th} title="abs(c * Δ) / baseline to origin — a real source can never exceed 1.0 here regardless of distance; above 1 means these two timestamps can't both be correct">
@@ -1197,14 +1201,18 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     </td>
                                     <td style={{
                                       ...sty.td, fontFamily: 'monospace', fontSize: 11,
-                                      color: CORRELATION_STATUS_FLAG[n.correlationStatus]
+                                      color: notTrustedCorrelation(n.correlationStatus)
                                         ? 'var(--yellow, #ffc107)' : sty.td.color,
                                     }}>
                                       {n.peakCorrCoef != null
                                         ? n.peakCorrCoef.toFixed(2)
                                         : (CORRELATION_STATUS_LABEL[n.correlationStatus] ?? '—')}
                                     </td>
-                                    <td style={{ ...sty.td, fontFamily: 'monospace', fontSize: 11 }}>
+                                    <td style={{
+                                      ...sty.td, fontFamily: 'monospace', fontSize: 11,
+                                      color: notTrustedCorrelation(n.correlationStatus)
+                                        ? 'var(--yellow, #ffc107)' : sty.td.color,
+                                    }}>
                                       {n.qualityRatio != null
                                         ? (n.qualityRatio > 1e6 ? '∞' : n.qualityRatio.toFixed(2))
                                         : '—'}
@@ -1212,7 +1220,9 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     <td style={{
                                       ...sty.td, fontFamily: 'monospace', fontSize: 11,
                                       color: n.consistencyRatio != null && n.consistencyRatio > 1
-                                        ? 'var(--red, #f44336)' : sty.td.color,
+                                        ? 'var(--red, #f44336)'
+                                        : notTrustedCorrelation(n.correlationStatus)
+                                          ? 'var(--yellow, #ffc107)' : sty.td.color,
                                       fontWeight: n.consistencyRatio != null && n.consistencyRatio > 1 ? 600 : 400,
                                     }}>
                                       {n.consistencyRatio != null ? n.consistencyRatio.toFixed(2) : '—'}
@@ -1238,7 +1248,7 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                         ? 'var(--red, #f44336)'
                                         : n.correlationStatus === 'trusted'
                                           ? 'var(--green, #4caf50)'
-                                          : CORRELATION_STATUS_FLAG[n.correlationStatus]
+                                          : notTrustedCorrelation(n.correlationStatus)
                                             ? 'var(--yellow, #ffc107)' : sty.td.color,
                                       whiteSpace: 'normal', minWidth: 260, maxWidth: 420,
                                     }}>

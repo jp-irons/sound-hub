@@ -3122,6 +3122,10 @@ def _tdoa_attempt_record_from_row(
         parsed = json.loads(row["solve_ambiguous_json"])
         ambiguous = (parsed[0], parsed[1], parsed[2])
 
+    min_peak_corr_coef, min_quality_ratio = correlation.trust_thresholds_for_method(
+        row["correlation_method"]
+    )
+
     origin_node_id = row["origin_node_id"]
     origin_row = next((n for n in node_rows if n["node_id"] == origin_node_id), None)
     origin_arrival_us = origin_row["arrival_us"] if origin_row else None
@@ -3151,6 +3155,8 @@ def _tdoa_attempt_record_from_row(
         t_end_us=row["t_end_us"],
         min_corroborating_nodes=row["min_corroborating_nodes"],
         correlation_method=row["correlation_method"],
+        min_peak_corr_coef=min_peak_corr_coef,
+        min_quality_ratio=min_quality_ratio,
         onset_detection_method=row["onset_detection_method"],
         onset_threshold_factor=row["onset_threshold_factor"],
         freq_band_low_hz=row["freq_band_low_hz"],

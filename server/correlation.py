@@ -103,6 +103,17 @@ _TRUST_THRESHOLDS: dict[str, tuple[float, float]] = {
     "phat_masked": (0.07, 2.00),
 }
 
+
+def trust_thresholds_for_method(method: str) -> tuple[float, float]:
+    """(min_peak_corr_coef, min_quality_ratio) trust-gate pair for a given
+    correlation_method — the same lookup correlate_leading_edge() uses
+    internally below. Exposed so callers that need to *display* the
+    effective thresholds (routes.py's GET /tdoa/attempts, for the Analytics
+    localisation UI) read them from here rather than keeping a second copy
+    of these numbers that could drift out of sync as they get retuned.
+    """
+    return _TRUST_THRESHOLDS.get(method, (MIN_PEAK_CORR_COEF, AMBIGUOUS_RATIO_THRESHOLD))
+
 # How close (in samples) a secondary peak has to be to the primary one to be
 # considered "the same event" rather than a competing one. Matches
 # clap_sync_check.py's _PEAK_EXCLUSION_MS.
@@ -538,9 +549,7 @@ def correlate_leading_edge(
     # backward-compatible default), so this is a no-op for any caller not
     # passing per-pair geometry.
     lag_us = score["lag_us"] - transit_s * 1e6
-    min_coef, min_ratio = _TRUST_THRESHOLDS.get(
-        method, (MIN_PEAK_CORR_COEF, AMBIGUOUS_RATIO_THRESHOLD)
-    )
+    min_coef, min_ratio = trust_thresholds_for_method(method)
     trusted = (
         score["peak_corr_coef"] >= min_coef
         and score["quality_ratio"] >= min_ratio
