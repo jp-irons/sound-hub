@@ -378,9 +378,35 @@ const CORRELATION_STATUS_LABEL = {
 // 'too_short'. Null/undefined means the origin's own row, or a row that
 // never reached correlation at all (e.g. arrival_failed before correlation
 // is attempted) — neither of those is "not trusted", they're just not
-// applicable, so they stay uncoloured. Used to flag the Corr/Ratio/
-// Consistency cells that fed a distrusted result.
+// applicable, so they stay uncoloured. This is a whole-row classification —
+// used only for the Status cell, which literally displays correlationStatus.
+// Corr/Ratio/Consistency each get their own metric-specific check below
+// instead: 'untrusted' can come from either gate failing on its own (see
+// correlation.py's trust_thresholds_for_method — coef and ratio are
+// evaluated independently), so colouring both whenever the status merely
+// says 'untrusted' overstates which number actually caused it.
 const notTrustedCorrelation = (status) => status != null && status !== 'trusted'
+
+// correlationStatus values where correlation never produced a real
+// peakCorrCoef/qualityRatio to compare against a threshold at all (no
+// origin to correlate against, an exception, or a too-short window) —
+// distinct from 'untrusted', which did run and produced real numbers that
+// just missed the gate. Corr/Ratio are flagged for these regardless of
+// value, since there's nothing numeric to judge.
+const CORRELATION_INCOMPLETE = { no_origin: true, crashed: true, too_short: true }
+
+// Per-metric "this is the reason it's untrusted" checks, each against the
+// attempt's own method-specific threshold (a.minPeakCorrCoef/minQualityRatio
+// — see correlation.trust_thresholds_for_method) rather than the row's
+// overall correlationStatus, so only the cell(s) that actually missed their
+// gate light up — e.g. a row can be 'untrusted' on ratio alone while its
+// coefficient clears the bar fine.
+const corrFailedGate = (n, a) =>
+  CORRELATION_INCOMPLETE[n.correlationStatus] ||
+  (n.peakCorrCoef != null && n.peakCorrCoef < a.minPeakCorrCoef)
+const ratioFailedGate = (n, a) =>
+  CORRELATION_INCOMPLETE[n.correlationStatus] ||
+  (n.qualityRatio != null && n.qualityRatio < a.minQualityRatio)
 
 // arrival_us / t_start_us / t_end_us are node-clock epoch microseconds, same
 // units as trigger_events.t_us — reuses tUsToIso() below rather than a
@@ -1201,7 +1227,7 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     </td>
                                     <td style={{
                                       ...sty.td, fontFamily: 'monospace', fontSize: 11,
-                                      color: notTrustedCorrelation(n.correlationStatus)
+                                      color: corrFailedGate(n, a)
                                         ? 'var(--yellow, #ffc107)' : sty.td.color,
                                     }}>
                                       {n.peakCorrCoef != null
@@ -1210,7 +1236,7 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     </td>
                                     <td style={{
                                       ...sty.td, fontFamily: 'monospace', fontSize: 11,
-                                      color: notTrustedCorrelation(n.correlationStatus)
+                                      color: ratioFailedGate(n, a)
                                         ? 'var(--yellow, #ffc107)' : sty.td.color,
                                     }}>
                                       {n.qualityRatio != null
@@ -1220,9 +1246,7 @@ export default function AnalyticsTab({ isAdmin = false }) {
                                     <td style={{
                                       ...sty.td, fontFamily: 'monospace', fontSize: 11,
                                       color: n.consistencyRatio != null && n.consistencyRatio > 1
-                                        ? 'var(--red, #f44336)'
-                                        : notTrustedCorrelation(n.correlationStatus)
-                                          ? 'var(--yellow, #ffc107)' : sty.td.color,
+                                        ? 'var(--red, #f44336)' : sty.td.color,
                                       fontWeight: n.consistencyRatio != null && n.consistencyRatio > 1 ? 600 : 400,
                                     }}>
                                       {n.consistencyRatio != null ? n.consistencyRatio.toFixed(2) : '—'}
