@@ -2350,6 +2350,98 @@ _MAX_CONCURRENT_ANALYSES = 2
 _analysis_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_ANALYSES)
 
 
+async def _analyze_and_persist_detection(
+    *, node_id: str | None, fname: str, fpath: str, bytes_len: int,
+    t_start_us: int | None, t_end_us: int | None, triggered: bool,
+    request_id: int | None = None,
+) -> None:
+    """Run BirdNET on a saved WAV, persist detections/audio_events, and
+    register a TDOA planning candidate if a species was found.
+
+    Extracted from audio_push()'s former inline _analyze_and_register
+    closure (2026-10-05, SENTINEL-MODE-PLAN.md Track B1) so the sentinel
+    poller's continuous-pull path can share this exact pipeline instead of
+    duplicating it — pure extraction, no behaviour change. The caller is
+    responsible for dispatching this via asyncio.create_task() if it
+    shouldn't block the caller's own response (audio_push() does); this
+    function itself does not detach.
+
+    request_id is for logging only — matches the originating
+    AudioRequestMsg.requestId for a hub-initiated push; None for a
+    node-initiated push or a sentinel poller pull, neither of which has one.
+    """
+    # Acquired for the whole pipeline (analysis + persistence), not just
+    # the run_in_executor call — the goal is capping how many of these
+    # background pipelines are actively doing real work at once, not
+    # just how many are inside the executor. Waiting here is a cheap
+    # asyncio-level await, not a blocked OS thread, so excess bursts
+    # queue without spinning up more executor threads than necessary.
+    async with _analysis_semaphore:
+        try:
+            loop = asyncio.get_event_loop()
+            # analyze_wav_full runs at min_conf=0.0 so we can see the best
+            # candidate even if it falls below the persisted-detection
+            # threshold — see audio_events.top_confidence/top_species.
+            raw = await loop.run_in_executor(
+                None, functools.partial(birdnet_worker.analyze_wav_full, fpath, use_geo=True),
+            )
+        except Exception:
+            log.exception("analyze id=%s node=%s — BirdNET analysis failed", request_id, node_id)
+            await db.insert_audio_event(
+                node_id=node_id, triggered=triggered, received_at=_now_iso(),
+                bytes_=bytes_len, analysis_status="error",
+                t_start_us=t_start_us, t_end_us=t_end_us, filename=fname,
+            )
+            return
+
+        persisted = [d for d in raw if d.get("confidence", 0.0) >= birdnet_worker.DEFAULT_MIN_CONF]
+        top = max(raw, key=lambda d: d.get("confidence", 0.0)) if raw else None
+
+        if persisted:
+            await db.insert_detections(fname, _now_iso(), persisted, node_id=node_id)
+            log.info("analyze id=%s node=%s — %d detection(s) registered",
+                      request_id, node_id, len(persisted))
+            # Fire-and-forget: resolve Wikipedia/eBird links for any
+            # species in this batch never seen before. Never blocks this
+            # request — see species_links.maybe_resolve_new().
+            species_links.maybe_resolve_new(persisted)
+
+        audio_event_id = await db.insert_audio_event(
+            node_id=node_id, triggered=triggered, received_at=_now_iso(),
+            bytes_=bytes_len, analysis_status="analyzed",
+            detection_count=len(persisted),
+            top_confidence=top.get("confidence") if top else None,
+            top_species=top.get("common_name") if top else None,
+            t_start_us=t_start_us, t_end_us=t_end_us, filename=fname,
+        )
+
+        # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
+        # sound-hub/DESIGN.md): a persisted top-species detection with a
+        # known capture window and node identity registers into the
+        # detection-coalescing buffer. t_start_us/t_end_us absent means
+        # older firmware that doesn't send the actual capture window yet —
+        # nothing to anchor a pull window on. node_id absent means the push
+        # couldn't be attributed to a known node — nothing to record as
+        # origin/reporter. Either way, planning is skipped for this push.
+        #
+        # _register_detection_for_tdoa does not plan immediately: it
+        # buffers into a short debounce (TDOA_COALESCE_DEBOUNCE_MS) so that
+        # several nodes detecting the same call within milliseconds of each
+        # other collapse into one planned attempt instead of each firing
+        # its own — see the module-level coalescing comment near
+        # _pending_clusters and project_soundhub_tdoa_dedup notes.
+        if persisted and t_start_us is not None and t_end_us is not None and node_id is not None:
+            _register_detection_for_tdoa(
+                audio_event_id=audio_event_id,
+                node_id=node_id,
+                species_key=top["common_name"],
+                confidence=top.get("confidence", 0.0),
+                t_start_us=t_start_us,
+                t_end_us=t_end_us,
+                filename=fname,
+            )
+
+
 @router.post("/audio/push", status_code=200, dependencies=[Depends(require_node)])
 async def audio_push(
     request: Request,
@@ -2504,82 +2596,14 @@ async def audio_push(
     # branch above, which already does this for its own (skipped-analysis)
     # path. Exceptions must be caught inside the task itself — same
     # reasoning as _plan_tdoa_attempt's wrapper split: once detached,
-    # nothing awaits this coroutine to propagate an error.
-    async def _analyze_and_register() -> None:
-        # Acquired for the whole pipeline (analysis + persistence), not just
-        # the run_in_executor call — the goal is capping how many of these
-        # background pipelines are actively doing real work at once, not
-        # just how many are inside the executor. Waiting here is a cheap
-        # asyncio-level await, not a blocked OS thread, so excess bursts
-        # queue without spinning up more executor threads than necessary.
-        async with _analysis_semaphore:
-            try:
-                loop = asyncio.get_event_loop()
-                # analyze_wav_full runs at min_conf=0.0 so we can see the best
-                # candidate even if it falls below the persisted-detection
-                # threshold — see audio_events.top_confidence/top_species.
-                raw = await loop.run_in_executor(
-                    None, functools.partial(birdnet_worker.analyze_wav_full, fpath, use_geo=True),
-                )
-            except Exception:
-                log.exception("audio push id=%s node=%s — BirdNET analysis failed", requestId, nodeId)
-                await db.insert_audio_event(
-                    node_id=nodeId, triggered=triggered, received_at=_now_iso(),
-                    bytes_=len(data), analysis_status="error",
-                    t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
-                )
-                return
-
-            persisted = [d for d in raw if d.get("confidence", 0.0) >= birdnet_worker.DEFAULT_MIN_CONF]
-            top = max(raw, key=lambda d: d.get("confidence", 0.0)) if raw else None
-
-            if persisted:
-                await db.insert_detections(fname, _now_iso(), persisted, node_id=nodeId)
-                log.info("audio push id=%s node=%s — %d detection(s) registered",
-                          requestId, nodeId, len(persisted))
-                # Fire-and-forget: resolve Wikipedia/eBird links for any
-                # species in this batch never seen before. Never blocks this
-                # request — see species_links.maybe_resolve_new().
-                species_links.maybe_resolve_new(persisted)
-
-            audio_event_id = await db.insert_audio_event(
-                node_id=nodeId, triggered=triggered, received_at=_now_iso(),
-                bytes_=len(data), analysis_status="analyzed",
-                detection_count=len(persisted),
-                top_confidence=top.get("confidence") if top else None,
-                top_species=top.get("common_name") if top else None,
-                t_start_us=tStartUs, t_end_us=tEndUs, filename=fname,
-            )
-
-            # TDOA orchestration milestone 1 (species_tdoa_pipeline design,
-            # sound-hub/DESIGN.md): a persisted top-species detection with a
-            # known capture window and node identity registers into the
-            # detection-coalescing buffer. tStartUs/tEndUs absent means older
-            # firmware that doesn't send the actual capture window yet —
-            # nothing to anchor a pull window on. nodeId absent means the push
-            # couldn't be attributed to a known node — nothing to record as
-            # origin/reporter. Either way, planning is skipped for this push.
-            #
-            # _register_detection_for_tdoa does not plan immediately: it
-            # buffers into a short debounce (TDOA_COALESCE_DEBOUNCE_MS) so that
-            # several nodes detecting the same call within milliseconds of each
-            # other collapse into one planned attempt instead of each firing
-            # its own — see the module-level coalescing comment near
-            # _pending_clusters and project_soundhub_tdoa_dedup notes. This
-            # used to call asyncio.create_task(_plan_tdoa_attempt(...)) directly
-            # here.
-            if persisted and tStartUs is not None and tEndUs is not None and nodeId is not None:
-                _register_detection_for_tdoa(
-                    audio_event_id=audio_event_id,
-                    node_id=nodeId,
-                    species_key=top["common_name"],
-                    confidence=top.get("confidence", 0.0),
-                    t_start_us=tStartUs,
-                    t_end_us=tEndUs,
-                    filename=fname,
-                )
-
-    asyncio.create_task(_analyze_and_register())
+    # nothing awaits this coroutine to propagate an error. Shared with the
+    # sentinel poller's continuous-pull path — see
+    # _analyze_and_persist_detection (SENTINEL-MODE-PLAN.md Track B1).
+    asyncio.create_task(_analyze_and_persist_detection(
+        node_id=nodeId, fname=fname, fpath=fpath, bytes_len=len(data),
+        t_start_us=tStartUs, t_end_us=tEndUs, triggered=triggered,
+        request_id=requestId,
+    ))
 
 
 @router.get("/audio/requests/{request_id}", dependencies=[Depends(require_viewer)])
