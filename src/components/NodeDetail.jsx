@@ -381,13 +381,14 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
               </div>
             )}
             {/* Node-confirmed, not the hub's last-pushed value — see
-                SENTINEL-MODE-PLAN.md Track A/C. Off isn't a fault (it's a
-                deliberate setting pushed via Configure), so this doesn't
-                use the good/bad styling Capture above does. */}
+                SENTINEL-MODE-PLAN.md Track A/C. Unlike Capture above, On vs
+                Off isn't good-vs-bad (a sentinel's whole point is running
+                with this off, by design) — plain neutral text for both
+                states, same treatment BROKER's badge gives role facts. */}
             {node.audio.selfTrigger != null && (
               <div className="kv">
                 <span className="kv-key">Self-trigger</span>
-                <span className="kv-val" style={{ color: node.audio.selfTrigger ? 'var(--green)' : 'var(--yellow)' }}>
+                <span className="kv-val">
                   {node.audio.selfTrigger ? 'On' : 'Off'}
                 </span>
               </div>

@@ -84,13 +84,21 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'var(--border)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
           }}>BROKER</span>
         )}
-        {/* Node-confirmed (not the hub's last-pushed value) — only shown for
-            the exceptional case, same convention as BROKER above. */}
-        {node.audio?.selfTrigger === false && (
-          <span title="Self-trigger is off — node only responds to on-demand pulls" style={{
-            fontSize: 10, color: 'var(--yellow)',
-            background: 'var(--yellow-dim)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
-          }}>SELF-TRIGGER OFF</span>
+        {/* Node-confirmed (not the hub's last-pushed value). Shown for both
+            states, not just the "off" exception — on vs off isn't good vs
+            bad (a sentinel runs with this off by design), so neither state
+            gets warn/good coloring. Same neutral treatment as BROKER above,
+            for the same reason: a role/config fact, not a health signal. */}
+        {node.audio?.selfTrigger != null && (
+          <span
+            title={node.audio.selfTrigger
+              ? 'Self-trigger is on — node pushes audio unprompted when AudioTrigger fires'
+              : 'Self-trigger is off — node only responds to on-demand pulls'}
+            style={{
+              fontSize: 10, color: 'var(--text-primary)',
+              background: 'var(--border)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
+            }}
+          >SELF-TRIGGER {node.audio.selfTrigger ? 'ON' : 'OFF'}</span>
         )}
       </div>
 
