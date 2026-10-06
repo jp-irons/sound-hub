@@ -63,7 +63,7 @@ function bufferClass(f) {
   return 'low'
 }
 
-export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure, onSetPosition, isAdmin = false }) {
+export default function NodeDetail({ node, onClose, onApprove, onReject, onRemove, onConfigure, onSetSentinel, onSetPosition, isAdmin = false }) {
   const [, setTick] = useState(0)
   const [configOpen, setConfigOpen] = useState(false)
   const [positionOpen, setPositionOpen] = useState(false)
@@ -573,10 +573,8 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
         <NodeConfigModal
           node={node}
           onClose={() => setConfigOpen(false)}
-          onSubmit={async (patch) => {
-            await onConfigure?.(node.id, patch)
-            setConfigOpen(false)
-          }}
+          onSubmit={(patch) => onConfigure?.(node.id, patch)}
+          onSetSentinel={(sentinel) => onSetSentinel?.(node.id, sentinel)}
         />
       )}
 

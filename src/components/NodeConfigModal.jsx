@@ -1,13 +1,19 @@
 import { useState, useEffect } from 'react'
 import { apiFetch } from '../auth.js'
 
-export default function NodeConfigModal({ node, onClose, onSubmit }) {
+export default function NodeConfigModal({ node, onClose, onSubmit, onSetSentinel }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
   const [isBroker, setIsBroker] = useState(false)
   const [selfTrigger, setSelfTrigger] = useState(true)
+  // Hub-only bookkeeping (SENTINEL-MODE-PLAN.md Track B2) — unlike
+  // isBroker/selfTrigger above, this never round-trips to the node, so its
+  // current value comes from the node prop (NodeView.sentinel) rather than
+  // the /config fetch below, which only ever reflects what's on the node
+  // itself.
+  const [sentinel, setSentinel] = useState(false)
   const [initial, setInitial] = useState(null)
 
   // Escape closes — backdrop click does not (a stray click while
@@ -34,10 +40,19 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
         if (cancelled) return
         // selfTrigger defaults true if absent (matches the firmware's own
         // NodeConfig default) — a node not yet carrying this field should
-        // read as "self-triggering as normal", not "off".
-        const next = { isBroker: !!cfg.isBroker, selfTrigger: cfg.selfTrigger !== false }
+        // read as "self-triggering as normal", not "off". sentinel isn't in
+        // this response at all (see this component's sentinel state
+        // comment) — read it off the node prop instead, folded into the
+        // same `initial` snapshot so both baselines reset together whenever
+        // node.id changes.
+        const next = {
+          isBroker: !!cfg.isBroker,
+          selfTrigger: cfg.selfTrigger !== false,
+          sentinel: !!node.sentinel,
+        }
         setIsBroker(next.isBroker)
         setSelfTrigger(next.selfTrigger)
+        setSentinel(next.sentinel)
         setInitial(next)
       })
       .catch(err => !cancelled && setError(err.message ?? String(err)))
@@ -50,15 +65,32 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
     if (!initial) return
     setError(null)
 
+    const configPatch = {}
+    if (isBroker !== initial.isBroker) configPatch.isBroker = isBroker
+    if (selfTrigger !== initial.selfTrigger) configPatch.selfTrigger = selfTrigger
+    const sentinelChanged = sentinel !== initial.sentinel
+
     // Only submit if something actually changed.
-    if (isBroker === initial.isBroker && selfTrigger === initial.selfTrigger) {
+    if (Object.keys(configPatch).length === 0 && !sentinelChanged) {
       onClose()
       return
     }
 
     setSubmitting(true)
     try {
-      await onSubmit({ isBroker, selfTrigger })
+      // Two independent writes, fired only for the fields that actually
+      // changed. Sentinel is hub-only bookkeeping (works even while the
+      // node is unreachable) and must never be gated on, or rolled back
+      // by, a failure in the other — isBroker/selfTrigger proxy to the
+      // node itself and do need it reachable. Neither depends on the
+      // other succeeding, so order between them doesn't matter.
+      if (Object.keys(configPatch).length > 0) {
+        await onSubmit(configPatch)
+      }
+      if (sentinelChanged) {
+        await onSetSentinel(sentinel)
+      }
+      onClose()
     } catch (err) {
       setError(err.message ?? String(err))
       setSubmitting(false)
@@ -117,6 +149,27 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
               />
               <span>Self-trigger — pushes audio to the hub when AudioTrigger fires</span>
             </label>
+
+            {/* Separated from the two checkboxes above — those are node-
+                resident settings proxied over HTTP (need the node up to
+                take); this one is hub-side bookkeeping only (SENTINEL-MODE-
+                PLAN.md Track B2) and takes effect immediately regardless of
+                whether the node is reachable right now. Independent of
+                Self-trigger above by design — see the plan's four-
+                combination table. */}
+            <div style={{ borderTop: '1px solid var(--border-muted)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={sentinel}
+                  onChange={e => setSentinel(e.target.checked)}
+                />
+                <span>Sentinel — hub continuously pulls &amp; analyzes audio from this node</span>
+              </label>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 24 }}>
+                Hub-side only — applies immediately, independent of Self-trigger, and works even while this node is offline.
+              </div>
+            </div>
 
             {error && (
               <div style={{

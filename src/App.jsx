@@ -283,6 +283,27 @@ export default function App() {
     await refresh()
   }, [refresh])
 
+  // Hub-only bookkeeping (SENTINEL-MODE-PLAN.md Track B2/C1b) — separate
+  // from configureNode above on purpose: POST /nodes/{id}/sentinel never
+  // proxies to the node itself, so this works even while a node is
+  // unreachable, unlike configureNode's httpx round trip.
+  const setNodeSentinel = useCallback(async (id, sentinel) => {
+    const res = await apiFetch(`/nodes/${id}/sentinel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sentinel }),
+    })
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail = body.detail
+      } catch { /* not JSON */ }
+      throw new Error(detail)
+    }
+    await refresh()
+  }, [refresh])
+
   const setNodePosition = useCallback(async (id, position) => {
     const res = await apiFetch(`/nodes/${id}/position`, {
       method: 'PUT',
@@ -501,6 +522,7 @@ export default function App() {
                   onReject={rejectNode}
                   onRemove={removeNode}
                   onConfigure={configureNode}
+                  onSetSentinel={setNodeSentinel}
                   onSetPosition={setNodePosition}
                   isAdmin={isAdmin}
                 />
