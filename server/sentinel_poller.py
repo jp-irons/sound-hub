@@ -87,8 +87,14 @@ SENTINEL_QUEUE_MAXLEN = 2
 _in_flight: set[str] = set()
 
 # node_id -> windows waiting for the active worker to get to them, oldest
-# first. Only ever non-empty for a node that's also in _in_flight.
-_queues: dict[str, deque[tuple[int, int]]] = {}
+# first. Only ever non-empty for a node that's also in _in_flight. Each
+# entry carries the time.monotonic() timestamp it was created at (tick
+# time, whether dispatched immediately or queued) — see _node_worker's
+# "sentinel dispatch" log line, added 2026-10-06 because the pull/analyze
+# timing alone can't tell a window that waited in queue before its request
+# was even sent from one that was slow for other reasons once sent; Jon's
+# point reading the 15:54-15:55 trace.
+_queues: dict[str, deque[tuple[int, int, float]]] = {}
 
 
 def _current_window_us() -> tuple[int, int]:
@@ -184,7 +190,7 @@ async def _still_sentinel(node_id: str) -> bool:
     return node is not None and node["approval_status"] == db.APPROVED and node["sentinel"]
 
 
-async def _node_worker(node_id: str, t_start_us: int, t_end_us: int) -> None:
+async def _node_worker(node_id: str, t_start_us: int, t_end_us: int, created_at: float) -> None:
     """Pulls+analyzes node_id's windows back to back — the one it's started
     with, then whatever _queues[node_id] has waiting by the time each one
     finishes — until the queue is empty (or sentinel gets turned off for
@@ -193,9 +199,22 @@ async def _node_worker(node_id: str, t_start_us: int, t_end_us: int) -> None:
     Exactly one of these runs per node_id at a time; run() below enqueues
     onto _queues instead of starting a second one while this is active —
     see _in_flight's docstring.
+
+    created_at (time.monotonic(), added 2026-10-06) is when run() decided
+    to send this particular window — at tick time, whether it got dispatched
+    immediately or sat in _queues for a while first. Logged right before
+    the request actually goes out (see "sentinel dispatch" below) so a slow
+    *pull* (time once sent) and a slow *dispatch* (time waiting its turn
+    before being sent at all) show up as two distinct, attributable numbers
+    instead of being folded into one.
     """
     try:
         while True:
+            queue_wait_s = time.monotonic() - created_at
+            log.info(
+                "sentinel dispatch %s — sending request (queued %.2fs before send)",
+                node_id, queue_wait_s,
+            )
             await _pull_and_analyze_one(node_id, t_start_us, t_end_us)
             queue = _queues.get(node_id)
             if not queue:
@@ -207,7 +226,7 @@ async def _node_worker(node_id: str, t_start_us: int, t_end_us: int) -> None:
                     node_id, len(queue),
                 )
                 break
-            t_start_us, t_end_us = queue.popleft()
+            t_start_us, t_end_us, created_at = queue.popleft()
     finally:
         _in_flight.discard(node_id)
         _queues.pop(node_id, None)
@@ -242,15 +261,16 @@ async def run() -> None:
                 # cadence.
                 for node in nodes:
                     node_id = node["id"]
+                    created_at = time.monotonic()
                     if node_id not in _in_flight:
                         _in_flight.add(node_id)
                         asyncio.create_task(
-                            _node_worker(node_id, t_start_us, t_end_us)
+                            _node_worker(node_id, t_start_us, t_end_us, created_at)
                         )
                         continue
 
                     queue = _queues.setdefault(node_id, deque())
-                    queue.append((t_start_us, t_end_us))
+                    queue.append((t_start_us, t_end_us, created_at))
                     if len(queue) > SENTINEL_QUEUE_MAXLEN:
                         queue.popleft()  # oldest — newer coverage wins
                         skip_count = registry.record_sentinel_overlap_skip(node_id)
