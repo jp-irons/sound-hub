@@ -7,6 +7,7 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false)
 
   const [isBroker, setIsBroker] = useState(false)
+  const [selfTrigger, setSelfTrigger] = useState(true)
   const [initial, setInitial] = useState(null)
 
   // Escape closes — backdrop click does not (a stray click while
@@ -31,8 +32,12 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
       })
       .then(cfg => {
         if (cancelled) return
-        const next = { isBroker: !!cfg.isBroker }
+        // selfTrigger defaults true if absent (matches the firmware's own
+        // NodeConfig default) — a node not yet carrying this field should
+        // read as "self-triggering as normal", not "off".
+        const next = { isBroker: !!cfg.isBroker, selfTrigger: cfg.selfTrigger !== false }
         setIsBroker(next.isBroker)
+        setSelfTrigger(next.selfTrigger)
         setInitial(next)
       })
       .catch(err => !cancelled && setError(err.message ?? String(err)))
@@ -45,15 +50,15 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
     if (!initial) return
     setError(null)
 
-    // Only submit if the value actually changed.
-    if (isBroker === initial.isBroker) {
+    // Only submit if something actually changed.
+    if (isBroker === initial.isBroker && selfTrigger === initial.selfTrigger) {
       onClose()
       return
     }
 
     setSubmitting(true)
     try {
-      await onSubmit({ isBroker })
+      await onSubmit({ isBroker, selfTrigger })
     } catch (err) {
       setError(err.message ?? String(err))
       setSubmitting(false)
@@ -102,6 +107,15 @@ export default function NodeConfigModal({ node, onClose, onSubmit }) {
                 onChange={e => setIsBroker(e.target.checked)}
               />
               <span>Broker — relays ESP-NOW traffic to/from WiFi</span>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={selfTrigger}
+                onChange={e => setSelfTrigger(e.target.checked)}
+              />
+              <span>Self-trigger — pushes audio to the hub when AudioTrigger fires</span>
             </label>
 
             {error && (

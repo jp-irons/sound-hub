@@ -361,9 +361,19 @@ class NodeConfigRequest(BaseModel):
     configured by hand via its own web UI. It's kept here too so an admin
     can manually re-push it (e.g. if BASE_STATION_IP ever changes) through
     the same /configure route used for isBroker.
+
+    self_trigger (SENTINEL-MODE-PLAN.md Track A/C1, 2026-10-06) — whether
+    the node runs its own AudioTrigger push path unprompted. Needs no
+    special handling here beyond the field declaration: configure_node's
+    existing model_dump(by_alias=True, exclude_unset=True, exclude_none=True)
+    already forwards it, and get_node_config already proxies the node's GET
+    response verbatim — unlike is_broker, the node doesn't reboot on this
+    field changing (NodeConfigHandler.cpp), so there's no "rebooting" flag
+    to special-case in the response either.
     """
     is_broker: Optional[bool] = Field(default=None, alias="isBroker")
     hub_address: Optional[str] = Field(default=None, alias="hubAddress")
+    self_trigger: Optional[bool] = Field(default=None, alias="selfTrigger")
 
     model_config = ConfigDict(populate_by_name=True)
 
