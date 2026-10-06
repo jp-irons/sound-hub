@@ -378,6 +378,18 @@ class NodeConfigRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SentinelRequest(BaseModel):
+    """Body for POST /api/nodes/{id}/sentinel (SENTINEL-MODE-PLAN.md Track B2).
+
+    Deliberately NOT a NodeConfigRequest field, even though it looks like a
+    sibling of is_broker/self_trigger above: sentinel is hub-side bookkeeping
+    only (same tier as approval_status) — set_node_sentinel (routes.py) never
+    contacts the node, so this works even while the node is unreachable,
+    unlike configure_node's httpx proxy to the node's own /app/api/node-config.
+    """
+    sentinel: bool
+
+
 class NodePosition(BaseModel):
     """Hub-stored position record for a node (node_positions table).
 
@@ -873,6 +885,15 @@ class NodeView(BaseModel):
         default="pending", alias="approvalStatus"
     )
     configured: bool = False
+    # Hub-side-only (SENTINEL-MODE-PLAN.md Track B2) — see SentinelRequest's
+    # docstring for why this isn't a NodeConfigRequest field.
+    sentinel: bool = False
+    # Track B3's self-overlap guard (sentinel_poller.py): how many sentinel-
+    # poll ticks have been skipped for this node because a previous pull to
+    # it hadn't finished yet. In-memory/hub-restart-scoped, same as the
+    # reachable/last_seen_at live-status fields above — see
+    # registry.get_sentinel_overlap_skips. Zero for every non-sentinel node.
+    sentinel_overlap_skips: int = Field(default=0, alias="sentinelOverlapSkips")
     reachable: bool = False
     last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
     raw_status: Optional[dict] = Field(default=None, alias="rawStatus")

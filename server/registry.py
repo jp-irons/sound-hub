@@ -33,6 +33,13 @@ _OFFLINE_FAILURE_THRESHOLD = 3
 
 _consec_failures: dict[str, int] = {}
 
+# Per-node count of sentinel-poller ticks skipped because a previous pull to
+# that node hadn't finished yet (SENTINEL-MODE-PLAN.md Track B3's self-
+# overlap guard, sentinel_poller.py). In-memory, hub-restart-scoped — same
+# rationale as _consec_failures above: this is a live "is the guard actually
+# firing" signal, not a historical record worth persisting across restarts.
+_sentinel_overlap_skips: dict[str, int] = {}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -98,6 +105,7 @@ async def remove_node(node_id: str) -> None:
             await conn.commit()
     _live_status.pop(node_id, None)
     _consec_failures.pop(node_id, None)
+    _sentinel_overlap_skips.pop(node_id, None)
 
 
 async def set_configured(node_id: str, configured: bool = True) -> None:
@@ -105,6 +113,20 @@ async def set_configured(node_id: str, configured: bool = True) -> None:
         async with db.connect() as conn:
             await conn.execute("UPDATE nodes SET configured = ? WHERE id = ?",
                                (1 if configured else 0, node_id))
+            await conn.commit()
+
+
+async def set_sentinel(node_id: str, sentinel: bool) -> None:
+    """Flag or unflag a node as a continuous-poll sentinel (SENTINEL-MODE-PLAN.md
+    Track B2) — hub-side bookkeeping, same tier as set_approval_status/
+    set_configured above. Deliberately does not touch the node at all (no
+    httpx call) — unlike configure_node's NodeConfigRequest proxy, this
+    works even while the node is unreachable, since it's purely a hub
+    decision about who to poll."""
+    async with _write_lock:
+        async with db.connect() as conn:
+            await conn.execute("UPDATE nodes SET sentinel = ? WHERE id = ?",
+                               (1 if sentinel else 0, node_id))
             await conn.commit()
 
 
@@ -123,6 +145,19 @@ async def update_node_ip(node_id: str, ip_address: str) -> None:
             await conn.execute("UPDATE nodes SET ip_address = ? WHERE id = ?",
                                (ip_address, node_id))
             await conn.commit()
+
+
+def record_sentinel_overlap_skip(node_id: str) -> int:
+    """Record one sentinel-poll tick skipped for node_id because a previous
+    pull to it was still in flight. Returns the new running total so the
+    caller (sentinel_poller.py) can log it without a separate lookup."""
+    count = _sentinel_overlap_skips.get(node_id, 0) + 1
+    _sentinel_overlap_skips[node_id] = count
+    return count
+
+
+def get_sentinel_overlap_skips(node_id: str) -> int:
+    return _sentinel_overlap_skips.get(node_id, 0)
 
 
 # --- Live status (in-memory, volatile) ---

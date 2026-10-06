@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import audio_cleanup, birdnet_worker, db, poller, routes
+from . import audio_cleanup, birdnet_worker, db, poller, routes, sentinel_poller
 from .routes import router
 
 logging.basicConfig(
@@ -30,12 +30,13 @@ logging.basicConfig(
 log = logging.getLogger("sound_hub.main")
 
 _poller_task: asyncio.Task | None = None
+_sentinel_poller_task: asyncio.Task | None = None
 _audio_cleanup_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _poller_task, _audio_cleanup_task
+    global _poller_task, _sentinel_poller_task, _audio_cleanup_task
     await db.init_db()
     if await db.count_users() == 0:
         log.warning(
@@ -45,6 +46,12 @@ async def lifespan(app: FastAPI):
         )
     await routes.init_relay_client()
     _poller_task = asyncio.create_task(poller.run())
+    # SENTINEL-MODE-PLAN.md Track B3 — separate task from the status poller
+    # above: different cadence, and it needs BirdNET loaded (see below)
+    # before its first tick could do anything useful, but the task itself
+    # is safe to start now (its own run() loop just does nothing on a tick
+    # with no sentinel-flagged nodes yet, same tolerance poller.run() has).
+    _sentinel_poller_task = asyncio.create_task(sentinel_poller.run())
     _audio_cleanup_task = asyncio.create_task(audio_cleanup.run())
     # Load BirdNET model in a thread so the event loop is not blocked.
     await asyncio.get_running_loop().run_in_executor(None, birdnet_worker.init)
@@ -52,6 +59,8 @@ async def lifespan(app: FastAPI):
     yield
     if _poller_task:
         _poller_task.cancel()
+    if _sentinel_poller_task:
+        _sentinel_poller_task.cancel()
     if _audio_cleanup_task:
         _audio_cleanup_task.cancel()
     await routes.close_relay_client()

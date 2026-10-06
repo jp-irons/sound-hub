@@ -22,7 +22,7 @@ from .models import (
     AudioAckBody, AudioSampleRequest, DetectionRecord, ManualNodeRequest,
     NodeAudioSummary, NodeConfigRequest, NodeHeartbeatRequest, NodePosition,
     PositionFromEma,
-    NodeRegisterRequest,
+    NodeRegisterRequest, SentinelRequest,
     NodeTriggerSummary, NodeView, SpeciesLinksResolveResult, SpeciesSummary,
     SpeciesTdoaParams,
     SpeciesTdoaParamsRecord, TdoaAttemptNodeRecord, TdoaAttemptRecord,
@@ -285,6 +285,8 @@ def _build_view(node: dict, live: dict, derived: dict) -> NodeView:
         discovery_method=node["discovery_method"],
         approval_status=node["approval_status"],
         configured=bool(node["configured"]),
+        sentinel=bool(node["sentinel"]),
+        sentinel_overlap_skips=registry.get_sentinel_overlap_skips(node["id"]),
         reachable=live["reachable"],
         last_seen_at=live["last_seen_at"],
         raw_status=live["raw_status"],
@@ -582,6 +584,27 @@ async def approve_node(node_id: str):
 async def reject_node(node_id: str):
     """Decline a discovered node — keep it out of the active array."""
     return await _set_approval(node_id, db.REJECTED)
+
+
+@router.post("/nodes/{node_id}/sentinel", response_model=NodeView, dependencies=[Depends(require_admin)])
+async def set_node_sentinel(node_id: str, req: SentinelRequest):
+    """Flag or unflag a node as a continuous-poll sentinel (SENTINEL-MODE-PLAN.md
+    Track B2).
+
+    Hub-side bookkeeping only, same shape as _set_approval above — unlike
+    configure_node below, this never calls the node at all (no httpx, no
+    reachability requirement), since the node doesn't need to know or care
+    that it's a sentinel. Once B3's poller exists, it reads this flag
+    straight off registry.list_nodes() to decide who to pull from.
+    """
+    node = await registry.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    await registry.set_sentinel(node_id, req.sentinel)
+    for n, live, derived in await _mapped_nodes():
+        if n["id"] == node_id:
+            return _build_view(n, live, derived)
+    raise HTTPException(status_code=500, detail="Node updated but not found in mapped set")
 
 
 @router.get("/nodes/{node_id}/config", dependencies=[Depends(require_admin)])

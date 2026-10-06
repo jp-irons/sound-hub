@@ -63,7 +63,15 @@ CREATE TABLE IF NOT EXISTS nodes (
     discovery_method TEXT DEFAULT 'manual',
     discovered_at    TEXT NOT NULL,
     configured       INTEGER DEFAULT 0,
-    approval_status  TEXT DEFAULT 'pending'
+    approval_status  TEXT DEFAULT 'pending',
+    -- Hub-side-only bookkeeping (SENTINEL-MODE-PLAN.md Track B2) — does the
+    -- hub continuously pull windows from this node and run BirdNET on every
+    -- one? No firmware involvement at all, unlike every other column here
+    -- that firmware cares about (role/configured) — the node never needs to
+    -- know or care that it's a sentinel. Default 0 needs no backfill
+    -- UPDATE on migration, unlike approval_status: "not a sentinel" is
+    -- correct for every pre-existing row, not just a placeholder.
+    sentinel         INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS node_positions (
@@ -460,6 +468,15 @@ async def init_db() -> None:
             "UPDATE nodes SET approval_status = ? WHERE approval_status IS NULL",
             (APPROVED,),
         )
+
+        # Migration: `sentinel` is new (SENTINEL-MODE-PLAN.md Track B2) — no
+        # backfill UPDATE needed afterwards, unlike approval_status above:
+        # ALTER TABLE's column default (0) is already the correct value for
+        # every pre-existing row.
+        if "sentinel" not in columns:
+            await conn.execute(
+                "ALTER TABLE nodes ADD COLUMN sentinel INTEGER DEFAULT 0"
+            )
 
         # Migration: mDNS discovery was removed 2026-07-12 (see project memory
         # `project-mdns-to-dns-migration`) — 'mdns' is no longer a valid

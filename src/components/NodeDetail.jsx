@@ -393,6 +393,20 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                 </span>
               </div>
             )}
+            {/* Track B3's self-overlap guard (sentinel_poller.py) — only
+                shown when it's actually skipped a tick, so a sentinel node
+                behaving normally (the overwhelmingly common case) shows
+                nothing extra here. 'warn' rather than 'bad': an occasional
+                skip just means the previous pull ran a little long, not
+                that anything is broken. */}
+            {node.sentinel && node.sentinelOverlapSkips > 0 && (
+              <div className="kv">
+                <span className="kv-key">Overlap skips</span>
+                <span className="kv-val warn">
+                  {node.sentinelOverlapSkips}
+                </span>
+              </div>
+            )}
             <div className="kv">
               <span className="kv-key">Last trigger</span>
               <span className="kv-val">
