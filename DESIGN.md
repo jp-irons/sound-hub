@@ -32,13 +32,18 @@ what's fixed vs. still deliberately deferred.
    hook point exists — detection persistence (`routes.py` ~line 808-819) is
    fire-and-forget today.
 4. **Pull the same window from neighbour nodes.**
-   *Mechanism exists, not wired to step 3* — `POST /api/nodes/{id}/sample`
-   (`request_sample`, `routes.py:835-905`) is async: takes an absolute
-   `t_start_us`/`t_end_us` window, relays the request via broker → ESP-NOW,
-   returns `{requestId, status: "relayed"}` immediately (202). The WAV
-   arrives later via the *same* `audio_push()` endpoint, tagged with that
-   `requestId`. No code currently issues these calls automatically from a
-   detection.
+   *Implemented, automatic* — `_plan_tdoa_attempt_inner` (`routes.py`)
+   issues a direct HTTP pull (`_fetch_audio_direct`, `GET
+   /app/api/audio/pull` on the node) to each planned neighbour as soon as a
+   detection's TDOA params resolve; the WAV is saved and correlated
+   immediately on receipt (`_save_direct_pull_audio` →
+   `_correlate_attempt_node`), not via a later round trip through
+   `audio_push()`. *(Corrected 2026-10-06 — this step previously described
+   an unwired, ESP-NOW/broker-relayed `request_sample` call; see Milestone
+   2's note below for what changed and why. `request_sample`/`POST
+   /api/nodes/{id}/sample` itself still exists unchanged, over ESP-NOW, but
+   only for the separate manual "Request Sample" admin action — not for
+   TDOA corroboration pulls, which is what this step is about.)*
 5. **Solve TDOA.**
    *Implemented (milestone 4, 2026-07-11)* — `tdoa_solver.solve(nodes,
    timestamps_us)` (closed-form, `tdoa_solver.py:84`), called from
@@ -105,9 +110,15 @@ large change:
    fixed-minimum-duration knob from 2026-07-11 but was removed 2026-07-17),
    picks neighbour nodes, and writes a `tdoa_attempts` row recording the
    plan.
-2. **Wire the actual pull.** *Done.* Issues `request_sample` to each planned
-   neighbour, stores their `requestId`s against the attempt row
-   (`tdoa_attempt_nodes`).
+2. **Wire the actual pull.** *Done.* Issues a direct HTTP pull
+   (`_fetch_audio_direct`) to each planned neighbour, storing the resulting
+   `audio_events` row against the attempt row (`tdoa_attempt_nodes`).
+   *(Corrected 2026-10-06 — originally shipped 2026-07-11 issuing
+   `request_sample` over ESP-NOW/broker-relay instead; migrated to the
+   direct HTTP pull shortly after, once that path turned out to be the root
+   cause of nodes getting silently stuck at "Pull requested" forever with
+   no failure signal — see the Pipeline step 4 note above and
+   `_fetch_audio_direct`'s own docstring for the full incident.)*
 3. **Correlate arrivals.** *Done.* `server/onset_detection.py` runs the
    species' onset-detection method (`global_peak` only, ported from
    `tools/clap_sync_check.py`'s `detect_onset`) against a node's WAV and

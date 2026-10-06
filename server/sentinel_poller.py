@@ -21,6 +21,7 @@ in models.py / the "Sentinel" kv row in NodeDetail.jsx).
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -70,27 +71,41 @@ async def _pull_and_analyze(node_id: str, t_start_us: int, t_end_us: int) -> Non
         return
 
     _in_flight.add(node_id)
+    # Timing instrumentation (2026-10-06) — added to tell apart two very
+    # different possible causes of the overlap guard firing: the pull leg
+    # (network-bound, waiting on the node — near-zero hub CPU while it
+    # waits) vs. the analyze leg (CPU-bound BirdNET inference, including
+    # any time spent waiting on _analysis_semaphore if something else is
+    # analyzing concurrently). Logged at INFO so it shows up in the normal
+    # journalctl -u soundhub stream without needing debug level.
+    pull_started = time.monotonic()
     try:
         try:
             wav_bytes, actual_start_us, actual_end_us, _noise_floor_rms = (
                 await routes._fetch_audio_direct(node_id, t_start_us, t_end_us)
             )
         except HTTPException as exc:
+            pull_elapsed = time.monotonic() - pull_started
             # 404/503 are the node's own answer (window unavailable / not
             # capturing right now) — ordinary and frequent at this cadence,
             # not worth more than debug. 424/502/504 mean the request never
             # got a real answer at all — same partition _fetch_audio_direct
             # documents for the TDOA-pull caller.
             if exc.status_code in (404, 503):
-                log.debug("sentinel pull %s — node said no (%s): %s",
-                          node_id, exc.status_code, exc.detail)
+                log.debug("sentinel pull %s — node said no (%s) after %.2fs: %s",
+                          node_id, exc.status_code, pull_elapsed, exc.detail)
             else:
-                log.debug("sentinel pull %s — request failed (%s): %s",
-                          node_id, exc.status_code, exc.detail)
+                log.debug("sentinel pull %s — request failed (%s) after %.2fs: %s",
+                          node_id, exc.status_code, pull_elapsed, exc.detail)
             return
         except Exception:
-            log.exception("sentinel pull %s — unexpected failure", node_id)
+            log.exception("sentinel pull %s — unexpected failure after %.2fs",
+                           node_id, time.monotonic() - pull_started)
             return
+
+        pull_elapsed = time.monotonic() - pull_started
+        log.info("sentinel pull %s — %.2fs, %d bytes",
+                  node_id, pull_elapsed, len(wav_bytes))
 
         os.makedirs(routes._AUDIO_DIR, exist_ok=True)
         fname = f"sentinel_{node_id}_{actual_start_us}.wav"
@@ -104,9 +119,15 @@ async def _pull_and_analyze(node_id: str, t_start_us: int, t_end_us: int) -> Non
         # every window must actually be analyzed, so this goes through
         # Track B1's shared pipeline instead (triggered=False: nothing on
         # this node's own AudioTrigger fired, the hub just asked).
+        analyze_started = time.monotonic()
         await routes._analyze_and_persist_detection(
             node_id=node_id, fname=fname, fpath=fpath, bytes_len=len(wav_bytes),
             t_start_us=actual_start_us, t_end_us=actual_end_us, triggered=False,
+        )
+        analyze_elapsed = time.monotonic() - analyze_started
+        log.info(
+            "sentinel analyze %s — %.2fs (pull %.2fs, total %.2fs)",
+            node_id, analyze_elapsed, pull_elapsed, time.monotonic() - pull_started,
         )
     finally:
         _in_flight.discard(node_id)
