@@ -61,14 +61,20 @@ from . import birdnet_worker, db, registry, routes
 
 log = logging.getLogger("sound_hub.sentinel_poller")
 
-# Window length pulled on every tick, and how often ticks fire. 3.5s every
-# 3s means each window overlaps the previous one by half a second —
-# deliberate margin so a call landing near a window boundary still lands
-# whole in at least one pull, rather than being split across two and missed
-# by both. SENTINEL_TRAILING_MARGIN_S keeps the requested window a little
-# behind the node's actual "now" so the pull never races audio the node
-# hasn't finished writing into its ring yet.
-SENTINEL_WINDOW_S = 3.5
+# Window length pulled on every tick, and how often ticks fire. Previously
+# 3.5s (0.5s longer than the tick interval) on the theory that the extra
+# margin gave a call landing near a window boundary a second chance to land
+# whole in the next pull. That rationale turned out not to hold: birdnetlib
+# (RecordingBase.process_audio_data) hardcodes a 3.0s chunk and silently
+# drops any trailing remainder under 1.5s, so the "extra" 0.5s was never
+# reaching the model at all — every 3.5s pull was only ever analyzed as its
+# first 3.0s (confirmed 2026-10-06 by reading birdnetlib's installed
+# source). Dropped to 3.0s to match what's actually analyzed; real-time
+# coverage still tiles contiguously tick to tick since consecutive windows
+# abut exactly. SENTINEL_TRAILING_MARGIN_S keeps the requested window a
+# little behind the node's actual "now" so the pull never races audio the
+# node hasn't finished writing into its ring yet.
+SENTINEL_WINDOW_S = 3.0
 SENTINEL_TICK_INTERVAL_S = 3.0
 SENTINEL_TRAILING_MARGIN_S = 1.0
 
