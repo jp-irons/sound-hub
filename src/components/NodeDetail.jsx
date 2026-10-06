@@ -380,6 +380,18 @@ export default function NodeDetail({ node, onClose, onApprove, onReject, onRemov
                 </span>
               </div>
             )}
+            {/* Node-confirmed, not the hub's last-pushed value — see
+                SENTINEL-MODE-PLAN.md Track A/C. Off isn't a fault (it's a
+                deliberate setting pushed via Configure), so this doesn't
+                use the good/bad styling Capture above does. */}
+            {node.audio.selfTrigger != null && (
+              <div className="kv">
+                <span className="kv-key">Self-trigger</span>
+                <span className="kv-val" style={{ color: node.audio.selfTrigger ? 'var(--green)' : 'var(--yellow)' }}>
+                  {node.audio.selfTrigger ? 'On' : 'Off'}
+                </span>
+              </div>
+            )}
             <div className="kv">
               <span className="kv-key">Last trigger</span>
               <span className="kv-val">

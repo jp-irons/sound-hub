@@ -842,6 +842,9 @@ class AudioView(BaseModel):
     bitDepth: Optional[int] = None
     lastTriggerAt: Optional[str] = None
     running: Optional[bool] = None
+    # Node-confirmed selfTrigger (status_mapper._audio) — see NodeConfigRequest's
+    # self_trigger for the hub-pushed half of this flag.
+    selfTrigger: Optional[bool] = None
 
 
 class EspNowView(BaseModel):

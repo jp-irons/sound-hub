@@ -145,6 +145,13 @@ def _audio(raw: dict) -> Optional[dict]:
         "bitDepth": audio.get("bitsPerSample"),
         "lastTriggerAt": None,
         "running": audio.get("running"),
+        # selfTrigger is reported under raw["node"], not raw["audio"] (it's a
+        # NodeConfig field, like isBroker — see StatusHandler.cpp), but it
+        # rides along in this view dict because that's where the frontend
+        # displays it, next to "running" (SENTINEL-MODE-PLAN.md Track A/C).
+        # None here (rather than defaulting true) means "node hasn't reported
+        # it yet" — the frontend decides its own display default for that.
+        "selfTrigger": _node_info(raw).get("selfTrigger"),
     }
 
 

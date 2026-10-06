@@ -84,6 +84,14 @@ export default function NodeCard({ node, selected, onSelect }) {
             background: 'var(--border)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
           }}>BROKER</span>
         )}
+        {/* Node-confirmed (not the hub's last-pushed value) — only shown for
+            the exceptional case, same convention as BROKER above. */}
+        {node.audio?.selfTrigger === false && (
+          <span title="Self-trigger is off — node only responds to on-demand pulls" style={{
+            fontSize: 10, color: 'var(--yellow)',
+            background: 'var(--yellow-dim)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
+          }}>SELF-TRIGGER OFF</span>
+        )}
       </div>
 
       {/* Row 2: clock accuracy + RSSI */}
