@@ -82,7 +82,9 @@ async def _pull_and_analyze(node_id: str, t_start_us: int, t_end_us: int) -> Non
     try:
         try:
             wav_bytes, actual_start_us, actual_end_us, _noise_floor_rms = (
-                await routes._fetch_audio_direct(node_id, t_start_us, t_end_us)
+                await routes._fetch_audio_direct(
+                    node_id, t_start_us, t_end_us, purpose="sentinel",
+                )
             )
         except HTTPException as exc:
             pull_elapsed = time.monotonic() - pull_started

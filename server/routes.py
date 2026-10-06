@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -1589,8 +1590,24 @@ async def _correlate_attempt_node(
     )
 
 
+# Tracks how many _fetch_audio_direct calls are currently in flight per
+# node_id, across BOTH callers that share this one function — sentinel_
+# poller.py's continuous ticks and _pull_or_reuse_one's TDOA corroboration
+# pulls below. Added 2026-10-06 to test a contention hypothesis for the
+# sentinel pull-time variance (0.7-2.4s) seen live on soundcapture171: both
+# paths ultimately hit the same chokepoint on the node side (AudioPullServer
+# — max_open_sockets=2 — and AudioStore's hub-pull scratch slot), so if a
+# sentinel tick's pull is ever still running when a corroboration pull to
+# the same node starts (or vice versa), that's worth knowing before trying
+# anything else (e.g. widening the sentinel window — which would only make
+# a real contention problem worse, by holding the node-side slot longer) —
+# logged explicitly below rather than inferred after the fact from two
+# separately-tagged, untimed log lines.
+_direct_pull_in_flight: dict[str, int] = {}
+
+
 async def _fetch_audio_direct(
-    node_id: str, t_start_us: int, t_end_us: int,
+    node_id: str, t_start_us: int, t_end_us: int, *, purpose: str = "unknown",
 ) -> tuple[bytes, int, int, float | None]:
     """Pull a WAV directly from a node's GET /app/api/audio/pull, bypassing
     the ESP-NOW AudioRequest/broker-relay round trip entirely (see
@@ -1631,6 +1648,13 @@ async def _fetch_audio_direct(
       502 — node responded with any other unexpected status
       504 — request timed out, or the node was unreachable (connection
             refused/reset, DNS failure, etc.)
+
+    purpose (added 2026-10-06) is a free-text label identifying which caller
+    is pulling — "sentinel" (sentinel_poller.py) or "tdoa_corroboration"
+    (_pull_or_reuse_one below) — used only in the log lines below (and the
+    _direct_pull_in_flight bookkeeping's warning message) so the two paths'
+    timing shows up tagged on one shared timeline instead of two that have
+    to be correlated by hand. Has no effect on the pull itself.
     """
     node = await registry.get_node(node_id)
     if node is None or not node.get("ip_address"):
@@ -1640,39 +1664,59 @@ async def _fetch_audio_direct(
     if _relay_client is None:
         raise HTTPException(status_code=424, detail="Relay client not initialised")
 
-    # Plain HTTP, not config.NODE_SCHEME (https) — this endpoint runs on its
-    # own dedicated, unauthenticated plain-HTTP server (AudioPullServer,
-    # sound-capture-node) on a separate port, kept off the node's HTTPS UI
-    # server so a long pull can't block page loads there. See
-    # AudioPullServer's class comment (sound-capture-node/main/app).
-    pull_port = getattr(config, "NODE_AUDIO_PULL_PORT", 8080)
-    url = (
-        f"http://{node['ip_address']}:{pull_port}/app/api/audio/pull"
-        f"?tStartUs={t_start_us}&tEndUs={t_end_us}"
-    )
+    in_flight_count = _direct_pull_in_flight.get(node_id, 0)
+    if in_flight_count > 0:
+        log.warning(
+            "direct pull %s (%s) — starting while %d pull(s) already in "
+            "flight for this node (contention candidate)",
+            node_id, purpose, in_flight_count,
+        )
+    _direct_pull_in_flight[node_id] = in_flight_count + 1
+    pull_started = time.monotonic()
     try:
-        resp = await _relay_client.get(
-            url, timeout=getattr(config, "AUDIO_PULL_TIMEOUT_S", 15.0),
+        # Plain HTTP, not config.NODE_SCHEME (https) — this endpoint runs on its
+        # own dedicated, unauthenticated plain-HTTP server (AudioPullServer,
+        # sound-capture-node) on a separate port, kept off the node's HTTPS UI
+        # server so a long pull can't block page loads there. See
+        # AudioPullServer's class comment (sound-capture-node/main/app).
+        pull_port = getattr(config, "NODE_AUDIO_PULL_PORT", 8080)
+        url = (
+            f"http://{node['ip_address']}:{pull_port}/app/api/audio/pull"
+            f"?tStartUs={t_start_us}&tEndUs={t_end_us}"
         )
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail=f"pull timed out: {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=504, detail=f"node unreachable: {exc}") from exc
+        try:
+            resp = await _relay_client.get(
+                url, timeout=getattr(config, "AUDIO_PULL_TIMEOUT_S", 15.0),
+            )
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail=f"pull timed out: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=504, detail=f"node unreachable: {exc}") from exc
 
-    if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail=resp.text or "window unavailable")
-    if resp.status_code == 503:
-        raise HTTPException(status_code=503, detail=resp.text or "capture not running")
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502, detail=f"node returned HTTP {resp.status_code}",
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail=resp.text or "window unavailable")
+        if resp.status_code == 503:
+            raise HTTPException(status_code=503, detail=resp.text or "capture not running")
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502, detail=f"node returned HTTP {resp.status_code}",
+            )
+
+        actual_start_us = int(resp.headers.get("X-Actual-Start-Us", t_start_us))
+        actual_end_us = int(resp.headers.get("X-Actual-End-Us", t_end_us))
+        noise_floor_raw = resp.headers.get("X-Noise-Floor-Rms")
+        noise_floor_rms = float(noise_floor_raw) if noise_floor_raw is not None else None
+        log.info(
+            "direct pull %s (%s) — %.2fs, %d bytes",
+            node_id, purpose, time.monotonic() - pull_started, len(resp.content),
         )
-
-    actual_start_us = int(resp.headers.get("X-Actual-Start-Us", t_start_us))
-    actual_end_us = int(resp.headers.get("X-Actual-End-Us", t_end_us))
-    noise_floor_raw = resp.headers.get("X-Noise-Floor-Rms")
-    noise_floor_rms = float(noise_floor_raw) if noise_floor_raw is not None else None
-    return resp.content, actual_start_us, actual_end_us, noise_floor_rms
+        return resp.content, actual_start_us, actual_end_us, noise_floor_rms
+    finally:
+        remaining = _direct_pull_in_flight.get(node_id, 1) - 1
+        if remaining <= 0:
+            _direct_pull_in_flight.pop(node_id, None)
+        else:
+            _direct_pull_in_flight[node_id] = remaining
 
 
 async def _save_direct_pull_audio(
@@ -2271,7 +2315,7 @@ async def _plan_tdoa_attempt_inner(
         # terminal on the first attempt.
         try:
             wav_bytes, actual_start_us, actual_end_us, noise_floor_rms = await _fetch_audio_direct(
-                nid, node_pull_start_us, node_pull_end_us,
+                nid, node_pull_start_us, node_pull_end_us, purpose="tdoa_corroboration",
             )
         except HTTPException as exc:
             # 404/503 are the node's own response (it heard the request and
