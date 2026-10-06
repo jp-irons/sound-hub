@@ -63,8 +63,10 @@ export default function NodeCard({ node, selected, onSelect }) {
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card-hover)' }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-card)' }}
     >
-      {/* Row 1: hostname + anchor indicators + status dot */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+      {/* Row 1: hostname + anchor indicators + status dot. flexWrap so a
+          node carrying every badge (BROKER won't, but SELF-TRIGGER +
+          SENTINEL both can) doesn't force an overflow at narrow widths. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
         <div className={`status-dot ${node.status}`} />
         {node.ipAddress ? (
           <a
@@ -100,6 +102,25 @@ export default function NodeCard({ node, selected, onSelect }) {
             }}
           >SELF-TRIGGER {node.audio.selfTrigger ? 'ON' : 'OFF'}</span>
         )}
+        {/* Hub-side-only flag (SENTINEL-MODE-PLAN.md Track B2/C1b) —
+            independent of SELF-TRIGGER above by design (see the plan's
+            four-combination table), so both are shown side by side rather
+            than collapsed into one role label — scanning the list for
+            "which nodes are sentinels" and "which are self-triggering" are
+            two different questions. Same always-both-states, neutral
+            treatment as SELF-TRIGGER: on vs off isn't good vs bad here
+            either. node.sentinel is always a plain boolean (DB column,
+            never absent), so this renders for every node unconditionally,
+            same as SELF-TRIGGER's own `!= null` check effectively does. */}
+        <span
+          title={node.sentinel
+            ? 'Sentinel is on — hub continuously pulls and analyzes audio from this node'
+            : 'Sentinel is off — hub only pulls from this node on demand (TDOA corroboration, manual sample)'}
+          style={{
+            fontSize: 10, color: 'var(--text-primary)',
+            background: 'var(--border)', padding: '1px 5px', borderRadius: 3, fontWeight: 700,
+          }}
+        >SENTINEL {node.sentinel ? 'ON' : 'OFF'}</span>
       </div>
 
       {/* Row 2: clock accuracy + RSSI */}
