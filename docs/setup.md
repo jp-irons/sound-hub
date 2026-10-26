@@ -310,14 +310,74 @@ sudo cloudflared service install
 sudo systemctl enable --now cloudflared
 ```
 
+`service install` writes three units to `/etc/systemd/system/`:
+
+| Unit | Purpose |
+|------|---------|
+| `cloudflared.service` | The tunnel. Runs with `--no-autoupdate`; updates are handled by the timer below instead. |
+| `cloudflared-update.service` | Oneshot: runs `cloudflared update`; on exit code 11 (updated) restarts `cloudflared`. |
+| `cloudflared-update.timer` | Fires `cloudflared-update.service` daily. |
+
+### Step 8 — Enable automatic updates
+
+`service install` *starts* the update timer but does not *enable* it, so it stops running after the first reboot and cloudflared silently falls behind. Enable it, and make it catch up on runs missed while the VM was off:
+
+```bash
+sudo systemctl enable --now cloudflared-update.timer
+
+sudo mkdir -p /etc/systemd/system/cloudflared-update.timer.d
+sudo tee /etc/systemd/system/cloudflared-update.timer.d/override.conf >/dev/null <<'EOF'
+[Timer]
+Persistent=true
+RandomizedDelaySec=1h
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart cloudflared-update.timer
+```
+
+Do not use `--no-update-service` with `service install` — it skips creating the update units.
+
 ### Verification
 
 ```bash
 sudo systemctl status cloudflared
 sudo journalctl -u cloudflared -n 50
+systemctl list-timers cloudflared-update.timer    # NEXT should be within 24h
+systemctl is-enabled cloudflared-update.timer     # enabled
 ```
 
 Open `https://soundhub.yourdomain.com` — the login page should appear over HTTPS.
+
+### Updating cloudflared
+
+With Step 8 in place, updates are automatic. To update immediately, or to check the result of the last automatic run:
+
+```bash
+cloudflared --version
+sudo systemctl start cloudflared-update.service   # runs update + restart if needed
+sudo journalctl -u cloudflared-update -n 20       # result of last update run
+cloudflared --version
+```
+
+**Existing installs where the update units are missing** (`systemctl cat cloudflared-update.timer` reports "No files found" — e.g. installed by an older cloudflared or with `--no-update-service`): reinstall the service. The tunnel config and credentials in `/etc/cloudflared/` are left untouched.
+
+```bash
+sudo cloudflared service uninstall
+sudo cloudflared service install
+```
+
+Then complete Step 8.
+
+**Manual update** (fallback if `cloudflared update` fails):
+
+```bash
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    -o /tmp/cloudflared
+sudo install /tmp/cloudflared /usr/local/bin/cloudflared
+sudo systemctl restart cloudflared
+```
+
+The Cloudflare dashboard (Zero Trust → Networks → Tunnels) shows the connector version and flags outdated connectors.
 
 ### Notes
 
